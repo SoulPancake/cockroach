@@ -698,6 +698,17 @@ func (sr *systemTableRow) WithSentinel(columns ...string) *systemTableRow {
 	return sr
 }
 
+// Delete marks any matched rows as deleted. When loading system table
+// values, this will cause the corresponding row to not be loaded.
+func (sr *systemTableRow) Delete() *systemTableRow {
+	if sr.skip() {
+		return sr
+	}
+
+	sr.values = nil
+	return sr
+}
+
 // Values must be called when all column manipulations have been
 // made. It returns the final set of values to be used for the system
 // table row, and any error found along the way.
@@ -804,10 +815,23 @@ func (sc *systemTableContents) commentsHandler(
 		Values()
 }
 
+// tenantSettingsHandler deletes a `version` key from the
+// system.tenant_settings table, if any. This row is not restored as
+// of 24.2+ so it shouldn't be validated after restore.
+func (sc *systemTableContents) tenantSettingsHandler(
+	values []interface{}, columns []string,
+) ([]interface{}, error) {
+	return newSystemTableRow(sc.table, values, columns).
+		Matches("name", "version").
+		Delete().
+		Values()
+}
+
 // handleSpecialCases exists because there are still cases where we
 // can't assume that the contents of a system table are the same after
 // a RESTORE. Columns that cannot be expected to be the same are
-// replaced with a sentinel value in this function.
+// replaced with a sentinel value in this function. If a row shouldn't
+// be considered when validating a restore, `nil` is returned.
 func (sc *systemTableContents) handleSpecialCases(
 	l *logger.Logger, row []interface{}, columns []string,
 ) ([]interface{}, error) {
@@ -818,6 +842,8 @@ func (sc *systemTableContents) handleSpecialCases(
 		return sc.scheduledJobsHandler(row, columns)
 	case "system.comments":
 		return sc.commentsHandler(row, columns)
+	case "system.tenant_settings":
+		return sc.tenantSettingsHandler(row, columns)
 	default:
 		return row, nil
 	}
@@ -918,6 +944,10 @@ func (sc *systemTableContents) Load(
 		processedRow, err := sc.handleSpecialCases(l, opaqueRow, loadColumns)
 		if err != nil {
 			return fmt.Errorf("error processing row %v: %w", opaqueRow, err)
+		}
+
+		if processedRow == nil {
+			continue
 		}
 
 		encodedRow, err := json.Marshal(processedRow)
@@ -2544,13 +2574,11 @@ func registerBackupMixedVersion(r registry.Registry) {
 		EncryptionSupport: registry.EncryptionMetamorphic,
 		RequiresLicense:   true,
 		NativeLibs:        registry.LibGEOS,
-		CompatibleClouds:  registry.AllExceptAWS,
-		Suites:            registry.Suites(registry.Nightly),
+		// Uses gs://cockroach-fixtures-us-east1. See:
+		// https://github.com/cockroachdb/cockroach/issues/105968
+		CompatibleClouds: registry.Clouds(spec.GCE, spec.Local),
+		Suites:           registry.Suites(registry.Nightly),
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-			if c.Cloud() != spec.GCE && !c.IsLocal() {
-				t.Skip("uses gs://cockroachdb-backup-testing-long-ttl; see https://github.com/cockroachdb/cockroach/issues/105968")
-			}
-
 			roachNodes := c.Range(1, c.Spec().NodeCount-1)
 			workloadNode := c.Node(c.Spec().NodeCount)
 			mvt := mixedversion.NewTest(
