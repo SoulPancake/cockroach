@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import React from "react";
 import Helmet from "react-helmet";
@@ -14,9 +9,6 @@ import { connect } from "react-redux";
 import { RouteComponentProps, withRouter } from "react-router-dom";
 
 import ErrorCircle from "assets/error-circle.svg";
-import { doLogin, LoginAPIState } from "src/redux/login";
-import { AdminUIState, AppDispatch } from "src/redux/state";
-import * as docsURL from "src/util/docs";
 import {
   CockroachLabsLockupIcon,
   Button,
@@ -25,6 +17,9 @@ import {
   Text,
   TextTypes,
 } from "src/components";
+import { doLogin, LoginAPIState } from "src/redux/login";
+import { AdminUIState, AppDispatch } from "src/redux/state";
+import * as docsURL from "src/util/docs";
 import {
   OIDCGenerateJWTAuthTokenConnected,
   OIDCLoginConnected,

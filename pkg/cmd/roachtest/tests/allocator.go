@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -21,6 +16,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/clusterstats"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/task"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
@@ -38,7 +35,7 @@ const allocatorStableSeconds = 120
 func registerAllocator(r registry.Registry) {
 	runAllocator := func(ctx context.Context, t test.Test, c cluster.Cluster, start int, maxStdDev float64) {
 		// Put away one node to be the stats collector.
-		nodes := c.Spec().NodeCount - 1
+		nodes := len(c.CRDBNodes())
 
 		// Don't start scheduled backups in this perf sensitive test that reports to roachperf
 		startOpts := option.NewStartOpts(option.NoBackupSchedule)
@@ -61,11 +58,9 @@ func registerAllocator(r registry.Registry) {
 		m.Wait()
 
 		// Setup the prometheus instance and client.
-		clusNodes := c.Range(1, nodes)
-		promNode := c.Node(c.Spec().NodeCount)
 		cfg := (&prometheus.Config{}).
-			WithCluster(clusNodes.InstallNodes()).
-			WithPrometheusNode(promNode.InstallNodes()[0])
+			WithCluster(c.CRDBNodes().InstallNodes()).
+			WithPrometheusNode(c.WorkloadNode().InstallNodes()[0])
 
 		err := c.StartGrafana(ctx, t.L(), cfg)
 		require.NoError(t, err)
@@ -87,26 +82,18 @@ func registerAllocator(r registry.Registry) {
 		c.Start(ctx, t.L(), startOpts, install.MakeClusterSettings(), c.Range(start+1, nodes))
 		c.Run(ctx, option.WithNodes(c.Node(1)), "./cockroach workload init kv --drop {pgurl:1}")
 		for node := 1; node <= nodes; node++ {
-			node := node
-			// TODO(dan): Ideally, the test would fail if this queryload failed,
-			// but we can't put it in monitor as-is because the test deadlocks.
-			go func() {
+			t.Go(func(taskCtx context.Context, _ *logger.Logger) error {
 				cmd := fmt.Sprintf("./cockroach workload run kv --tolerate-errors --min-block-bytes=8 --max-block-bytes=127 {pgurl%s}", c.Node(node))
-				l, err := t.L().ChildLogger(fmt.Sprintf(`kv-%d`, node))
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer l.Close()
-				_ = c.RunE(ctx, option.WithNodes(c.Node(node)), cmd)
-			}()
+				return c.RunE(taskCtx, option.WithNodes(c.Node(node)), cmd)
+			}, task.Name(fmt.Sprintf(`kv-%d`, node)))
 		}
 
 		// Wait for 3x replication, we record the time taken to achieve this.
 		var replicateTime time.Time
 		startTime := timeutil.Now()
-		m = c.NewMonitor(ctx, clusNodes)
+		m = c.NewMonitor(ctx, c.CRDBNodes())
 		m.Go(func(ctx context.Context) error {
-			err := WaitFor3XReplication(ctx, t, t.L(), db)
+			err := roachtestutil.WaitFor3XReplication(ctx, t.L(), db)
 			replicateTime = timeutil.Now()
 			return err
 		})
@@ -114,7 +101,7 @@ func registerAllocator(r registry.Registry) {
 
 		// Wait for replica count balance, this occurs only following
 		// up-replication finishing.
-		m = c.NewMonitor(ctx, clusNodes)
+		m = c.NewMonitor(ctx, c.CRDBNodes())
 		m.Go(func(ctx context.Context) error {
 			t.Status("waiting for reblance")
 			err := waitForRebalance(ctx, t.L(), db, maxStdDev, allocatorStableSeconds)
@@ -149,7 +136,7 @@ func registerAllocator(r registry.Registry) {
 		Name:             `replicate/up/1to3`,
 		Owner:            registry.OwnerKV,
 		Benchmark:        true,
-		Cluster:          r.MakeClusterSpec(4),
+		Cluster:          r.MakeClusterSpec(4, spec.WorkloadNode()),
 		Leases:           registry.MetamorphicLeases,
 		CompatibleClouds: registry.AllExceptAWS,
 		Suites:           registry.Suites(registry.Nightly),
@@ -161,7 +148,7 @@ func registerAllocator(r registry.Registry) {
 		Name:             `replicate/rebalance/3to5`,
 		Owner:            registry.OwnerKV,
 		Benchmark:        true,
-		Cluster:          r.MakeClusterSpec(6),
+		Cluster:          r.MakeClusterSpec(6, spec.WorkloadNode()),
 		Leases:           registry.MetamorphicLeases,
 		CompatibleClouds: registry.AllExceptAWS,
 		Suites:           registry.Suites(registry.Nightly),
@@ -176,7 +163,7 @@ func registerAllocator(r registry.Registry) {
 		// Allow a longer running time to account for runs that use a
 		// cockroach build with runtime assertions enabled.
 		Timeout:          30 * time.Minute,
-		Cluster:          r.MakeClusterSpec(9, spec.CPU(1)),
+		Cluster:          r.MakeClusterSpec(9, spec.CPU(1), spec.WorkloadNode(), spec.WorkloadNodeCPU(1)),
 		Leases:           registry.MetamorphicLeases,
 		CompatibleClouds: registry.AllExceptAWS,
 		Suites:           registry.Suites(registry.Nightly),

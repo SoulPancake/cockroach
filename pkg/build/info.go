@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package build
 
@@ -22,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/version"
+	"github.com/cockroachdb/redact"
 )
 
 // TimeFormat is the reference format for build.Time. Make sure it stays in sync
@@ -114,7 +110,12 @@ func BinaryVersion() string {
 // N.B. new public-facing doc URLs are expected to be up beginning with the "alpha.1" prerelease. Otherwise, "dev" will
 // cause the url mapper to redirect to the latest stable release.
 func VersionForURLs() string {
+	// Prerelease versions >= "alpha.1"
 	if parsedVersionTxt.PreRelease() >= "alpha.1" {
+		return fmt.Sprintf("v%d.%d", parsedVersionTxt.Major(), parsedVersionTxt.Minor())
+	}
+	// Production release versions
+	if parsedVersionTxt.PreRelease() == "" {
 		return fmt.Sprintf("v%d.%d", parsedVersionTxt.Major(), parsedVersionTxt.Minor())
 	}
 	return "dev"
@@ -135,13 +136,18 @@ func init() {
 }
 
 // Short returns a pretty printed build and version summary.
-func (b Info) Short() string {
+func (b Info) Short() redact.RedactableString {
 	plat := b.Platform
 	if b.CgoTargetTriple != "" {
 		plat = b.CgoTargetTriple
 	}
-	return fmt.Sprintf("CockroachDB %s %s (%s, built %s, %s)",
-		b.Distribution, b.Tag, plat, b.Time, b.GoVersion)
+	return redact.Sprintf("CockroachDB %s %s (%s, built %s, %s)",
+		redact.SafeString(b.Distribution),
+		redact.SafeString(b.Tag),
+		redact.SafeString(plat),
+		redact.SafeString(b.Time),
+		redact.SafeString(b.GoVersion),
+	)
 }
 
 // Long returns a pretty printed build summary

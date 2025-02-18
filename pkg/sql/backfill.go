@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -44,8 +39,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/idxtype"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -82,7 +79,7 @@ var indexBackfillBatchSize = settings.RegisterIntSetting(
 	settings.ApplicationLevel,
 	"bulkio.index_backfill.batch_size",
 	"the number of rows for which we construct index entries in a single batch",
-	50000,
+	30000,
 	settings.NonNegativeInt, /* validateFn */
 )
 
@@ -756,7 +753,7 @@ func (sc *SchemaChanger) validateConstraints(
 	if err := sc.fixedTimestampTxn(ctx, readAsOf, func(
 		ctx context.Context, txn descs.Txn,
 	) error {
-		tableDesc, err = txn.Descriptors().ByID(txn.KV()).WithoutNonPublic().Get().Table(ctx, sc.descID)
+		tableDesc, err = txn.Descriptors().ByIDWithoutLeased(txn.KV()).WithoutNonPublic().Get().Table(ctx, sc.descID)
 		return err
 	}); err != nil {
 		return err
@@ -1146,7 +1143,7 @@ func (sc *SchemaChanger) distIndexBackfill(
 				if err := sc.job.WithTxn(txn).FractionProgressed(
 					ctx, jobs.FractionUpdater(fractionCompleted),
 				); err != nil {
-					return jobs.SimplifyInvalidStatusError(err)
+					return jobs.SimplifyInvalidStateError(err)
 				}
 			}
 			return nil
@@ -1397,7 +1394,7 @@ func (sc *SchemaChanger) updateJobRunningStatus(
 ) (tableDesc catalog.TableDescriptor, err error) {
 	err = DescsTxn(ctx, sc.execCfg, func(ctx context.Context, txn isql.Txn, col *descs.Collection) (err error) {
 		// Read table descriptor without holding a lease.
-		tableDesc, err = col.ByID(txn.KV()).Get().Table(ctx, sc.descID)
+		tableDesc, err = col.ByIDWithoutLeased(txn.KV()).Get().Table(ctx, sc.descID)
 		if err != nil {
 			return err
 		}
@@ -1452,7 +1449,7 @@ func (sc *SchemaChanger) validateIndexes(ctx context.Context) error {
 	if err := sc.fixedTimestampTxn(ctx, readAsOf, func(
 		ctx context.Context, txn descs.Txn,
 	) (err error) {
-		tableDesc, err = txn.Descriptors().ByID(txn.KV()).WithoutNonPublic().Get().Table(ctx, sc.descID)
+		tableDesc, err = txn.Descriptors().ByIDWithoutLeased(txn.KV()).WithoutNonPublic().Get().Table(ctx, sc.descID)
 		return err
 	}); err != nil {
 		return err
@@ -1470,10 +1467,15 @@ func (sc *SchemaChanger) validateIndexes(ctx context.Context) error {
 			continue
 		}
 		switch idx.GetType() {
-		case descpb.IndexDescriptor_FORWARD:
+		case idxtype.FORWARD:
 			forwardIndexes = append(forwardIndexes, idx)
-		case descpb.IndexDescriptor_INVERTED:
+		case idxtype.INVERTED:
 			invertedIndexes = append(invertedIndexes, idx)
+		case idxtype.VECTOR:
+			// TODO(drewk): consider whether we can perform useful validation for
+			// vector indexes.
+		default:
+			return errors.AssertionFailedf("unknown index type %d", idx.GetType())
 		}
 	}
 	if len(forwardIndexes) == 0 && len(invertedIndexes) == 0 {
@@ -1588,7 +1590,7 @@ func ValidateConstraint(
 			)
 		case catconstants.ConstraintTypeFK:
 			fk := constraint.AsForeignKey()
-			targetTable, err := txn.Descriptors().ByID(txn.KV()).Get().Table(ctx, fk.GetReferencedTableID())
+			targetTable, err := txn.Descriptors().ByIDWithoutLeased(txn.KV()).Get().Table(ctx, fk.GetReferencedTableID())
 			if err != nil {
 				return err
 			}
@@ -1796,9 +1798,10 @@ func countExpectedRowsForInvertedIndex(
 	if col.IsExpressionIndexColumn() {
 		colNameOrExpr = col.GetComputeExpr()
 	} else {
-		// Wrap the column name in double-quotes because it might
-		// contain special characters, like "-".
-		colNameOrExpr = fmt.Sprintf("%q", col.ColName())
+		// Format the column name so that it can be parsed if it has special
+		// characters, like "-" or a newline.
+		name := col.ColName()
+		colNameOrExpr = tree.AsStringWithFlags(&name, tree.FmtParsable)
 	}
 
 	var expectedCount int64
@@ -2459,7 +2462,7 @@ func runSchemaChangesInTxn(
 				// Don't need to do anything here, as the call to MakeMutationComplete
 				// will perform the steps for this operation.
 			} else if m.AsComputedColumnSwap() != nil {
-				return AlterColTypeInTxnNotSupportedErr
+				return sqlerrors.NewAlterColTypeInTxnNotSupportedErr()
 			} else if col := m.AsColumn(); col != nil {
 				if !doneColumnBackfill && catalog.ColumnNeedsBackfill(col) {
 					if err := columnBackfillInTxn(
@@ -2626,6 +2629,18 @@ func runSchemaChangesInTxn(
 	// update the table descriptor directly.
 	for _, c := range constraintAdditionMutations {
 		if ck := c.AsCheck(); ck != nil {
+			if ck.IsNotNullColumnConstraint() {
+				// Remove the  check constraint we added.
+				for i := range tableDesc.Checks {
+					if tableDesc.Checks[i].ConstraintID == ck.GetConstraintID() {
+						tableDesc.Checks = append(tableDesc.Checks[:i], tableDesc.Checks[i+1:]...)
+					}
+					colID := ck.GetReferencedColumnID(0)
+					col := catalog.FindColumnByID(tableDesc, colID)
+					col.ColumnDesc().Nullable = false
+					continue
+				}
+			}
 			tableDesc.Checks = append(tableDesc.Checks, ck.CheckDesc())
 		} else if fk := c.AsForeignKey(); fk != nil {
 			var referencedTableDesc *tabledesc.Mutable
@@ -2736,7 +2751,7 @@ func getTargetTablesAndFk(
 	if fk == nil {
 		return nil, nil, nil, errors.AssertionFailedf("foreign key %s does not exist", fkName)
 	}
-	targetTable, err = txn.Descriptors().ByID(txn.KV()).Get().Table(ctx, fk.ReferencedTableID)
+	targetTable, err = txn.Descriptors().ByIDWithoutLeased(txn.KV()).Get().Table(ctx, fk.ReferencedTableID)
 	if err != nil {
 		return nil, nil, nil, err
 	}

@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -44,7 +39,6 @@ func registerCDCFiltering(r registry.Registry) {
 			Cluster:          r.MakeClusterSpec(3),
 			CompatibleClouds: registry.AllClouds,
 			Suites:           registry.Suites(registry.Nightly),
-			RequiresLicense:  true,
 			Run:              runCDCSessionFiltering(ignoreFiltering),
 		})
 		r.Add(registry.TestSpec{
@@ -53,7 +47,6 @@ func registerCDCFiltering(r registry.Registry) {
 			Cluster:          r.MakeClusterSpec(3),
 			CompatibleClouds: registry.AllClouds,
 			Suites:           registry.Suites(registry.Nightly),
-			RequiresLicense:  true,
 			Run:              runCDCTTLFiltering(ttlFilteringClusterSetting, ignoreFiltering),
 		})
 		r.Add(registry.TestSpec{
@@ -62,7 +55,6 @@ func registerCDCFiltering(r registry.Registry) {
 			Cluster:          r.MakeClusterSpec(3),
 			CompatibleClouds: registry.AllClouds,
 			Suites:           registry.Suites(registry.Nightly),
-			RequiresLicense:  true,
 			Run:              runCDCTTLFiltering(ttlFilteringTableStorageParam, ignoreFiltering),
 		})
 	}
@@ -407,8 +399,8 @@ func checkCDCEvents[S any](
 	t.L().Printf("waiting for changefeed watermark to reach current time (%s)",
 		now.Format(time.RFC3339))
 	_, err := waitForChangefeed(ctx, conn, jobID, t.L(), func(info changefeedInfo) (bool, error) {
-		switch jobs.Status(info.status) {
-		case jobs.StatusPending, jobs.StatusRunning:
+		switch jobs.State(info.status) {
+		case jobs.StatePending, jobs.StateRunning:
 			return info.GetHighWater().After(now), nil
 		default:
 			return false, errors.Errorf("unexpected changefeed status %s", info.status)

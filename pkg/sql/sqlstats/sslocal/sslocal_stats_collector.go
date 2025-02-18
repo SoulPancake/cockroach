@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sslocal
 
@@ -16,7 +11,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/appstatspb"
-	"github.com/cockroachdb/cockroach/pkg/sql/execstats"
+	"github.com/cockroachdb/cockroach/pkg/sql/clusterunique"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessionphase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
@@ -25,16 +20,33 @@ import (
 	"github.com/cockroachdb/redact"
 )
 
+type bufferedStmtStats struct {
+	key   appstatspb.StatementStatisticsKey
+	value sqlstats.RecordedStmtStats
+}
+
 // StatsCollector is used to collect statistics for transactions and
-// statements for the entire lifetime of a session.
+// statements for the entire lifetime of a session. It must be closed
+// with Close() when the session is done.
 type StatsCollector struct {
 
-	// currentTransactionStatementStats contains the current transaction's statement
+	// stmtBuf contains the current transaction's statement
 	// statistics. They will be flushed to flushTarget when the transaction is done
 	// so that we can include the transaction fingerprint ID as part of the
-	// statement's key. This container is local per stats collector and
-	// is cleared for reuse after every transaction.
-	currentTransactionStatementStats sqlstats.ApplicationStats
+	// statement's key. This buffer is cleared for reuse after every transaction.
+	stmtBuf []*bufferedStmtStats
+
+	// If writeDirectlyToFlushTarget is set to true, the stmtBuf
+	// will be written directly to the flushTarget instead of being buffered to be written
+	// at the end of the transaction.
+	// See #124935 for more details. When we have a statement from an outer txn,
+	// the executor owning the stats collector is not responsible for
+	// starting or committing the transaction. Since the statements
+	// are merged into flushTarget on EndTransaction, in this case the
+	// container would never be merged into the flushTarget. Instead
+	// we'll write directly to the flushTarget when we're collecting
+	// stats for a conn exec belonging to an outer transaction.
+	writeDirectlyToFlushTarget bool
 
 	// stmtFingerprintID is the fingerprint ID of the current statement we are
 	// recording. Note that we don't observe sql stats for all statements (e.g. COMMIT).
@@ -42,15 +54,16 @@ type StatsCollector struct {
 	// this value will be 0.
 	stmtFingerprintID appstatspb.StmtFingerprintID
 
-	// Allows StatsCollector to send statement and transaction stats to the insights system.
-	insightsWriter insights.Writer
+	// Allows StatsCollector to send statement and transaction stats to the
+	// insights system. Set to nil to disable persistence of insights.
+	insightsWriter *insights.ConcurrentBufferIngester
 
 	// phaseTimes tracks session-level phase times.
-	phaseTimes *sessionphase.Times
+	phaseTimes sessionphase.Times
 
 	// previousPhaseTimes tracks the session-level phase times for the previous
 	// query. This enables the `SHOW LAST QUERY STATISTICS` observer statement.
-	previousPhaseTimes *sessionphase.Times
+	previousPhaseTimes sessionphase.Times
 
 	// sendInsights is true if we should send statement and transaction stats to
 	// the insights system for the current transaction. This value is reset for
@@ -64,7 +77,7 @@ type StatsCollector struct {
 	// This is the target where the statement stats are flushed to upon
 	// transaction completion. Note that these are the global stats for the
 	// application.
-	flushTarget sqlstats.ApplicationStats
+	flushTarget *ssmemstorage.Container
 
 	// uniqueServerCounts is a pointer to the statement and transaction
 	// fingerprint counters tracked per server.
@@ -77,37 +90,23 @@ type StatsCollector struct {
 // NewStatsCollector returns an instance of StatsCollector.
 func NewStatsCollector(
 	st *cluster.Settings,
-	appStats sqlstats.ApplicationStats,
-	insights insights.Writer,
+	appStats *ssmemstorage.Container,
+	insights *insights.ConcurrentBufferIngester,
 	phaseTime *sessionphase.Times,
 	uniqueServerCounts *ssmemstorage.SQLStatsAtomicCounters,
 	underOuterTxn bool,
 	knobs *sqlstats.TestingKnobs,
 ) *StatsCollector {
-	// See #124935 for more details. If underOuterTxn is true, the
-	// executor owning the stats collector is not responsible for
-	// starting or committing the transaction. Since the statements
-	// are merged into flushTarget on EndTransaction, in this case the
-	// container would never be merged into the flushTarget. Instead
-	// we'll write directly to the flushTarget when we're collecting
-	// stats for a conn exec belonging to an outer transaction.
-	currentTransactionStatementStats := appStats
-	if !underOuterTxn {
-		currentTransactionStatementStats = appStats.NewApplicationStatsWithInheritedOptions()
-	}
 	return &StatsCollector{
-		flushTarget:                      appStats,
-		currentTransactionStatementStats: currentTransactionStatementStats,
-		insightsWriter:                   insights,
-		phaseTimes:                       phaseTime.Clone(),
-		uniqueServerCounts:               uniqueServerCounts,
-		st:                               st,
-		knobs:                            knobs,
+		flushTarget:                appStats,
+		stmtBuf:                    make([]*bufferedStmtStats, 0, 1),
+		writeDirectlyToFlushTarget: underOuterTxn,
+		insightsWriter:             insights,
+		phaseTimes:                 *phaseTime,
+		uniqueServerCounts:         uniqueServerCounts,
+		st:                         st,
+		knobs:                      knobs,
 	}
-}
-
-func (s *StatsCollector) SetStatementFingerprintID(fingerprintID appstatspb.StmtFingerprintID) {
-	s.stmtFingerprintID = fingerprintID
 }
 
 // StatementFingerprintID returns the fingerprint ID for the current statement.
@@ -118,34 +117,31 @@ func (s *StatsCollector) StatementFingerprintID() appstatspb.StmtFingerprintID {
 // PhaseTimes returns the sessionphase.Times that this StatsCollector is
 // currently tracking.
 func (s *StatsCollector) PhaseTimes() *sessionphase.Times {
-	return s.phaseTimes
+	return &s.phaseTimes
 }
 
 // PreviousPhaseTimes returns the sessionphase.Times that this StatsCollector
 // was previously tracking before being Reset.
 func (s *StatsCollector) PreviousPhaseTimes() *sessionphase.Times {
-	return s.previousPhaseTimes
+	return &s.previousPhaseTimes
 }
 
 // Reset resets the StatsCollector with a new flushTarget and a new copy
 // of the sessionphase.Times.
-func (s *StatsCollector) Reset(appStats sqlstats.ApplicationStats, phaseTime *sessionphase.Times) {
-	previousPhaseTime := s.phaseTimes
+func (s *StatsCollector) Reset(appStats *ssmemstorage.Container, phaseTime *sessionphase.Times) {
 	s.flushTarget = appStats
-
-	s.previousPhaseTimes = previousPhaseTime
-	s.phaseTimes = phaseTime.Clone()
 	s.stmtFingerprintID = 0
+	s.previousPhaseTimes = s.phaseTimes
+	s.phaseTimes = *phaseTime
 }
 
-// Free frees any local memory used by the stats collector.
-func (s *StatsCollector) Free(ctx context.Context) {
-	// For stats collectors for executors with outer transactions,
-	// the currentTransactionStatementStats is the flush target.
-	// We should make sure we're never freeing the flush target,
-	// since that container exists beyond the stats collector.
-	if s.currentTransactionStatementStats != s.flushTarget {
-		s.currentTransactionStatementStats.Free(ctx)
+// Close frees any local memory used by the stats collector and
+// any memory allocated by underlying sql stats systems for the session
+// that owns this stats collector.
+func (s *StatsCollector) Close(ctx context.Context, sessionID clusterunique.ID) {
+	s.stmtBuf = nil
+	if s.insightsWriter != nil {
+		s.insightsWriter.ClearSession(sessionID)
 	}
 }
 
@@ -160,7 +156,9 @@ func (s *StatsCollector) StartTransaction() {
 // the transaction fingerprint ID field of all the statement statistics for that
 // txn.
 func (s *StatsCollector) EndTransaction(
-	ctx context.Context, transactionFingerprintID appstatspb.TransactionFingerprintID,
+	ctx context.Context,
+	transactionFingerprintID appstatspb.TransactionFingerprintID,
+	implicitTxn bool,
 ) (discardedStats int64) {
 	// We possibly ignore the transactionFingerprintID, for situations where
 	// grouping by it would otherwise result in collecting higher-cardinality
@@ -170,42 +168,42 @@ func (s *StatsCollector) EndTransaction(
 		transactionFingerprintID = appstatspb.InvalidTransactionFingerprintID
 	}
 
-	discardedStats += int64(s.flushTarget.MergeApplicationStatementStats(
-		ctx, s.currentTransactionStatementStats, transactionFingerprintID,
-	))
+	for _, stmt := range s.stmtBuf {
+		stmt.key.TransactionFingerprintID = transactionFingerprintID
+		stmt.key.ImplicitTxn = implicitTxn
+		if err := s.flushTarget.RecordStatement(ctx, stmt.key, stmt.value); err != nil {
+			discardedStats++
+		}
+	}
 
 	// Avoid taking locks if no stats are discarded.
 	if discardedStats > 0 {
 		s.flushTarget.MaybeLogDiscardMessage(ctx)
 	}
 
-	s.currentTransactionStatementStats.Clear(ctx)
+	s.stmtBuf = make([]*bufferedStmtStats, 0, len(s.stmtBuf)/2)
 
 	return discardedStats
 }
 
-// ShouldSample returns two booleans, the first one indicates whether we
-// ever sampled (i.e. collected statistics for) the given combination of
-// statement metadata, and the second one whether we should save the logical
-// plan description for it.
-func (s *StatsCollector) ShouldSample(
+// ShouldSampleNewStatement returns true if the statement is a new statement
+// and we should sample its execution statistics.
+func (s *StatsCollector) ShouldSampleNewStatement(
 	fingerprint string, implicitTxn bool, database string,
-) (previouslySampled bool, savePlanForStats bool) {
-
-	return s.flushTarget.ShouldSample(fingerprint, implicitTxn, database)
+) bool {
+	if s.uniqueServerCounts.GetStatementCount() >= s.uniqueServerCounts.UniqueStmtFingerprintLimit.Get(&s.st.SV) {
+		// The container is full. Since we can't insert more statements
+		// into the sql stats container, there's no point in sampling this
+		// statement.
+		return false
+	}
+	return s.flushTarget.TrySetStatementSampled(fingerprint, implicitTxn, database)
 }
 
-// UpgradeImplicitTxn informs the StatsCollector that the current txn has been
-// upgraded to an explicit transaction, thus all previously recorded statements
-// should be updated accordingly.
-func (s *StatsCollector) UpgradeImplicitTxn(ctx context.Context) error {
-	err := s.currentTransactionStatementStats.IterateStatementStats(ctx, sqlstats.IteratorOptions{},
-		func(_ context.Context, statistics *appstatspb.CollectedStatementStatistics) error {
-			statistics.Key.ImplicitTxn = false
-			return nil
-		})
-
-	return err
+func (s *StatsCollector) SetStatementSampled(
+	fingerprint string, implicitTxn bool, database string,
+) {
+	s.flushTarget.TrySetStatementSampled(fingerprint, implicitTxn, database)
 }
 
 func getInsightStatus(statementError error) insights.Statement_Status {
@@ -271,9 +269,7 @@ func (s *StatsCollector) ObserveStatement(
 		ErrorCode:            errorCode,
 		ErrorMsg:             errorMsg,
 	}
-	if s.knobs != nil && s.knobs.InsightsWriterStmtInterceptor != nil {
-		s.knobs.InsightsWriterStmtInterceptor(value.SessionID, &insight)
-	} else {
+	if s.insightsWriter != nil {
 		s.insightsWriter.ObserveStatement(value.SessionID, &insight)
 	}
 }
@@ -330,24 +326,29 @@ func (s *StatsCollector) ObserveTransaction(
 		LastErrorMsg:    errorMsg,
 		Status:          status,
 	}
-	if s.knobs != nil && s.knobs.InsightsWriterTxnInterceptor != nil {
-		s.knobs.InsightsWriterTxnInterceptor(ctx, value.SessionID, &insight)
-	} else {
+	if s.insightsWriter != nil {
 		s.insightsWriter.ObserveTransaction(value.SessionID, &insight)
 	}
-}
-
-// StatementsContainerFull returns true if the current statement
-// container is at capacity.
-func (s *StatsCollector) StatementsContainerFull() bool {
-	return s.uniqueServerCounts.GetStatementCount() >= s.uniqueServerCounts.UniqueStmtFingerprintLimit.Get(&s.st.SV)
 }
 
 // RecordStatement records the statistics of a statement.
 func (s *StatsCollector) RecordStatement(
 	ctx context.Context, key appstatspb.StatementStatisticsKey, value sqlstats.RecordedStmtStats,
 ) (appstatspb.StmtFingerprintID, error) {
-	return s.currentTransactionStatementStats.RecordStatement(ctx, key, value)
+	s.stmtFingerprintID = appstatspb.ConstructStatementFingerprintID(key.Query, key.ImplicitTxn, key.Database)
+	value.FingerprintID = s.stmtFingerprintID
+	if s.writeDirectlyToFlushTarget {
+		err := s.flushTarget.RecordStatement(ctx, key, value)
+		return s.stmtFingerprintID, err
+	}
+	s.stmtFingerprintID = appstatspb.ConstructStatementFingerprintID(key.Query, key.ImplicitTxn, key.Database)
+	// TODO(xinhaoz): This isn't the best place to set this, but we'll clean this up
+	// when we refactor the stats collection code to send the stats to an ingester.
+	s.stmtBuf = append(s.stmtBuf, &bufferedStmtStats{
+		key:   key,
+		value: value,
+	})
+	return s.stmtFingerprintID, nil
 }
 
 // RecordTransaction records the statistics of a transaction.
@@ -355,13 +356,18 @@ func (s *StatsCollector) RecordStatement(
 func (s *StatsCollector) RecordTransaction(
 	ctx context.Context, key appstatspb.TransactionFingerprintID, value sqlstats.RecordedTxnStats,
 ) error {
+	// TODO(117690): Unify StmtStatsEnable and TxnStatsEnable into a single cluster setting.
+	if !sqlstats.TxnStatsEnable.Get(&s.st.SV) {
+		return nil
+	}
+	// Do not collect transaction statistics if the stats collection latency
+	// threshold is set, since our transaction UI relies on having stats for every
+	// statement in the transaction.
+	t := sqlstats.StatsCollectionLatencyThreshold.Get(&s.st.SV)
+	if t > 0 {
+		return nil
+	}
 	return s.flushTarget.RecordTransaction(ctx, key, value)
-}
-
-func (s *StatsCollector) RecordStatementExecStats(
-	key appstatspb.StatementStatisticsKey, stats execstats.QueryLevelStats,
-) error {
-	return s.currentTransactionStatementStats.RecordStatementExecStats(key, stats)
 }
 
 func (s *StatsCollector) IterateStatementStats(

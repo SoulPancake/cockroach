@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colflow_test
 
@@ -79,7 +74,7 @@ func TestVectorizeInternalMemorySpaceError(t *testing.T) {
 					sources = append(sources, colexecutils.NewFixedNumTuplesNoInputOp(testAllocator, 0 /* numTuples */, nil /* opToInitialize */))
 				}
 				memMon := mon.NewMonitor(mon.Options{
-					Name:     "MemoryMonitor",
+					Name:     mon.MakeMonitorName("MemoryMonitor"),
 					Settings: st,
 				})
 				if success {
@@ -129,6 +124,8 @@ func TestVectorizeAllocatorSpaceError(t *testing.T) {
 	}
 	var monitorRegistry colexecargs.MonitorRegistry
 	defer monitorRegistry.Close(ctx)
+	var closerRegistry colexecargs.CloserRegistry
+	defer closerRegistry.Close(ctx)
 
 	oneInput := []execinfrapb.InputSyncSpec{
 		{ColumnTypes: []*types.T{types.Int}},
@@ -207,7 +204,7 @@ func TestVectorizeAllocatorSpaceError(t *testing.T) {
 					sources = append(sources, colexecop.NewRepeatableBatchSource(testAllocator, batch, typs))
 				}
 				memMon := mon.NewMonitor(mon.Options{
-					Name:     "MemoryMonitor",
+					Name:     mon.MakeMonitorName("MemoryMonitor"),
 					Settings: st,
 				})
 				flowCtx.Cfg.TestingKnobs = execinfra.TestingKnobs{}
@@ -233,6 +230,7 @@ func TestVectorizeAllocatorSpaceError(t *testing.T) {
 					StreamingMemAccount: &acc,
 					FDSemaphore:         colexecop.NewTestingSemaphore(256),
 					MonitorRegistry:     &monitorRegistry,
+					CloserRegistry:      &closerRegistry,
 				}
 				var (
 					result *colexecargs.NewColOperatorResult

@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package gc contains the logic to run scan a range for garbage and issue
 // GC requests to remove that garbage.
@@ -227,6 +222,7 @@ type Info struct {
 	// potentially necessary intent resolutions did not fail).
 	TransactionSpanGCAborted, TransactionSpanGCCommitted int
 	TransactionSpanGCStaging, TransactionSpanGCPending   int
+	TransactionSpanGCPrepared                            int
 	// AbortSpanTotal is the total number of transactions present in the AbortSpan.
 	AbortSpanTotal int
 	// AbortSpanConsidered is the number of AbortSpan entries old enough to be
@@ -1222,6 +1218,8 @@ func processLocalKeyRange(
 		switch txn.Status {
 		case roachpb.PENDING:
 			info.TransactionSpanGCPending++
+		case roachpb.PREPARED:
+			info.TransactionSpanGCPrepared++
 		case roachpb.STAGING:
 			info.TransactionSpanGCStaging++
 		case roachpb.ABORTED:

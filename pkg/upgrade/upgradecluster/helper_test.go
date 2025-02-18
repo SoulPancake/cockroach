@@ -1,19 +1,14 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package upgradecluster
 
 import (
 	"context"
-	"fmt"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -21,6 +16,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"google.golang.org/grpc"
 )
@@ -51,7 +47,13 @@ func TestHelperEveryNode(t *testing.T) {
 			Dialer:       NoopDialer{},
 		})
 		opCount := 0
-		err := h.UntilClusterStable(ctx, func() error {
+		err := h.UntilClusterStable(ctx, retry.Options{
+			// Speed up testing, run for at most 10 retries over a second.
+			InitialBackoff: 100 * time.Millisecond,
+			MaxBackoff:     100 * time.Millisecond,
+			Multiplier:     1.0,
+			MaxRetries:     10,
+		}, func() error {
 			return h.ForEveryNodeOrServer(ctx, "dummy-op", func(
 				context.Context, serverpb.MigrationClient,
 			) error {
@@ -84,7 +86,13 @@ func TestHelperEveryNode(t *testing.T) {
 			Dialer:       NoopDialer{},
 		})
 		opCount := 0
-		err := h.UntilClusterStable(ctx, func() error {
+		err := h.UntilClusterStable(ctx, retry.Options{
+			// Speed up testing, run for at most 10 retries over a second.
+			InitialBackoff: 100 * time.Millisecond,
+			MaxBackoff:     100 * time.Millisecond,
+			Multiplier:     1.0,
+			MaxRetries:     10,
+		}, func() error {
 			return h.ForEveryNodeOrServer(ctx, "dummy-op", func(
 				context.Context, serverpb.MigrationClient,
 			) error {
@@ -117,9 +125,16 @@ func TestHelperEveryNode(t *testing.T) {
 			NodeLiveness: tc,
 			Dialer:       NoopDialer{},
 		})
-		expRe := fmt.Sprintf("nodes n\\{%d\\} required, but unavailable", downedNode)
+		expRe := "cluster not stable, nodes: n\\{1,2,3\\}, unavailable: n\\{2\\}"
 		opCount := 0
-		if err := h.UntilClusterStable(ctx, func() error {
+
+		if err := h.UntilClusterStable(ctx, retry.Options{
+			// Speed up testing, run for at most 10 retries over a second.
+			InitialBackoff: 100 * time.Millisecond,
+			MaxBackoff:     100 * time.Millisecond,
+			Multiplier:     1.0,
+			MaxRetries:     10,
+		}, func() error {
 			return h.ForEveryNodeOrServer(ctx, "dummy-op", func(
 				context.Context, serverpb.MigrationClient,
 			) error {
@@ -137,7 +152,13 @@ func TestHelperEveryNode(t *testing.T) {
 		}
 
 		tc.RestartNode(downedNode)
-		if err := h.UntilClusterStable(ctx, func() error {
+		if err := h.UntilClusterStable(ctx, retry.Options{
+			// Speed up testing, run for at most 10 retries over a second.
+			InitialBackoff: 100 * time.Millisecond,
+			MaxBackoff:     100 * time.Millisecond,
+			Multiplier:     1.0,
+			MaxRetries:     10,
+		}, func() error {
 			return h.ForEveryNodeOrServer(ctx, "dummy-op", func(
 				context.Context, serverpb.MigrationClient,
 			) error {

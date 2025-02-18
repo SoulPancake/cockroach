@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 /**
  * MetricQuery Components
@@ -29,15 +24,18 @@
  * combine it with the result of a query to create some renderable output.
  */
 
-import React from "react";
-import Long from "long";
-import { History } from "history";
+// We use the `Metric` and `Axis` classes data containers, not for rendering.
+/* eslint react/require-render-return: "off" */
+
 import { AxisUnits, TimeScale } from "@cockroachlabs/cluster-ui";
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client-ccl";
+import { History } from "history";
+import Long from "long";
+import React from "react";
 
-import { TimeWindow } from "src/redux/timeScale";
 import { PayloadAction } from "src/interfaces/action";
 import * as protos from "src/js/protos";
+import { TimeWindow } from "src/redux/timeScale";
 
 import TimeSeriesQueryDerivative = protos.cockroach.ts.tspb.TimeSeriesQueryDerivative;
 type TSResponse = protos.cockroach.ts.tspb.TimeSeriesQueryResponse;

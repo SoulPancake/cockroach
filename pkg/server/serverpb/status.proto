@@ -1,12 +1,7 @@
- // Copyright 2016 The Cockroach Authors.
+// Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 syntax = "proto3";
 package cockroach.server.serverpb;
@@ -29,15 +24,15 @@ import "server/status/statuspb/status.proto";
 import "sql/appstatspb/app_stats.proto";
 import "sql/contentionpb/contention.proto";
 import "sql/sqlstats/insights/insights.proto";
-import "storage/enginepb/engine.proto";
+import "storage/enginepb/key_registry.proto";
 import "storage/enginepb/mvcc.proto";
-import "storage/enginepb/rocksdb.proto";
+import "storage/enginepb/stats.proto";
 import "kv/kvserver/kvserverpb/lease_status.proto";
 import "kv/kvserver/kvserverpb/state.proto";
 import "kv/kvserver/liveness/livenesspb/liveness.proto";
+import "util/hlc/timestamp.proto";
 import "util/log/logpb/log.proto";
 import "util/unresolved_addr.proto";
-import "util/tracing/tracingpb/tracing.proto";
 
 import "gogoproto/gogo.proto";
 import "google/api/annotations.proto";
@@ -376,7 +371,8 @@ message RaftState {
 
   uint64 replica_id = 1 [ (gogoproto.customname) = "ReplicaID" ];
   raftpb.HardState hard_state = 2 [ (gogoproto.nullable) = false ];
-  // Lead is part of Raft's SoftState.
+  // Lead is part of Raft's HardState. However, it used to be part of SoftState,
+  // so we keep it here as a separate field for compatibility.
   uint64 lead = 3  [(gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/raft/raftpb.PeerID"];
   // State is part of Raft's SoftState.
   // It's not an enum because this is primarily for ui consumption and there
@@ -385,6 +381,26 @@ message RaftState {
   uint64 applied = 5;
   map<uint64, Progress> progress = 6 [ (gogoproto.nullable) = false ];
   uint64 lead_transferee = 7  [(gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/raft/raftpb.PeerID"];
+  util.hlc.Timestamp lead_support_until = 8 [(gogoproto.nullable) = false];
+}
+
+// RACStatus contains the status of the Replication Admission Control component
+// of a range.
+message RACStatus {
+  uint64 next_raft_index = 1;
+  uint64 force_flush_index = 2;
+
+  message Stream {
+    uint64 index_to_send = 1;
+    uint64 next_raft_index_initial = 2;
+    uint64 force_flush_stop_index = 4;
+
+    repeated int64 eval_tokens_held = 5;
+    repeated int64 send_tokens_held = 6;
+
+    reserved 3;
+  }
+  map<uint64, Stream> streams = 6 [ (gogoproto.nullable) = false ];
 }
 
 // RangeProblems describes issues reported by a range. For internal use only.
@@ -406,6 +422,7 @@ message RangeProblems {
   bool raft_log_too_large = 7;
   bool circuit_breaker_error = 9;
   bool paused_followers = 10;
+  bool range_too_large = 11;
 }
 
 // RangeStatistics describes statistics reported by a range. For internal use
@@ -500,6 +517,7 @@ message TenantRangeInfo {
 message RangeInfo {
   PrettySpan span = 1 [ (gogoproto.nullable) = false ];
   RaftState raft_state = 2 [ (gogoproto.nullable) = false ];
+  RACStatus rac_status = 25 [ (gogoproto.nullable) = false, (gogoproto.customname) = "RACStatus" ];
   kv.kvserver.storagepb.RangeInfo state = 4 [ (gogoproto.nullable) = false ];
   int32 source_node_id = 5 [
     (gogoproto.customname) = "SourceNodeID",
@@ -536,6 +554,7 @@ message RangeInfo {
   Locality locality = 22;
   bool is_leaseholder = 23;
   bool lease_valid = 24;
+  // Next tag: 26
 }
 
 message RangesRequest {
@@ -1094,6 +1113,10 @@ message Session {
 
   // The ID of the session's goroutine.
   int64 goroutine_id = 21 [(gogoproto.customname) = "GoroutineID"];
+
+  string authentication_method = 22 [
+    (gogoproto.casttype) = "github.com/cockroachdb/redact.SafeString"
+  ];
 }
 
 // An error wrapper object for ListSessionsResponse.
@@ -1321,6 +1344,11 @@ message ProblemRangesResponse {
       (gogoproto.casttype) =
           "github.com/cockroachdb/cockroach/pkg/roachpb.RangeID"
     ];
+    repeated int64 too_large_range_ids = 12 [
+      (gogoproto.customname) = "TooLargeRangeIds",
+      (gogoproto.casttype) =
+        "github.com/cockroachdb/cockroach/pkg/roachpb.RangeID"
+    ];
   }
   reserved 1 to 7;
   // NodeID is the node that submitted all the requests.
@@ -1476,12 +1504,6 @@ message HotRangesResponseV2 {
     double qps = 3 [
       (gogoproto.customname) = "QPS"
     ];
-    // table_name indicates the SQL table that the range belongs to.
-    string table_name = 4;
-    // database_name indicates on database that has current hot range.
-    string database_name = 5;
-    // index_name indicates the index name for current range.
-    string index_name = 6;
     // replica_node_ids specifies the list of node ids that contain replicas with current hot range.
     repeated int32 replica_node_ids = 7 [
       (gogoproto.casttype) =
@@ -1516,6 +1538,15 @@ message HotRangesResponseV2 {
     // CPU time (ns) per second is the recent cpu usage per second on this
     // range.
     double cpu_time_per_second = 15 [(gogoproto.customname) = "CPUTimePerSecond"];
+    // Databases for the range.
+    repeated string databases = 16;
+    // Tables for the range
+    repeated string tables = 17;
+    // Indexes for the range
+    repeated string indexes = 18;
+
+    // previously used for database, table, and index name
+    reserved 4 to 6;
   }
   // Ranges contain list of hot ranges info that has highest number of QPS.
   repeated HotRange ranges = 1;
@@ -1625,7 +1656,7 @@ message StoreDetails {
   // - encryption settings
 
   // encryption_status is a serialized
-  // ccl/storageccl/engineccl/enginepbccl/stats.go::EncryptionStatus protobuf.
+  // storage/enginepb/stats.go::EncryptionStatus protobuf.
   bytes encryption_status = 2;
 
   // Basic file stats when encryption is enabled.
@@ -1728,12 +1759,15 @@ enum StatsSortOptions {
   SERVICE_LAT = 0;
   CPU_TIME = 1;
   EXECUTION_COUNT = 2;
-  P99_STMTS_ONLY = 3;
+  reserved 3;
+  reserved "P99_STMTS_ONLY";
   CONTENTION_TIME = 4;
   PCT_RUNTIME = 5;
+  reserved 6;
+  reserved "LATENCY_INFO_P50";
+  reserved 7;
+  reserved "LATENCY_INFO_P90";
   // Sort options only available on default stats tables.
-  LATENCY_INFO_P50 = 6;
-  LATENCY_INFO_P90 = 7;
   LATENCY_INFO_MIN = 8;
   LATENCY_INFO_MAX = 9;
   ROWS_PROCESSED = 10;
@@ -2024,6 +2058,9 @@ message TableIndexStatsResponse {
   // Timestamp of the latest reset index usage statistics request.
   google.protobuf.Timestamp last_reset = 2 [(gogoproto.stdtime) = true];
   repeated cockroach.sql.IndexRecommendation index_recommendations = 3;
+
+  // database_id is the ID of the database that contains the table.
+  int32 database_id  = 4 [(gogoproto.customname) = "DatabaseID"];
 }
 
 // Request object for issuing a index usage stats reset request.
@@ -2159,23 +2196,75 @@ message RequestJobProfilerExecutionDetailsRequest {
 
 message RequestJobProfilerExecutionDetailsResponse {}
 
- message GetJobProfilerExecutionDetailRequest {
-   int64 job_id = 1;
-   string filename = 2;
- }
-
- message GetJobProfilerExecutionDetailResponse {
-   bytes data = 1;
- }
-
- message ListJobProfilerExecutionDetailsRequest {
+message GetJobProfilerExecutionDetailRequest {
   int64 job_id = 1;
- }
+  string filename = 2;
+}
 
- message ListJobProfilerExecutionDetailsResponse {
-   repeated string files = 1;
- }
+message GetJobProfilerExecutionDetailResponse {
+  bytes data = 1;
+}
 
+message ListJobProfilerExecutionDetailsRequest {
+  int64 job_id = 1;
+}
+
+message ListJobProfilerExecutionDetailsResponse {
+  repeated string files = 1;
+}
+
+message UpdateTableMetadataCacheRequest {
+  // If true, the server will attempt to send a signal to the
+  // table metadata job by notifying the channel set on the
+  // status server.
+  bool local = 1;
+}
+
+message UpdateTableMetadataCacheResponse {
+}
+
+
+message GetThrottlingMetadataRequest {
+  string node_id = 1 [(gogoproto.customname) = "NodeID"];
+}
+
+// GetThrottlingMetadataResponse contains all information necessary to
+// show throttling warnings and alerts in DB Console.
+message GetThrottlingMetadataResponse {
+  // throttled is true if at least one node in the cluster is actively
+  // being throttled.
+  bool throttled = 1;
+  // if throttled is true, this will contain a string explaning why,
+  // generated from the SQL enforcer.
+  string throttleExplanation = 2;
+
+  // hasGracePeriod is true if the cluster has an active grace period
+  // before throttling kicks in after license expiry. Enterprise
+  // licenses do not have grace periods when they expire.
+  bool hasGracePeriod = 3;
+
+  // gracePeriodEndSeconds is the unix timestamp when the grace period
+  // ends.
+  int64 gracePeriodEndSeconds = 4;
+
+  // hasTelemetryDeadline is true if this cluster requires telemetry to
+  // be delivered.
+  bool hasTelemetryDeadline = 5;
+
+  // telemetryDeadlineSeconds is the unix timestamp when the telemetry
+  // deadline must be met. After this the cluster will be throttled.
+  int64 telemetryDeadlineSeconds = 6;
+
+  // lastTelemetryReceivedSeconds is the unix timestamp when we last
+  // delivered telemetry.
+  int64 lastTelemetryReceivedSeconds = 7;
+
+  // nodeIdsWithTelemetryProblems collects a list of nodes that are
+  // delinquent with telemetry. This is useful for reporting because
+  // the cluster could have partial telemetry delivery failure and it's
+  // helpful to surface this in DB Console.
+  repeated string nodeIdsWithTelemetryProblems = 8;
+}
 
 service Status {
   // Certificates retrieves a copy of the TLS certificates.
@@ -2662,6 +2751,18 @@ service Status {
     (ListJobProfilerExecutionDetailsResponse) {
     option (google.api.http) = {
       get: "/_status/list_job_profiler_execution_details/{job_id}"
+    };
+  }
+
+  rpc UpdateTableMetadataCache(UpdateTableMetadataCacheRequest) returns (UpdateTableMetadataCacheResponse) {
+  }
+
+  // GetThrottlingMetadata is used by the DB Console to retrieve
+  // information regarding current or upcoming throttling the cluster
+  // may experience.
+  rpc GetThrottlingMetadata(GetThrottlingMetadataRequest) returns (GetThrottlingMetadataResponse) {
+    option (google.api.http) = {
+      get: "/_status/throttling"
     };
   }
 }

@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package delegate
 
@@ -495,10 +490,16 @@ func (d *delegator) addWithClause(
 	source := specifics.source
 	cond := specifics.cond
 	nameCols := specifics.nameCols
-
 	implicitGranteeIn := "true"
+	publicRoleQuery := ""
+
 	if n.Grantees != nil {
 		params = params[:0]
+		// By default, every user/role inherits privileges from the implicit `public` role.
+		// To surface these inherited privileges, we query for all privileges inherited through the `public` role
+		// for all show grants statements except for ones which explicitly contain the `public`
+		// role, for e.g. SHOW GRANTS FOR PUBLIC.
+		addPublicAsImplicitGrantee := true
 		grantees, err := decodeusername.FromRoleSpecList(
 			d.evalCtx.SessionData(), username.PurposeValidation, n.Grantees,
 		)
@@ -506,7 +507,31 @@ func (d *delegator) addWithClause(
 			return nil, err
 		}
 		for _, grantee := range grantees {
+			if grantee.IsPublicRole() {
+				// If the public role is explicitly specified as a target within the SHOW GRANTS statement,
+				// no need to implicitly query for permissions on the public role.
+				addPublicAsImplicitGrantee = false
+			}
 			params = append(params, lexbase.EscapeSQLString(grantee.Normalized()))
+		}
+		if addPublicAsImplicitGrantee {
+			schemaNameFilter := ""
+			if strings.Contains(nameCols, "schema_name") {
+				// As the `public` role also contains permissions on virtual schemas like `crdb_internal`,
+				// we filter out the virtual schemas when we add privileges inherited through public to avoid noise.
+				// In all other cases, we don't filter out virtual schemas.
+				schemaNameFilter = "AND schema_name NOT IN ('crdb_internal', 'information_schema', 'pg_catalog', 'pg_extension')"
+			}
+			// The `publicRoleQuery` adds a lookup to retrieve privileges inherited implicitly through the public role.
+			publicRoleQuery = fmt.Sprintf(`
+				UNION ALL 
+					SELECT 
+						%s grantee, privilege_type, is_grantable
+					FROM 
+						r 
+					WHERE 
+						grantee = 'public' %s`,
+				nameCols, schemaNameFilter)
 		}
 		implicitGranteeIn = fmt.Sprintf("implicit_grantee IN (%s)", strings.Join(params, ","))
 	}
@@ -528,9 +553,10 @@ FROM
 	j
 WHERE
 	%s
+%s
 ORDER BY
 	%s grantee, privilege_type, is_grantable
-	`, source, cond, nameCols, implicitGranteeIn, nameCols)
+	`, source, cond, nameCols, implicitGranteeIn, publicRoleQuery, nameCols)
 	// Terminate on invalid users.
 	for _, p := range n.Grantees {
 

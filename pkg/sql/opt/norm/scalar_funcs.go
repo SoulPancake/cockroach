@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package norm
 
@@ -254,21 +249,39 @@ func (c *CustomFuncs) CastToCollatedString(str opt.ScalarExpr, locale string) op
 		datum = wrap.Wrapped
 	}
 
-	var value string
-	switch t := datum.(type) {
-	case *tree.DString:
-		value = string(*t)
-	case *tree.DCollatedString:
-		value = t.Contents
-	default:
-		panic(errors.AssertionFailedf("unexpected type for COLLATE: %T", t))
+	// buildCollated is a recursive helper function to handle casting arrays.
+	var buildCollated func(datum tree.Datum) tree.Datum
+	buildCollated = func(datum tree.Datum) tree.Datum {
+		if datum == tree.DNull {
+			return tree.DNull
+		}
+		var value string
+		switch t := datum.(type) {
+		case *tree.DString:
+			value = string(*t)
+		case *tree.DCollatedString:
+			value = t.Contents
+		case *tree.DArray:
+			a := tree.NewDArray(types.MakeCollatedType(t.ParamTyp, locale))
+			a.Array = make(tree.Datums, 0, len(t.Array))
+			for _, elem := range t.Array {
+				collatedElem := buildCollated(elem)
+				if err := a.Append(collatedElem); err != nil {
+					panic(err)
+				}
+			}
+			return a
+		default:
+			panic(errors.AssertionFailedf("unexpected type for COLLATE: %T", t))
+		}
+		d, err := tree.NewDCollatedString(value, locale, &c.f.evalCtx.CollationEnv)
+		if err != nil {
+			panic(err)
+		}
+		return d
 	}
 
-	d, err := tree.NewDCollatedString(value, locale, &c.f.evalCtx.CollationEnv)
-	if err != nil {
-		panic(err)
-	}
-	return c.f.ConstructConst(d, types.MakeCollatedString(str.DataType(), locale))
+	return c.f.ConstructConst(buildCollated(datum), types.MakeCollatedType(str.DataType(), locale))
 }
 
 // MakeUnorderedSubquery returns a SubqueryPrivate that specifies no ordering.

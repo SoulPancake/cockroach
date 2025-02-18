@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -24,27 +19,27 @@ import (
 )
 
 type controlJobsNode struct {
-	rows          planNode
-	desiredStatus jobs.Status
+	singleInputPlanNode
+	desiredStatus jobs.State
 	numRows       int
 	reason        string
 }
 
-var jobCommandToDesiredStatus = map[tree.JobCommand]jobs.Status{
-	tree.CancelJob: jobs.StatusCanceled,
-	tree.ResumeJob: jobs.StatusRunning,
-	tree.PauseJob:  jobs.StatusPaused,
+var jobCommandToDesiredStatus = map[tree.JobCommand]jobs.State{
+	tree.CancelJob: jobs.StateCanceled,
+	tree.ResumeJob: jobs.StateRunning,
+	tree.PauseJob:  jobs.StatePaused,
 }
 
-// FastPathResults implements the planNodeFastPath inteface.
+// FastPathResults implements the planNodeFastPath interface.
 func (n *controlJobsNode) FastPathResults() (int, bool) {
 	return n.numRows, true
 }
 
 func (n *controlJobsNode) startExec(params runParams) error {
-	if n.desiredStatus != jobs.StatusPaused && len(n.reason) > 0 {
+	if n.desiredStatus != jobs.StatePaused && len(n.reason) > 0 {
 		return errors.AssertionFailedf("status %v is not %v and thus does not support a reason %v",
-			n.desiredStatus, jobs.StatusPaused, n.reason)
+			n.desiredStatus, jobs.StatePaused, n.reason)
 	}
 
 	reg := params.p.ExecCfg().JobRegistry
@@ -53,7 +48,7 @@ func (n *controlJobsNode) startExec(params runParams) error {
 		return err
 	}
 	for {
-		ok, err := n.rows.Next(params)
+		ok, err := n.input.Next(params)
 		if err != nil {
 			return err
 		}
@@ -61,7 +56,7 @@ func (n *controlJobsNode) startExec(params runParams) error {
 			break
 		}
 
-		jobIDDatum := n.rows.Values()[0]
+		jobIDDatum := n.input.Values()[0]
 		if jobIDDatum == tree.DNull {
 			continue
 		}
@@ -73,16 +68,19 @@ func (n *controlJobsNode) startExec(params runParams) error {
 
 		if err := reg.UpdateJobWithTxn(params.ctx, jobspb.JobID(jobID), params.p.InternalSQLTxn(),
 			func(txn isql.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater) error {
+				getLegacyPayload := func(ctx context.Context) (*jobspb.Payload, error) {
+					return md.Payload, nil
+				}
 				if err := jobsauth.Authorize(params.ctx, params.p,
-					md.ID, md.Payload, jobsauth.ControlAccess, globalPrivileges); err != nil {
+					md.ID, getLegacyPayload, md.Payload.UsernameProto.Decode(), md.Payload.Type(), jobsauth.ControlAccess, globalPrivileges); err != nil {
 					return err
 				}
 				switch n.desiredStatus {
-				case jobs.StatusPaused:
+				case jobs.StatePaused:
 					return ju.PauseRequested(params.ctx, txn, md, n.reason)
-				case jobs.StatusRunning:
+				case jobs.StateRunning:
 					return ju.Unpaused(params.ctx, md)
-				case jobs.StatusCanceled:
+				case jobs.StateCanceled:
 					return ju.CancelRequested(params.ctx, md)
 				default:
 					return errors.AssertionFailedf("unhandled status %v", n.desiredStatus)
@@ -94,11 +92,11 @@ func (n *controlJobsNode) startExec(params runParams) error {
 		n.numRows++
 	}
 	switch n.desiredStatus {
-	case jobs.StatusPaused:
+	case jobs.StatePaused:
 		telemetry.Inc(sqltelemetry.SchemaJobControlCounter("pause"))
-	case jobs.StatusRunning:
+	case jobs.StateRunning:
 		telemetry.Inc(sqltelemetry.SchemaJobControlCounter("resume"))
-	case jobs.StatusCanceled:
+	case jobs.StateCanceled:
 		telemetry.Inc(sqltelemetry.SchemaJobControlCounter("cancel"))
 	}
 	return nil
@@ -109,5 +107,5 @@ func (*controlJobsNode) Next(runParams) (bool, error) { return false, nil }
 func (*controlJobsNode) Values() tree.Datums { return nil }
 
 func (n *controlJobsNode) Close(ctx context.Context) {
-	n.rows.Close(ctx)
+	n.input.Close(ctx)
 }

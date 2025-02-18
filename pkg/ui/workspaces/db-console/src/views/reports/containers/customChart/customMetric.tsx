@@ -1,22 +1,17 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { AxisUnits } from "@cockroachlabs/cluster-ui";
 import assign from "lodash/assign";
 import isEmpty from "lodash/isEmpty";
 import * as React from "react";
 import Select, { Option } from "react-select";
-import { AxisUnits } from "@cockroachlabs/cluster-ui";
 
 import * as protos from "src/js/protos";
-import Dropdown, { DropdownOption } from "src/views/shared/components/dropdown";
 import { isSystemTenant } from "src/redux/tenants";
+import Dropdown, { DropdownOption } from "src/views/shared/components/dropdown";
 
 import { MetricOption } from "./metricOption";
 

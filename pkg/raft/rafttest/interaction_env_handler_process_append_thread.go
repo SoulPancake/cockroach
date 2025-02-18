@@ -1,5 +1,5 @@
-// This code has been modified from its original form by Cockroach Labs, Inc.
-// All modifications are Copyright 2024 Cockroach Labs, Inc.
+// This code has been modified from its original form by The Cockroach Authors.
+// All modifications are Copyright 2024 The Cockroach Authors.
 //
 // Copyright 2022 The etcd Authors
 //
@@ -18,13 +18,13 @@
 package rafttest
 
 import (
-	"errors"
 	"fmt"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/raft"
 	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/datadriven"
+	"github.com/cockroachdb/errors"
 )
 
 func (env *InteractionEnv) handleProcessAppendThread(t *testing.T, d datadriven.TestData) error {
@@ -60,9 +60,11 @@ func (env *InteractionEnv) ProcessAppendThread(idx int) error {
 	env.Output.WriteString("Processing:\n")
 	env.Output.WriteString(raft.DescribeMessage(m, defaultEntryFormatter) + "\n")
 	st := raftpb.HardState{
-		Term:   m.Term,
-		Vote:   m.Vote,
-		Commit: m.Commit,
+		Term:      m.Term,
+		Vote:      m.Vote,
+		Commit:    m.Commit,
+		Lead:      m.Lead,
+		LeadEpoch: m.LeadEpoch,
 	}
 	var snap raftpb.Snapshot
 	if m.Snapshot != nil {

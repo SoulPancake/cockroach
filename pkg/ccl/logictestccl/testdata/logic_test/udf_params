@@ -224,6 +224,7 @@ CREATE FUNCTION public.f_param_types(IN p1 INT8, INOUT p2 INT8, INOUT p3 INT8, O
   NOT LEAKPROOF
   CALLED ON NULL INPUT
   LANGUAGE plpgsql
+  SECURITY INVOKER
   AS $$
   BEGIN
   SELECT p2, p3, p1;
@@ -249,6 +250,7 @@ CREATE FUNCTION public.f_param_types(OUT param INT8)
   NOT LEAKPROOF
   CALLED ON NULL INPUT
   LANGUAGE plpgsql
+  SECURITY INVOKER
   AS $$
   BEGIN
   SELECT 1;
@@ -323,6 +325,7 @@ CREATE FUNCTION public.f_out_int(OUT param_new INT8)
   NOT LEAKPROOF
   CALLED ON NULL INPUT
   LANGUAGE plpgsql
+  SECURITY INVOKER
   AS $$
   BEGIN
   param_new := 2;
@@ -378,6 +381,7 @@ CREATE FUNCTION public.f_int(INOUT param INT8)
   NOT LEAKPROOF
   CALLED ON NULL INPUT
   LANGUAGE plpgsql
+  SECURITY INVOKER
   AS $$
   BEGIN
   param := 2;
@@ -408,6 +412,7 @@ CREATE FUNCTION public.f_int(IN param INT8, OUT param_out INT8)
   NOT LEAKPROOF
   CALLED ON NULL INPUT
   LANGUAGE plpgsql
+  SECURITY INVOKER
   AS $$
   BEGIN
   SELECT param INTO param_out;
@@ -432,6 +437,7 @@ CREATE FUNCTION public.f_int(OUT param_out INT8, IN param INT8)
   NOT LEAKPROOF
   CALLED ON NULL INPUT
   LANGUAGE plpgsql
+  SECURITY INVOKER
   AS $$
   BEGIN
   SELECT param INTO param_out;
@@ -456,6 +462,7 @@ CREATE FUNCTION public.f_int(INOUT param INT8)
   NOT LEAKPROOF
   CALLED ON NULL INPUT
   LANGUAGE plpgsql
+  SECURITY INVOKER
   AS $$
   BEGIN
   param := param;
@@ -488,6 +495,7 @@ CREATE FUNCTION public.f_default_names(OUT INT8, OUT param2 INT8, IN INT8, OUT I
   NOT LEAKPROOF
   CALLED ON NULL INPUT
   LANGUAGE plpgsql
+  SECURITY INVOKER
   AS $$
   BEGIN
   param2 := 2;
@@ -546,6 +554,7 @@ CREATE FUNCTION public.f_default_names(OUT INT8, OUT param2 INT8, IN INT8, OUT c
   NOT LEAKPROOF
   CALLED ON NULL INPUT
   LANGUAGE plpgsql
+  SECURITY INVOKER
   AS $$
   BEGIN
   SELECT 3 INTO column3;
@@ -575,6 +584,7 @@ CREATE FUNCTION public.f_default_names(OUT INT8, OUT param2 INT8, IN INT8, OUT I
   NOT LEAKPROOF
   CALLED ON NULL INPUT
   LANGUAGE plpgsql
+  SECURITY INVOKER
   AS $$
   BEGIN
   param2 := 2;
@@ -594,6 +604,7 @@ CREATE FUNCTION public.f_default_names(OUT INT8, OUT param2 INT8, IN in_param IN
   NOT LEAKPROOF
   CALLED ON NULL INPUT
   LANGUAGE plpgsql
+  SECURITY INVOKER
   AS $$
   BEGIN
   SELECT in_param INTO param2;
@@ -901,13 +912,9 @@ DROP FUNCTION f;
 statement ok
 CREATE FUNCTION f1(a INT, b INT = 2) RETURNS INT AS $$ BEGIN RETURN a + b; END; $$ LANGUAGE PLpgSQL;
 
-skipif config local-mixed-23.2
-skipif config local-mixed-23.1
 statement ok
 CREATE FUNCTION f2(a INT, b INT = f1(1)) RETURNS INT AS $$ BEGIN RETURN a + b; END; $$ LANGUAGE PLpgSQL;
 
-skipif config local-mixed-23.2
-skipif config local-mixed-23.1
 query III
 SELECT f1(1), f2(1), f2(1, 1);
 ----
@@ -916,20 +923,14 @@ SELECT f1(1), f2(1), f2(1, 1);
 statement ok
 CREATE OR REPLACE FUNCTION f1 (a INT, b INT = 2) RETURNS INT AS $$ BEGIN RETURN a * b; END; $$ LANGUAGE PLpgSQL;
 
-skipif config local-mixed-23.2
-skipif config local-mixed-23.1
 query III
 SELECT f1(1), f2(1), f2(1, 1);
 ----
 2  3  2
 
-skipif config local-mixed-23.2
-skipif config local-mixed-23.1
 statement error pgcode 2BP01 cannot drop function "f1" because other objects \(\[test.public.f2\]\) still depend on it
 DROP FUNCTION f1;
 
-skipif config local-mixed-23.2
-skipif config local-mixed-23.1
 statement ok
 DROP FUNCTION f2;
 

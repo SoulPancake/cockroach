@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package spanconfigmanager_test
 
@@ -177,7 +172,7 @@ func TestManagerStartsJobIfFailed(t *testing.T) {
 	_, err = db.Exec(
 		`INSERT INTO system.jobs (id, status) VALUES ($1, $2)`,
 		id,
-		jobs.StatusFailed,
+		jobs.StateFailed,
 	)
 	require.NoError(t, err)
 	_, err = db.Exec(
@@ -308,7 +303,7 @@ func TestReconciliationJobErrorAndRecovery(t *testing.T) {
 				ManagerDisableJobCreation:                      true, // disable the automatic job creation
 				JobDisableInternalRetry:                        true,
 				SQLWatcherCheckpointNoopsEveryDurationOverride: 100 * time.Millisecond,
-				JobOnCheckpointInterceptor: func() error {
+				JobOnCheckpointInterceptor: func(_ hlc.Timestamp) error {
 					mu.Lock()
 					defer mu.Unlock()
 
@@ -353,7 +348,7 @@ func TestReconciliationJobErrorAndRecovery(t *testing.T) {
 	mu.err = errors.New("injected")
 	mu.Unlock()
 
-	waitForJobStatus(t, tdb, jobID, jobs.StatusFailed)
+	waitForJobState(t, tdb, jobID, jobs.StateFailed)
 
 	mu.Lock()
 	mu.err = nil
@@ -363,7 +358,7 @@ func TestReconciliationJobErrorAndRecovery(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, started)
 
-	waitForJobStatus(t, tdb, jobID, jobs.StatusRunning)
+	waitForJobState(t, tdb, jobID, jobs.StateRunning)
 
 	mu.Lock()
 	require.True(t, mu.lastStartTS.IsEmpty(), "expected reconciler to start with empty checkpoint")
@@ -393,7 +388,7 @@ func TestReconciliationUsesRightCheckpoint(t *testing.T) {
 				},
 				ManagerDisableJobCreation:                      true, // disable the automatic job creation
 				SQLWatcherCheckpointNoopsEveryDurationOverride: 10 * time.Millisecond,
-				JobOnCheckpointInterceptor: func() error {
+				JobOnCheckpointInterceptor: func(_ hlc.Timestamp) error {
 					select {
 					case err := <-errCh:
 						return err
@@ -462,14 +457,12 @@ func TestReconciliationUsesRightCheckpoint(t *testing.T) {
 	})
 }
 
-func waitForJobStatus(
-	t *testing.T, tdb *sqlutils.SQLRunner, jobID jobspb.JobID, status jobs.Status,
-) {
+func waitForJobState(t *testing.T, tdb *sqlutils.SQLRunner, jobID jobspb.JobID, status jobs.State) {
 	testutils.SucceedsSoon(t, func() error {
 		var jobStatus string
 		tdb.QueryRow(t, `SELECT status FROM system.jobs WHERE id = $1`, jobID).Scan(&jobStatus)
 
-		if jobs.Status(jobStatus) != status {
+		if jobs.State(jobStatus) != status {
 			return errors.Newf("expected jobID %d to have status %, got %s", jobID, status, jobStatus)
 		}
 		return nil

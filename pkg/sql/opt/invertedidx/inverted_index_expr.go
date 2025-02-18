@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package invertedidx
 
@@ -28,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/norm"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/idxtype"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
@@ -210,7 +206,7 @@ func TryFilterInvertedIndexBySimilarity(
 ) (_ *constraint.Constraint, remainingFilters memo.FiltersExpr, ok bool) {
 	md := f.Metadata()
 	columnCount := index.ExplicitColumnCount()
-	prefixColumnCount := index.NonInvertedPrefixColumnCount()
+	prefixColumnCount := index.PrefixColumnCount()
 
 	// The indexed column must be of a string-like type.
 	srcColOrd := index.InvertedColumn().InvertedSourceColumnOrdinal()
@@ -454,7 +450,7 @@ func TryJoinInvertedIndex(
 	index cat.Index,
 	inputCols opt.ColSet,
 ) opt.ScalarExpr {
-	if !index.IsInverted() {
+	if index.Type() != idxtype.INVERTED {
 		return nil
 	}
 
@@ -645,7 +641,7 @@ func evalInvertedExpr(
 func prefixCols(
 	tabID opt.TableID, index cat.Index,
 ) (_ []opt.OrderingColumn, notNullCols opt.ColSet) {
-	prefixColumnCount := index.NonInvertedPrefixColumnCount()
+	prefixColumnCount := index.PrefixColumnCount()
 
 	// If this is a single-column inverted index, there are no prefix columns.
 	// constrain.
@@ -685,7 +681,7 @@ func constrainNonInvertedCols(
 	checkCancellation func(),
 ) (_ *constraint.Constraint, remainingFilters memo.FiltersExpr, ok bool) {
 	tabMeta := factory.Metadata().TableMeta(tabID)
-	prefixColumnCount := index.NonInvertedPrefixColumnCount()
+	prefixColumnCount := index.PrefixColumnCount()
 	ps := tabMeta.IndexPartitionLocality(index.Ordinal())
 
 	// Consolidation of a constraint converts contiguous spans into a single

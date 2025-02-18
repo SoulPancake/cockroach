@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package schematelemetry
 
@@ -84,17 +79,17 @@ func (s schemaTelemetryExecutor) NotifyJobTermination(
 	ctx context.Context,
 	txn isql.Txn,
 	jobID jobspb.JobID,
-	jobStatus jobs.Status,
+	jobStatus jobs.State,
 	details jobspb.Details,
 	env scheduledjobs.JobSchedulerEnv,
 	sj *jobs.ScheduledJob,
 ) error {
 	switch jobStatus {
-	case jobs.StatusFailed:
+	case jobs.StateFailed:
 		jobs.DefaultHandleFailedRun(sj, "SQL schema telemetry job failed")
 		s.metrics.NumFailed.Inc(1)
 		return nil
-	case jobs.StatusSucceeded:
+	case jobs.StateSucceeded:
 		s.metrics.NumSucceeded.Inc(1)
 	}
 	sj.SetScheduleStatus(string(jobStatus))

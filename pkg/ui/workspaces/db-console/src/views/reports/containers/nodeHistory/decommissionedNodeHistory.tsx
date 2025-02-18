@@ -1,21 +1,8 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import * as React from "react";
-import { Helmet } from "react-helmet";
-import { connect } from "react-redux";
-import { RouteComponentProps, withRouter } from "react-router-dom";
-import { Moment } from "moment-timezone";
-import flow from "lodash/flow";
-import orderBy from "lodash/orderBy";
-import map from "lodash/map";
 import {
   ColumnsConfig,
   Table,
@@ -23,14 +10,22 @@ import {
   util,
   Timestamp,
 } from "@cockroachlabs/cluster-ui";
+import flow from "lodash/flow";
+import map from "lodash/map";
+import orderBy from "lodash/orderBy";
+import { Moment } from "moment-timezone";
+import * as React from "react";
+import { Helmet } from "react-helmet";
+import { connect } from "react-redux";
+import { RouteComponentProps, withRouter } from "react-router-dom";
 import { createSelector } from "reselect";
 
-import { AdminUIState } from "src/redux/state";
-import { nodesSummarySelector } from "src/redux/nodes";
-import { refreshLiveness, refreshNodes } from "src/redux/apiReducers";
-import { cockroach } from "src/js/protos";
-import { LocalSetting } from "src/redux/localsettings";
 import { Text } from "src/components";
+import { cockroach } from "src/js/protos";
+import { refreshLiveness, refreshNodes } from "src/redux/apiReducers";
+import { LocalSetting } from "src/redux/localsettings";
+import { nodesSummarySelector } from "src/redux/nodes";
+import { AdminUIState } from "src/redux/state";
 import { BackToAdvanceDebug } from "src/views/reports/containers/util";
 
 import "./decommissionedNodeHistory.styl";
@@ -89,7 +84,9 @@ export class DecommissionedNodeHistory extends React.Component<
       key: "id",
       title: "ID",
       sorter: sortByNodeId,
-      render: (_text: string, record: DecommissionedNodeStatusRow) => <Text>{`n${record.nodeId}`}</Text>,
+      render: (_text: string, record: DecommissionedNodeStatusRow) => (
+        <Text>{`n${record.nodeId}`}</Text>
+      ),
     },
     {
       key: "decommissionedOn",
@@ -155,13 +152,15 @@ const decommissionedNodesTableData = createSelector(
     });
 
     const data = flow(
-      (liveness: ILiveness[]) => orderBy(liveness, [l => getDecommissionedTime(l.node_id)], ["desc"]),
-      (liveness: ILiveness[]) => map(liveness, (l, idx: number) => ({
-        key: `${idx}`,
-        nodeId: l.node_id,
-        decommissionedDate: getDecommissionedTime(l.node_id),
-      }))
-    )(decommissionedNodes)
+      (liveness: ILiveness[]) =>
+        orderBy(liveness, [l => getDecommissionedTime(l.node_id)], ["desc"]),
+      (liveness: ILiveness[]) =>
+        map(liveness, (l, idx: number) => ({
+          key: `${idx}`,
+          nodeId: l.node_id,
+          decommissionedDate: getDecommissionedTime(l.node_id),
+        })),
+    )(decommissionedNodes);
 
     return data;
   },

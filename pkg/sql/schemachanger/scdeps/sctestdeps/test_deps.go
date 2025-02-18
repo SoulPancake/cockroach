@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sctestdeps
 
@@ -32,10 +27,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/funcdesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/multiregion"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/nstree"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/zone"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scbuild"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scdecomp"
@@ -97,6 +94,11 @@ func (s *TestState) ClusterSettings() *cluster.Settings {
 // Statements implements the scbuild.Dependencies interface.
 func (s *TestState) Statements() []string {
 	return s.statements
+}
+
+// EvalCtx implements the scbuild.Dependencies interface.
+func (s *TestState) EvalCtx() *eval.Context {
+	return s.evalCtx
 }
 
 // SemaCtx implements the scbuild.Dependencies interface.
@@ -658,6 +660,12 @@ func (s *TestState) MustReadDescriptor(ctx context.Context, id descpb.ID) catalo
 	if err != nil {
 		panic(err)
 	}
+	// Ensure that any types in the descriptor we read are hydrated. This is
+	// required to correctly print out TypeName in the ColumnType element.
+	err = typedesc.HydrateTypesInDescriptor(ctx, desc, s)
+	if err != nil {
+		panic(err)
+	}
 	return desc
 }
 
@@ -808,18 +816,93 @@ func (s *TestState) DeleteDescriptor(ctx context.Context, id descpb.ID) error {
 
 // UpdateZoneConfig implements the scexec.Catalog interface.
 func (s *TestState) UpdateZoneConfig(
-	ctx context.Context, id descpb.ID, zc zonepb.ZoneConfig,
+	ctx context.Context, id descpb.ID, zc *zonepb.ZoneConfig,
 ) error {
-	if s.catalogChanges.zoneConfigsToUpdate == nil {
-		s.catalogChanges.zoneConfigsToUpdate = make(map[descpb.ID]*zonepb.ZoneConfig)
+	oldZc := s.uncommittedInMemory.LookupZoneConfig(id)
+
+	var rawBytes []byte
+	// If the zone config already exists, we need to preserve the raw bytes as the
+	// expected value that we will be updating. Otherwise, this will be a clean
+	// insert with no expected raw bytes.
+	if oldZc != nil {
+		rawBytes = oldZc.GetRawBytesInStorage()
 	}
-	s.catalogChanges.zoneConfigsToUpdate[id] = &zc
-	return nil
+	newZc := zone.NewZoneConfigWithRawBytes(zc, rawBytes)
+	return s.WriteZoneConfigToBatch(ctx, id, newZc)
+}
+
+// UpdateSubzoneConfig implements the scexec.Catalog interface.
+func (s *TestState) UpdateSubzoneConfig(
+	ctx context.Context,
+	parentZone catalog.ZoneConfig,
+	subzone zonepb.Subzone,
+	subzoneSpans []zonepb.SubzoneSpan,
+	idxRefToDelete int32,
+) (catalog.ZoneConfig, error) {
+	var rawBytes []byte
+	var zc *zonepb.ZoneConfig
+	// If the zone config already exists, we need to preserve the raw bytes as the
+	// expected value that we will be updating. Otherwise, this will be a clean
+	// insert with no expected raw bytes.
+	if parentZone != nil {
+		rawBytes = parentZone.GetRawBytesInStorage()
+		zc = parentZone.ZoneConfigProto()
+	} else {
+		// If no zone config exists, create a new one that is a subzone placeholder.
+		zc = zonepb.NewZoneConfig()
+		zc.DeleteTableConfig()
+	}
+
+	if idxRefToDelete == -1 {
+		idxRefToDelete = zc.GetSubzoneIndex(subzone.IndexID, subzone.PartitionName)
+	}
+
+	// Update the subzone in the zone config.
+	zc.SetSubzone(subzone)
+	// Update the subzone spans.
+	subzoneSpansToWrite := subzoneSpans
+	// If there are subzone spans that currently exist, merge those with the new
+	// spans we are updating. Otherwise, the zone config's set of subzone spans
+	// will be our input subzoneSpans.
+	if len(zc.SubzoneSpans) != 0 {
+		zc.DeleteSubzoneSpansForSubzoneIndex(idxRefToDelete)
+		zc.MergeSubzoneSpans(subzoneSpansToWrite)
+		subzoneSpansToWrite = zc.SubzoneSpans
+	}
+	zc.SubzoneSpans = subzoneSpansToWrite
+
+	newZc := zone.NewZoneConfigWithRawBytes(zc, rawBytes)
+	return newZc, nil
 }
 
 // DeleteZoneConfig implements the scexec.Catalog interface.
-func (s *TestState) DeleteZoneConfig(ctx context.Context, id descpb.ID) error {
+func (s *TestState) DeleteZoneConfig(_ context.Context, id descpb.ID) error {
 	s.catalogChanges.zoneConfigsToDelete.Add(id)
+	return nil
+}
+
+// DeleteSubzoneConfig implements the scexec.Catalog interface.
+func (s *TestState) DeleteSubzoneConfig(
+	ctx context.Context, tableID descpb.ID, subzone zonepb.Subzone, subzoneSpans []zonepb.SubzoneSpan,
+) error {
+	var zc *zonepb.ZoneConfig
+	if czc, ok := s.catalogChanges.zoneConfigsToUpdate[tableID]; ok {
+		zc = czc
+	} else {
+		// No-op if nothing is there for us to discard.
+		return nil
+	}
+
+	// Delete the subzone in the zone config.
+	zc.DeleteSubzone(subzone.IndexID, subzone.PartitionName)
+	// If there are no more subzones after our delete and this table is a
+	// placeholder, we can just delete the table zone config.
+	if len(zc.Subzones) == 0 && zc.IsSubzonePlaceholder() {
+		return s.DeleteZoneConfig(ctx, tableID)
+	}
+	// Delete the subzone spans.
+	zc.DeleteSubzoneSpans(subzoneSpans)
+	s.catalogChanges.zoneConfigsToUpdate[tableID] = zc
 	return nil
 }
 
@@ -1029,27 +1112,25 @@ func (s *TestState) UpdateSchemaChangeJob(
 		TraceID:        0,
 	}
 	oldPayload := jobspb.Payload{
-		Description:                  scJob.Description,
-		Statement:                    scJob.Statements,
-		UsernameProto:                scJob.Username.EncodeProto(),
-		StartedMicros:                0,
-		FinishedMicros:               0,
-		DescriptorIDs:                scJob.DescriptorIDs,
-		Error:                        "",
-		ResumeErrors:                 nil,
-		CleanupErrors:                nil,
-		FinalResumeError:             nil,
-		Noncancelable:                scJob.NonCancelable,
-		Details:                      jobspb.WrapPayloadDetails(scJob.Details),
-		PauseReason:                  "",
-		RetriableExecutionFailureLog: nil,
+		Description:      scJob.Description,
+		Statement:        scJob.Statements,
+		UsernameProto:    scJob.Username.EncodeProto(),
+		StartedMicros:    0,
+		FinishedMicros:   0,
+		DescriptorIDs:    scJob.DescriptorIDs,
+		Error:            "",
+		ResumeErrors:     nil,
+		CleanupErrors:    nil,
+		FinalResumeError: nil,
+		Noncancelable:    scJob.NonCancelable,
+		Details:          jobspb.WrapPayloadDetails(scJob.Details),
+		PauseReason:      "",
 	}
 	oldJobMetadata := jobs.JobMetadata{
 		ID:       scJob.JobID,
-		Status:   jobs.StatusRunning,
+		State:    jobs.StateRunning,
 		Payload:  &oldPayload,
 		Progress: &oldProgress,
-		RunStats: nil,
 	}
 	updateProgress := func(newProgress *jobspb.Progress) {
 		scJob.Progress = *newProgress.GetNewSchemaChange()
@@ -1218,6 +1299,9 @@ func (s *TestState) logEvent(event logpb.EventPayload) error {
 		// Remove common details from text output, they're never decorated.
 		if inM, ok := in.(map[string]interface{}); ok {
 			delete(inM, "common")
+
+			// Also remove latency measurement, since it's not deterministic.
+			delete(inM, "latencyNanos")
 		}
 	})
 	if err != nil {
@@ -1361,6 +1445,17 @@ func (s *TestState) ZoneConfigGetter() scdecomp.ZoneConfigGetter {
 	return s
 }
 
+// WriteZoneConfigToBatch implements scexec.Dependencies.
+func (s *TestState) WriteZoneConfigToBatch(
+	_ context.Context, id descpb.ID, zc catalog.ZoneConfig,
+) error {
+	if s.catalogChanges.zoneConfigsToUpdate == nil {
+		s.catalogChanges.zoneConfigsToUpdate = make(map[descpb.ID]*zonepb.ZoneConfig)
+	}
+	s.catalogChanges.zoneConfigsToUpdate[id] = zc.ZoneConfigProto()
+	return nil
+}
+
 // GetZoneConfig implements scexec.Dependencies.
 func (s *TestState) GetZoneConfig(ctx context.Context, id descpb.ID) (catalog.ZoneConfig, error) {
 	return s.committed.LookupZoneConfig(id), nil
@@ -1480,4 +1575,15 @@ func (s *TestState) NodesStatusServer() *serverpb.OptionalNodesStatusServer {
 
 func (s *TestState) GetRegions(ctx context.Context) (*serverpb.RegionsResponse, error) {
 	return &serverpb.RegionsResponse{Regions: map[string]*serverpb.RegionsResponse_Region{}}, nil
+}
+
+// SynthesizeRegionConfig implements the scbuildstmt.SynthesizeRegionConfig interface.
+func (s *TestState) SynthesizeRegionConfig(
+	ctx context.Context, dbID descpb.ID, opts ...multiregion.SynthesizeRegionConfigOption,
+) (multiregion.RegionConfig, error) {
+	return multiregion.RegionConfig{}, nil
+}
+
+func (s *TestState) GetDefaultZoneConfig() *zonepb.ZoneConfig {
+	return zonepb.DefaultSystemZoneConfigRef()
 }

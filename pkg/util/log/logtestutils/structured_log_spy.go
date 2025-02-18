@@ -1,12 +1,7 @@
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package logtestutils
 
@@ -142,6 +137,10 @@ type StructuredLogSpy[T any] struct {
 
 		// Function to transform log entries into the desired format.
 		format func(entry logpb.Entry) (T, error)
+
+		// lastReadIdx is a map of channel to int, representing the last read log
+		// line read when calling GetUnreadLogs.
+		lastReadIdx map[logpb.Channel]int
 	}
 }
 
@@ -169,6 +168,7 @@ func NewStructuredLogSpy[T any](
 	for _, ch := range channels {
 		s.channels[ch] = struct{}{}
 	}
+	s.mu.lastReadIdx = make(map[logpb.Channel]int, len(channels))
 	s.mu.logs = make(map[logpb.Channel][]T, len(s.channels))
 	s.mu.format = format
 	s.mu.filters = append(s.mu.filters, filters...)
@@ -237,6 +237,29 @@ func (s *StructuredLogSpy[T]) GetLogs(ch logpb.Channel) []T {
 	return logs
 }
 
+// GetUnreadLogs returns all logs that have been intercepted in the given channel
+// since the last time this method was called.
+func (s *StructuredLogSpy[T]) GetUnreadLogs(ch logpb.Channel) []T {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	currentCount := len(s.mu.logs[ch])
+	lastReadLogLine := s.mu.lastReadIdx[ch]
+	logs := make([]T, 0, currentCount-lastReadLogLine)
+	logs = append(logs, s.mu.logs[ch][lastReadLogLine:currentCount]...)
+	s.mu.lastReadIdx[ch] = currentCount
+	return logs
+}
+
+// SetLastNLogsAsUnread will decrement lastReadIdx[ch] by n to consider those
+// logs "unread". As a result, they will be included in the next GetUnreadLogs
+// call.
+func (s *StructuredLogSpy[T]) SetLastNLogsAsUnread(ch logpb.Channel, n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mu.lastReadIdx[ch] -= n
+
+}
+
 // Intercept intercepts a log entry and stores it in memory.
 // Logs are formatted and then filtered before being stored.
 func (s *StructuredLogSpy[T]) Intercept(entry []byte) {
@@ -287,6 +310,7 @@ func (s *StructuredLogSpy[T]) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mu.logs = make(map[logpb.Channel][]T, len(s.channels))
+	s.mu.lastReadIdx = make(map[logpb.Channel]int, len(s.channels))
 }
 
 // Channels returns a list of the channels that the spy is

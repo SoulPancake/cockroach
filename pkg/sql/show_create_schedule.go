@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -26,7 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
 
-var showCreateTableColumns = colinfo.ResultColumns{
+var showCreateScheduleColumns = colinfo.ResultColumns{
 	{Name: "schedule_id", Typ: types.Int},
 	{Name: "create_statement", Typ: types.String},
 }
@@ -94,7 +89,7 @@ func (p *planner) ShowCreateSchedule(
 
 	return &delayedNode{
 		name:    fmt.Sprintf("SHOW CREATE SCHEDULE %d", n.ScheduleID),
-		columns: showCreateTableColumns,
+		columns: showCreateScheduleColumns,
 		constructor: func(ctx context.Context, p *planner) (planNode, error) {
 			scheduledJobs, err := loadSchedules(
 				runParams{ctx: ctx, p: p, extendedEvalCtx: &p.extendedEvalCtx}, n)
@@ -121,7 +116,7 @@ func (p *planner) ShowCreateSchedule(
 				rows = append(rows, row)
 			}
 
-			v := p.newContainerValuesNode(showCreateTableColumns, len(rows))
+			v := p.newContainerValuesNode(showCreateScheduleColumns, len(rows))
 			for _, row := range rows {
 				if _, err := v.rows.AddRow(ctx, row); err != nil {
 					v.Close(ctx)

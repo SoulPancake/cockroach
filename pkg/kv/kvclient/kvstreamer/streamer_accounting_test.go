@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvstreamer
 
@@ -69,7 +64,7 @@ func TestStreamerMemoryAccounting(t *testing.T) {
 	}
 
 	monitor := mon.NewMonitor(mon.Options{
-		Name:     "streamer",
+		Name:     mon.MakeMonitorName("streamer"),
 		Settings: cluster.MakeTestingClusterSettings(),
 	})
 	monitor.Start(ctx, nil /* pool */, mon.NewStandaloneBudget(math.MaxInt64))
@@ -84,17 +79,26 @@ func TestStreamerMemoryAccounting(t *testing.T) {
 		if err != nil {
 			panic(err)
 		}
+		leafTxn := kv.NewLeafTxn(ctx, s.DB(), s.DistSQLPlanningNodeID(), leafInputState)
+		metrics := MakeMetrics()
 		s := NewStreamer(
 			s.DistSenderI().(*kvcoord.DistSender),
+			&metrics,
 			s.AppStopper(),
-			kv.NewLeafTxn(ctx, s.DB(), s.DistSQLPlanningNodeID(), leafInputState),
+			leafTxn,
+			func(ctx context.Context, ba *kvpb.BatchRequest) (*kvpb.BatchResponse, error) {
+				res, err := leafTxn.Send(ctx, ba)
+				if err != nil {
+					return nil, err.GoError()
+				}
+				return res, nil
+			},
 			cluster.MakeTestingClusterSettings(),
 			nil, /* sd */
 			lock.WaitPolicy(0),
 			math.MaxInt64,
 			&acc,
 			nil, /* kvPairsRead */
-			nil, /* batchRequestsIssued */
 			lock.None,
 			lock.Unreplicated,
 		)

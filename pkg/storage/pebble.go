@@ -1,17 +1,11 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -39,7 +33,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/pebbleiter"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
@@ -47,17 +40,19 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/cockroachdb/crlib/fifo"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/errors/oserror"
-	"github.com/cockroachdb/fifo"
 	"github.com/cockroachdb/logtags"
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/bloom"
+	"github.com/cockroachdb/pebble/cockroachkvs"
 	"github.com/cockroachdb/pebble/objstorage/objstorageprovider"
 	"github.com/cockroachdb/pebble/objstorage/remote"
 	"github.com/cockroachdb/pebble/rangekey"
 	"github.com/cockroachdb/pebble/replay"
 	"github.com/cockroachdb/pebble/sstable"
+	"github.com/cockroachdb/pebble/sstable/block"
 	"github.com/cockroachdb/pebble/vfs"
 	humanize "github.com/dustin/go-humanize"
 )
@@ -106,6 +101,28 @@ var IngestSplitEnabled = settings.RegisterBoolSetting(
 	settings.WithPublic,
 )
 
+// ColumnarBlocksEnabled controls whether columnar-blocks are enabled in Pebble.
+var ColumnarBlocksEnabled = settings.RegisterBoolSetting(
+	settings.SystemVisible,
+	"storage.columnar_blocks.enabled",
+	"set to true to enable columnar-blocks to store KVs in a columnar format",
+	metamorphic.ConstantWithTestBool(
+		"storage.columnar_blocks.enabled", true /* defaultValue */),
+	settings.WithPublic,
+)
+
+// deleteCompactionsCanExcise controls whether delete compactions can
+// apply rangedels/rangekeydels on sstables they partially apply to, through
+// an excise operation, instead of just applying the rangedels/rangekeydels
+// that fully delete sstables.
+var deleteCompactionsCanExcise = settings.RegisterBoolSetting(
+	settings.SystemVisible,
+	"storage.delete_compaction_excise.enabled",
+	"set to false to direct Pebble to not partially excise sstables in delete-only compactions",
+	metamorphic.ConstantWithTestBool(
+		"storage.delete_compaction_excise.enabled", true), /* defaultValue */
+	settings.WithPublic)
+
 // IngestAsFlushable controls whether ingested sstables that overlap the
 // memtable may be lazily ingested: written to the WAL and enqueued in the list
 // of flushables (eg, memtables, large batches and now lazily-ingested
@@ -129,6 +146,8 @@ var MinCapacityForBulkIngest = settings.RegisterFloatSetting(
 	"kv.bulk_io_write.min_capacity_remaining_fraction",
 	"remaining store capacity fraction below which bulk ingestion requests are rejected",
 	0.05,
+	settings.FloatInRange(0.04, 0.3),
+	settings.WithPublic,
 )
 
 // BlockLoadConcurrencyLimit controls the maximum number of outstanding
@@ -275,92 +294,13 @@ func getCompressionAlgorithm(
 	case compressionAlgorithmSnappy:
 		return pebble.SnappyCompression
 	case compressionAlgorithmZstd:
-		// Pre-24.1 Pebble's implementation of zstd had bugs that could cause
-		// in-memory corruption. We require that the cluster version is 24.1 which
-		// implies that all nodes are running 24.1 code and will never run code
-		// < 24.1 again.
-		if settings.Version.ActiveVersionOrEmpty(ctx).IsActive(clusterversion.V24_1) {
-			return pebble.ZstdCompression
-		}
-		return pebble.DefaultCompression
+		return pebble.ZstdCompression
 	case compressionAlgorithmNone:
 		return pebble.NoCompression
 	default:
 		return pebble.DefaultCompression
 	}
 }
-
-// DO NOT set storage.single_delete.crash_on_invariant_violation.enabled or
-// storage.single_delete.crash_on_ineffectual.enabled to true.
-//
-// Pebble's delete-only compactions can cause a recent RANGEDEL to peek below
-// an older SINGLEDEL and delete an arbitrary subset of data below that
-// SINGLEDEL. When that SINGLEDEL gets compacted (without the RANGEDEL), any
-// of these callbacks can happen, without it being a real correctness problem.
-//
-// Example 1:
-// RANGEDEL [a, c)#10 in L0
-// SINGLEDEL b#5 in L1
-// SET b#3 in L6
-//
-// If the L6 file containing the SET is narrow and the L1 file containing the
-// SINGLEDEL is wide, a delete-only compaction can remove the file in L2
-// before the SINGLEDEL is compacted down. Then when the SINGLEDEL is
-// compacted down, it will not find any SET to delete, resulting in the
-// ineffectual callback.
-//
-// Example 2:
-// RANGEDEL [a, z)#60 in L0
-// SINGLEDEL g#50 in L1
-// SET g#40 in L2
-// RANGEDEL [g,h)#30 in L3
-// SET g#20 in L6
-//
-// In this example, the two SETs represent the same intent, and the RANGEDELs
-// are caused by the CRDB range being dropped. That is, the transaction wrote
-// the intent once, range was dropped, then added back, which caused the SET
-// again, then the transaction committed, causing a SINGLEDEL, and then the
-// range was dropped again. The older RANGEDEL can get fragmented due to
-// compactions it has been part of. Say this L3 file containing the RANGEDEL
-// is very narrow, while the L1, L2, L6 files are wider than the RANGEDEL in
-// L0. Then the RANGEDEL in L3 can be dropped using a delete-only compaction,
-// resulting in an LSM with state:
-//
-// RANGEDEL [a, z)#60 in L0
-// SINGLEDEL g#50 in L1
-// SET g#40 in L2
-// SET g#20 in L6
-//
-// A multi-level compaction involving L1, L2, L6 will cause the invariant
-// violation callback. This example doesn't need multi-level compactions: say
-// there was a Pebble snapshot at g#21 preventing g#20 from being dropped when
-// it meets g#40 in a compaction. That snapshot will not save RANGEDEL
-// [g,h)#30, so we can have:
-//
-// SINGLEDEL g#50 in L1
-// SET g#40, SET g#20 in L6
-//
-// And say the snapshot is removed and then the L1 and L6 compaction happens,
-// resulting in the invariant violation callback.
-//
-// TODO(sumeer): remove these cluster settings or figure out a way to bring
-// back some invariant checking.
-
-var SingleDeleteCrashOnInvariantViolation = settings.RegisterBoolSetting(
-	settings.SystemOnly,
-	"storage.single_delete.crash_on_invariant_violation.enabled",
-	"set to true to crash if the single delete invariant is violated",
-	false,
-	settings.WithVisibility(settings.Reserved),
-)
-
-var SingleDeleteCrashOnIneffectual = settings.RegisterBoolSetting(
-	settings.SystemOnly,
-	"storage.single_delete.crash_on_ineffectual.enabled",
-	"set to true to crash if the single delete was ineffectual",
-	false,
-	settings.WithVisibility(settings.Reserved),
-)
 
 var walFailoverUnhealthyOpThreshold = settings.RegisterDurationSetting(
 	settings.SystemOnly,
@@ -389,163 +329,14 @@ func ShouldUseEFOS(settings *settings.Values) bool {
 	return UseEFOS.Get(settings) || UseExciseForSnapshots.Get(settings)
 }
 
-// EngineKeyCompare compares cockroach keys, including the version (which
-// could be MVCC timestamps).
-func EngineKeyCompare(a, b []byte) int {
-	// NB: For performance, this routine manually splits the key into the
-	// user-key and version components rather than using DecodeEngineKey. In
-	// most situations, use DecodeEngineKey or GetKeyPartFromEngineKey or
-	// SplitMVCCKey instead of doing this.
-	aEnd := len(a) - 1
-	bEnd := len(b) - 1
-	if aEnd < 0 || bEnd < 0 {
-		// This should never happen unless there is some sort of corruption of
-		// the keys.
-		return bytes.Compare(a, b)
-	}
-
-	// Compute the index of the separator between the key and the version. If the
-	// separator is found to be at -1 for both keys, then we are comparing bare
-	// suffixes without a user key part. Pebble requires bare suffixes to be
-	// comparable with the same ordering as if they had a common user key.
-	aSep := aEnd - int(a[aEnd])
-	bSep := bEnd - int(b[bEnd])
-	if aSep == -1 && bSep == -1 {
-		aSep, bSep = 0, 0 // comparing bare suffixes
-	}
-	if aSep < 0 || bSep < 0 {
-		// This should never happen unless there is some sort of corruption of
-		// the keys.
-		return bytes.Compare(a, b)
-	}
-
-	// Compare the "user key" part of the key.
-	if c := bytes.Compare(a[:aSep], b[:bSep]); c != 0 {
-		return c
-	}
-
-	// Compare the version part of the key. Note that when the version is a
-	// timestamp, the timestamp encoding causes byte comparison to be equivalent
-	// to timestamp comparison.
-	aVer := a[aSep:aEnd]
-	bVer := b[bSep:bEnd]
-	if len(aVer) == 0 {
-		if len(bVer) == 0 {
-			return 0
-		}
-		return -1
-	} else if len(bVer) == 0 {
-		return 1
-	}
-	aVer = normalizeEngineKeyVersionForCompare(aVer)
-	bVer = normalizeEngineKeyVersionForCompare(bVer)
-	return bytes.Compare(bVer, aVer)
-}
-
-// EngineKeyEqual checks for equality of cockroach keys, including the version
-// (which could be MVCC timestamps).
-func EngineKeyEqual(a, b []byte) bool {
-	// NB: For performance, this routine manually splits the key into the
-	// user-key and version components rather than using DecodeEngineKey. In
-	// most situations, use DecodeEngineKey or GetKeyPartFromEngineKey or
-	// SplitMVCCKey instead of doing this.
-	aEnd := len(a) - 1
-	bEnd := len(b) - 1
-	if aEnd < 0 || bEnd < 0 {
-		// This should never happen unless there is some sort of corruption of
-		// the keys.
-		return bytes.Equal(a, b)
-	}
-
-	// Last byte is the version length + 1 when there is a version,
-	// else it is 0.
-	aVerLen := int(a[aEnd])
-	bVerLen := int(b[bEnd])
-
-	// Fast-path. If the key version is empty or contains only a walltime
-	// component then normalizeEngineKeyVersionForCompare is a no-op, so we don't
-	// need to split the "user key" from the version suffix before comparing to
-	// compute equality. Instead, we can check for byte equality immediately.
-	const withWall = mvccEncodedTimeSentinelLen + mvccEncodedTimeWallLen
-	const withLockTableLen = mvccEncodedTimeSentinelLen + engineKeyVersionLockTableLen
-	if (aVerLen <= withWall && bVerLen <= withWall) || (aVerLen == withLockTableLen && bVerLen == withLockTableLen) {
-		return bytes.Equal(a, b)
-	}
-
-	// Compute the index of the separator between the key and the version. If the
-	// separator is found to be at -1 for both keys, then we are comparing bare
-	// suffixes without a user key part. Pebble requires bare suffixes to be
-	// comparable with the same ordering as if they had a common user key.
-	aSep := aEnd - aVerLen
-	bSep := bEnd - bVerLen
-	if aSep == -1 && bSep == -1 {
-		aSep, bSep = 0, 0 // comparing bare suffixes
-	}
-	if aSep < 0 || bSep < 0 {
-		// This should never happen unless there is some sort of corruption of
-		// the keys.
-		return bytes.Equal(a, b)
-	}
-
-	// Compare the "user key" part of the key.
-	if !bytes.Equal(a[:aSep], b[:bSep]) {
-		return false
-	}
-
-	// Compare the version part of the key.
-	aVer := a[aSep:aEnd]
-	bVer := b[bSep:bEnd]
-	aVer = normalizeEngineKeyVersionForCompare(aVer)
-	bVer = normalizeEngineKeyVersionForCompare(bVer)
-	return bytes.Equal(aVer, bVer)
-}
-
-var zeroLogical [mvccEncodedTimeLogicalLen]byte
-
-//gcassert:inline
-func normalizeEngineKeyVersionForCompare(a []byte) []byte {
-	// In general, the version could also be a non-timestamp version, but we know
-	// that engineKeyVersionLockTableLen+mvccEncodedTimeSentinelLen is a different
-	// constant than the above, so there is no danger here of stripping parts from
-	// a non-timestamp version.
-	const withWall = mvccEncodedTimeSentinelLen + mvccEncodedTimeWallLen
-	const withLogical = withWall + mvccEncodedTimeLogicalLen
-	const withSynthetic = withLogical + mvccEncodedTimeSyntheticLen
-	if len(a) == withSynthetic {
-		// Strip the synthetic bit component from the timestamp version. The
-		// presence of the synthetic bit does not affect key ordering or equality.
-		a = a[:withLogical]
-	}
-	if len(a) == withLogical {
-		// If the timestamp version contains a logical timestamp component that is
-		// zero, strip the component. encodeMVCCTimestampToBuf will typically omit
-		// the entire logical component in these cases as an optimization, but it
-		// does not guarantee to never include a zero logical component.
-		// Additionally, we can fall into this case after stripping off other
-		// components of the key version earlier on in this function.
-		if bytes.Equal(a[withWall:], zeroLogical[:]) {
-			a = a[:withWall]
-		}
-	}
-	return a
-}
-
 // EngineComparer is a pebble.Comparer object that implements MVCC-specific
 // comparator settings for use with Pebble.
-var EngineComparer = &pebble.Comparer{
-	Compare: EngineKeyCompare,
+var EngineComparer = func() pebble.Comparer {
+	// We use the pebble/cockroachkvs implementation, but we override the
+	// FormatKey method.
+	c := cockroachkvs.Comparer
 
-	Equal: EngineKeyEqual,
-
-	AbbreviatedKey: func(k []byte) uint64 {
-		key, ok := GetKeyPartFromEngineKey(k)
-		if !ok {
-			return 0
-		}
-		return pebble.DefaultComparer.AbbreviatedKey(key)
-	},
-
-	FormatKey: func(k []byte) fmt.Formatter {
+	c.FormatKey = func(k []byte) fmt.Formatter {
 		decoded, ok := DecodeEngineKey(k)
 		if !ok {
 			return mvccKeyFormatter{err: errors.Errorf("invalid encoded engine key: %x", k)}
@@ -558,189 +349,89 @@ var EngineComparer = &pebble.Comparer{
 			return mvccKeyFormatter{key: mvccKey}
 		}
 		return EngineKeyFormatter{key: decoded}
-	},
+	}
+	// TODO(jackson): Consider overriding ValidateKey and using the stricter
+	// EngineKey.Validate. Today some tests create lock-table keys without the
+	// lock table prefix and these test keys fail EngineKey.Validate.
+	return c
+}()
 
-	Separator: func(dst, a, b []byte) []byte {
-		aKey, ok := GetKeyPartFromEngineKey(a)
-		if !ok {
-			return append(dst, a...)
-		}
-		bKey, ok := GetKeyPartFromEngineKey(b)
-		if !ok {
-			return append(dst, a...)
-		}
-		// If the keys are the same just return a.
-		if bytes.Equal(aKey, bKey) {
-			return append(dst, a...)
-		}
-		n := len(dst)
-		// Engine key comparison uses bytes.Compare on the roachpb.Key, which is the same semantics as
-		// pebble.DefaultComparer, so reuse the latter's Separator implementation.
-		dst = pebble.DefaultComparer.Separator(dst, aKey, bKey)
-		// Did it pick a separator different than aKey -- if it did not we can't do better than a.
-		buf := dst[n:]
-		if bytes.Equal(aKey, buf) {
-			return append(dst[:n], a...)
-		}
-		// The separator is > aKey, so we only need to add the sentinel.
-		return append(dst, 0)
-	},
+// KeySchemas holds the set of KeySchemas understandable by CockroachDB.
+var KeySchemas = []*pebble.KeySchema{&cockroachkvs.KeySchema}
 
-	Successor: func(dst, a []byte) []byte {
-		aKey, ok := GetKeyPartFromEngineKey(a)
-		if !ok {
-			return append(dst, a...)
-		}
-		n := len(dst)
-		// Engine key comparison uses bytes.Compare on the roachpb.Key, which is the same semantics as
-		// pebble.DefaultComparer, so reuse the latter's Successor implementation.
-		dst = pebble.DefaultComparer.Successor(dst, aKey)
-		// Did it pick a successor different than aKey -- if it did not we can't do better than a.
-		buf := dst[n:]
-		if bytes.Equal(aKey, buf) {
-			return append(dst[:n], a...)
-		}
-		// The successor is > aKey, so we only need to add the sentinel.
-		return append(dst, 0)
-	},
+// TODO(jackson): We need to rethink uses of DefaultKeySchema when we introduce
+// a new key schema.
 
-	ImmediateSuccessor: func(dst, a []byte) []byte {
-		// The key `a` is guaranteed to be a bare prefix: It's a
-		// `engineKeyNoVersion` key without a version—just a trailing 0-byte to
-		// signify the length of the version. For example the user key "foo" is
-		// encoded as: "foo\0". We need to encode the immediate successor to
-		// "foo", which in the natural byte ordering is "foo\0".  Append a
-		// single additional zero, to encode the user key "foo\0" with a
-		// zero-length version.
-		return append(append(dst, a...), 0)
-	},
-
-	Split: func(k []byte) int {
-		keyLen := len(k)
-		if keyLen == 0 {
-			return 0
-		}
-		// Last byte is the version length + 1 when there is a version,
-		// else it is 0.
-		versionLen := int(k[keyLen-1])
-		// keyPartEnd points to the sentinel byte.
-		keyPartEnd := keyLen - 1 - versionLen
-		if keyPartEnd < 0 {
-			return keyLen
-		}
-		// Pebble requires that keys generated via a split be comparable with
-		// normal encoded engine keys. Encoded engine keys have a suffix
-		// indicating the number of bytes of version data. Engine keys without a
-		// version have a suffix of 0. We're careful in EncodeKey to make sure
-		// that the user-key always has a trailing 0. If there is no version this
-		// falls out naturally. If there is a version we prepend a 0 to the
-		// encoded version data.
-		return keyPartEnd + 1
-	},
-
-	Name: "cockroach_comparator",
-}
+// DefaultKeySchema is the name of the default key schema.
+var DefaultKeySchema = cockroachkvs.KeySchema.Name
 
 // MVCCMerger is a pebble.Merger object that implements the merge operator used
 // by Cockroach.
 var MVCCMerger = &pebble.Merger{
 	Name: "cockroach_merge_operator",
 	Merge: func(_, value []byte) (pebble.ValueMerger, error) {
-		res := &MVCCValueMerger{}
-		err := res.MergeNewer(value)
+		merger := NewMVCCValueMerger()
+		err := merger.MergeNewer(value)
 		if err != nil {
 			return nil, err
 		}
-		return res, nil
+		return merger, nil
 	},
 }
 
-var _ sstable.BlockIntervalSyntheticReplacer = MVCCBlockIntervalSyntheticReplacer{}
+var _ sstable.BlockIntervalSuffixReplacer = MVCCBlockIntervalSuffixReplacer{}
 
-type MVCCBlockIntervalSyntheticReplacer struct{}
+type MVCCBlockIntervalSuffixReplacer struct{}
 
-func (mbsr MVCCBlockIntervalSyntheticReplacer) AdjustIntervalWithSyntheticSuffix(
-	lower uint64, upper uint64, suffix []byte,
-) (adjustedLower uint64, adjustedUpper uint64, err error) {
-	synthDecoded, err := DecodeMVCCTimestampSuffix(suffix)
+func (MVCCBlockIntervalSuffixReplacer) ApplySuffixReplacement(
+	interval sstable.BlockInterval, newSuffix []byte,
+) (sstable.BlockInterval, error) {
+	synthDecoded, err := DecodeMVCCTimestampSuffix(newSuffix)
 	if err != nil {
-		return 0, 0, errors.AssertionFailedf("could not decode synthetic suffix")
+		return sstable.BlockInterval{}, errors.AssertionFailedf("could not decode synthetic suffix")
 	}
 	synthDecodedWalltime := uint64(synthDecoded.WallTime)
-	if upper >= synthDecodedWalltime {
-		return 0, 0, errors.AssertionFailedf("the synthetic suffix %d is less than or equal to the original upper bound %d", synthDecoded, upper)
-	}
 	// The returned bound includes the synthetic suffix, regardless of its logical
 	// component.
-	return synthDecodedWalltime, synthDecodedWalltime + 1, nil
+	return sstable.BlockInterval{Lower: synthDecodedWalltime, Upper: synthDecodedWalltime + 1}, nil
 }
 
-// pebbleDataBlockMVCCTimeIntervalPointCollector implements
-// pebble.DataBlockIntervalCollector for point keys.
-type pebbleDataBlockMVCCTimeIntervalPointCollector struct {
-	pebbleDataBlockMVCCTimeIntervalCollector
-}
+type pebbleIntervalMapper struct{}
 
-var _ sstable.DataBlockIntervalCollector = (*pebbleDataBlockMVCCTimeIntervalPointCollector)(nil)
+var _ sstable.IntervalMapper = pebbleIntervalMapper{}
 
-func (tc *pebbleDataBlockMVCCTimeIntervalPointCollector) Add(
-	key pebble.InternalKey, _ []byte,
-) error {
-	return tc.add(key.UserKey)
-}
-
-// pebbleDataBlockMVCCTimeIntervalRangeCollector implements
-// pebble.DataBlockIntervalCollector for range keys.
-type pebbleDataBlockMVCCTimeIntervalRangeCollector struct {
-	pebbleDataBlockMVCCTimeIntervalCollector
-}
-
-var _ sstable.DataBlockIntervalCollector = (*pebbleDataBlockMVCCTimeIntervalRangeCollector)(nil)
-
-func (tc *pebbleDataBlockMVCCTimeIntervalRangeCollector) Add(
+// MapPointKey is part of the sstable.IntervalMapper interface.
+func (pebbleIntervalMapper) MapPointKey(
 	key pebble.InternalKey, value []byte,
-) error {
-	// TODO(erikgrinaker): should reuse a buffer for keysDst, but keyspan.Key is
-	// not exported by Pebble.
-	span, err := rangekey.Decode(key, value, nil)
-	if err != nil {
-		return errors.Wrapf(err, "decoding range key at %s", key)
-	}
+) (sstable.BlockInterval, error) {
+	return mapSuffixToInterval(key.UserKey)
+}
+
+// MapRangeKey is part of the sstable.IntervalMapper interface.
+func (pebbleIntervalMapper) MapRangeKeys(span sstable.Span) (sstable.BlockInterval, error) {
+	var res sstable.BlockInterval
 	for _, k := range span.Keys {
-		if err := tc.add(k.Suffix); err != nil {
-			return errors.Wrapf(err, "recording suffix %x for range key at %s", k.Suffix, key)
+		i, err := mapSuffixToInterval(k.Suffix)
+		if err != nil {
+			return sstable.BlockInterval{}, err
 		}
+		res.UnionWith(i)
 	}
-	return nil
+	return res, nil
 }
 
-// pebbleDataBlockMVCCTimeIntervalCollector is a helper for a
-// pebble.DataBlockIntervalCollector that is used to construct a
-// pebble.BlockPropertyCollector. This provides per-block filtering, which
-// also gets aggregated to the sstable-level and filters out sstables. It must
-// only be used for MVCCKeyIterKind iterators, since it will ignore
-// blocks/sstables that contain intents (and any other key that is not a real
-// MVCC key).
-//
-// This is wrapped by structs for point or range key collection, which actually
-// implement pebble.DataBlockIntervalCollector.
-type pebbleDataBlockMVCCTimeIntervalCollector struct {
-	// min, max are the encoded timestamps.
-	min, max []byte
-}
-
-// add collects the given slice in the collector. The slice may be an entire
-// encoded MVCC key, or the bare suffix of an encoded key.
-func (tc *pebbleDataBlockMVCCTimeIntervalCollector) add(b []byte) error {
+// mapSuffixToInterval maps the suffix of a key to a timestamp interval.
+// The buffer can be an entire key or just the suffix.
+func mapSuffixToInterval(b []byte) (sstable.BlockInterval, error) {
 	if len(b) == 0 {
-		return nil
+		return sstable.BlockInterval{}, nil
 	}
 	// Last byte is the version length + 1 when there is a version,
 	// else it is 0.
 	versionLen := int(b[len(b)-1])
 	if versionLen == 0 {
 		// This is not an MVCC key that we can collect.
-		return nil
+		return sstable.BlockInterval{}, nil
 	}
 	// prefixPartEnd points to the sentinel byte, unless this is a bare suffix, in
 	// which case the index is -1.
@@ -748,7 +439,7 @@ func (tc *pebbleDataBlockMVCCTimeIntervalCollector) add(b []byte) error {
 	// Sanity check: the index should be >= -1. Additionally, if the index is >=
 	// 0, it should point to the sentinel byte, as this is a full EngineKey.
 	if prefixPartEnd < -1 || (prefixPartEnd >= 0 && b[prefixPartEnd] != sentinel) {
-		return errors.Errorf("invalid key %s", roachpb.Key(b).String())
+		return sstable.BlockInterval{}, errors.Errorf("invalid key %s", roachpb.Key(b).String())
 	}
 	// We don't need the last byte (the version length).
 	versionLen--
@@ -758,67 +449,10 @@ func (tc *pebbleDataBlockMVCCTimeIntervalCollector) add(b []byte) error {
 		versionLen == engineKeyVersionWallLogicalAndSyntheticTimeLen {
 		// INVARIANT: -1 <= prefixPartEnd < len(b) - 1.
 		// Version consists of the bytes after the sentinel and before the length.
-		b = b[prefixPartEnd+1 : len(b)-1]
-		// Lexicographic comparison on the encoded timestamps is equivalent to the
-		// comparison on decoded timestamps, so delay decoding.
-		if len(tc.min) == 0 || bytes.Compare(b, tc.min) < 0 {
-			tc.min = append(tc.min[:0], b...)
-		}
-		if len(tc.max) == 0 || bytes.Compare(b, tc.max) > 0 {
-			tc.max = append(tc.max[:0], b...)
-		}
+		ts := binary.BigEndian.Uint64(b[prefixPartEnd+1:])
+		return sstable.BlockInterval{Lower: ts, Upper: ts + 1}, nil
 	}
-	return nil
-}
-
-func decodeWallTime(ts []byte) uint64 {
-	return binary.BigEndian.Uint64(ts[0:engineKeyVersionWallTimeLen])
-}
-
-// FinishDataBlock is part of the sstable.DataBlockIntervalCollector interface.
-func (tc *pebbleDataBlockMVCCTimeIntervalCollector) FinishDataBlock() (
-	lower uint64,
-	upper uint64,
-	err error,
-) {
-	if len(tc.min) == 0 {
-		// No calls to Add that contained a timestamped key.
-		return 0, 0, nil
-	}
-	// Construct a [lower, upper) walltime that will contain all the
-	// hlc.Timestamps in this block.
-	lower = decodeWallTime(tc.min)
-	// Remember that we have to reset tc.min and tc.max to get ready for the
-	// next data block, as specified in the DataBlockIntervalCollector interface
-	// help and help too.
-	tc.min = tc.min[:0]
-	// The actual value encoded into walltime is an int64, so +1 will not
-	// overflow.
-	//
-	// Note that the timestamp with a wall time tc.max+1 and no logical component is
-	// a valid exclusive upper bound for timestamps with wall time tc.max and any
-	// logical component.
-	upper = decodeWallTime(tc.max) + 1
-	tc.max = tc.max[:0]
-	if lower >= upper {
-		return 0, 0,
-			errors.Errorf("corrupt timestamps lower %d >= upper %d", lower, upper)
-	}
-	return lower, upper, nil
-}
-
-// AddCollectedWithSuffixReplacement is part of the
-// sstable.DataBlockIntervalCollector interface.
-func (tc *pebbleDataBlockMVCCTimeIntervalCollector) AddCollectedWithSuffixReplacement(
-	oldLower, oldUpper uint64, oldSuffix, newSuffix []byte,
-) error {
-	return tc.add(newSuffix)
-}
-
-// SupportsSuffixReplacement is part of the sstable.DataBlockIntervalCollector
-// interface.
-func (tc *pebbleDataBlockMVCCTimeIntervalCollector) SupportsSuffixReplacement() bool {
-	return true
+	return sstable.BlockInterval{}, nil
 }
 
 const mvccWallTimeIntervalCollector = "MVCCTimeInterval"
@@ -850,8 +484,8 @@ var PebbleBlockPropertyCollectors = []func() pebble.BlockPropertyCollector{
 	func() pebble.BlockPropertyCollector {
 		return sstable.NewBlockIntervalCollector(
 			mvccWallTimeIntervalCollector,
-			&pebbleDataBlockMVCCTimeIntervalPointCollector{},
-			&pebbleDataBlockMVCCTimeIntervalRangeCollector{},
+			pebbleIntervalMapper{},
+			MVCCBlockIntervalSuffixReplacer{},
 		)
 	},
 }
@@ -860,13 +494,15 @@ var PebbleBlockPropertyCollectors = []func() pebble.BlockPropertyCollector{
 // Cockroach code relies on unconditionally (like range keys). New stores are by
 // default created with this version. It should correspond to the minimum
 // supported binary version.
-const MinimumSupportedFormatVersion = pebble.FormatVirtualSSTables
+const MinimumSupportedFormatVersion = pebble.FormatColumnarBlocks
 
 // DefaultPebbleOptions returns the default pebble options.
 func DefaultPebbleOptions() *pebble.Options {
 	opts := &pebble.Options{
-		Comparer: EngineComparer,
-		FS:       vfs.Default,
+		Comparer:   &EngineComparer,
+		FS:         vfs.Default,
+		KeySchema:  DefaultKeySchema,
+		KeySchemas: sstable.MakeKeySchemas(KeySchemas...),
 		// A value of 2 triggers a compaction when there is 1 sub-level.
 		L0CompactionThreshold: 2,
 		L0StopWritesThreshold: 1000,
@@ -895,24 +531,17 @@ func DefaultPebbleOptions() *pebble.Options {
 	// SSDs, that kick off an expensive GC if a lot of files are deleted at
 	// once.
 	opts.TargetByteDeletionRate = 128 << 20 // 128 MB
-	// Validate min/max keys in each SSTable when performing a compaction. This
-	// serves as a simple protection against corruption or programmer-error in
-	// Pebble.
-	opts.Experimental.KeyValidationFunc = func(userKey []byte) error {
-		engineKey, ok := DecodeEngineKey(userKey)
-		if !ok {
-			return errors.Newf("key %s could not be decoded as an EngineKey", string(userKey))
-		}
-		if err := engineKey.Validate(); err != nil {
-			return err
-		}
-		return nil
-	}
 	opts.Experimental.ShortAttributeExtractor = shortAttributeExtractorForValues
 	opts.Experimental.RequiredInPlaceValueBound = pebble.UserKeyPrefixBound{
-		Lower: keys.LocalRangeLockTablePrefix,
-		Upper: keys.LocalRangeLockTablePrefix.PrefixEnd(),
+		Lower: EncodeMVCCKey(MVCCKey{Key: keys.LocalRangeLockTablePrefix}),
+		Upper: EncodeMVCCKey(MVCCKey{Key: keys.LocalRangeLockTablePrefix.PrefixEnd()}),
 	}
+	// Disable multi-level compaction heuristic for now. See #134423
+	// for why this was disabled, and what needs to be changed to reenable it.
+	// This issue tracks re-enablement: https://github.com/cockroachdb/pebble/issues/4139
+	opts.Experimental.MultiLevelCompactionHeuristic = pebble.NoMultiLevel{}
+
+	opts.Experimental.UserKeyCategories = userKeyCategories
 
 	for i := 0; i < len(opts.Levels); i++ {
 		l := &opts.Levels[i]
@@ -963,33 +592,6 @@ func shortAttributeExtractorForValues(
 	return 0, nil
 }
 
-type pebbleLogger struct {
-	ctx   context.Context
-	depth int
-}
-
-var _ pebble.LoggerAndTracer = pebbleLogger{}
-
-func (l pebbleLogger) Infof(format string, args ...interface{}) {
-	log.Storage.InfofDepth(l.ctx, l.depth, format, args...)
-}
-
-func (l pebbleLogger) Fatalf(format string, args ...interface{}) {
-	log.Storage.FatalfDepth(l.ctx, l.depth, format, args...)
-}
-
-func (l pebbleLogger) Eventf(ctx context.Context, format string, args ...interface{}) {
-	log.Eventf(ctx, format, args...)
-}
-
-func (l pebbleLogger) IsTracingEnabled(ctx context.Context) bool {
-	return log.HasSpan(ctx)
-}
-
-func (l pebbleLogger) Errorf(format string, args ...interface{}) {
-	log.Storage.ErrorfDepth(l.ctx, l.depth, format, args...)
-}
-
 // engineConfig holds all configuration parameters and knobs used in setting up
 // a new storage engine.
 type engineConfig struct {
@@ -997,11 +599,6 @@ type engineConfig struct {
 	// ballastSize is the amount reserved by a ballast file for manual
 	// out-of-disk recovery.
 	ballastSize int64
-	// cacheSize is stored separately so that we can avoid constructing the
-	// PebbleConfig.Opts.Cache until the call to Open. A Cache is created with
-	// a ref count of 1, so creating the Cache during execution of
-	// ConfigOption makes it too easy to leak a cache.
-	cacheSize *int64
 	// env holds the initialized virtual filesystem that the Engine should use.
 	env *fs.Env
 	// maxSize is used for calculating free space and making rebalancing
@@ -1102,6 +699,8 @@ type Pebble struct {
 
 	storeIDPebbleLog *base.StoreIDContainer
 	replayer         *replay.WorkloadCollector
+	diskSlowFunc     atomic.Pointer[func(vfs.DiskSlowInfo)]
+	lowDiskSpaceFunc atomic.Pointer[func(pebble.LowDiskSpaceInfo)]
 
 	singleDelLogEvery log.EveryN
 }
@@ -1124,6 +723,20 @@ var WorkloadCollectorEnabled = envutil.EnvOrDefaultBool("COCKROACH_STORAGE_WORKL
 func (p *Pebble) SetCompactionConcurrency(n uint64) uint64 {
 	prevConcurrency := atomic.SwapUint64(&p.atomic.compactionConcurrency, n)
 	return prevConcurrency
+}
+
+// RegisterDiskSlowCallback registers a callback that will be run when a write
+// operation on the disk has been seen to be slow. Only one handler can be
+// registered per Pebble instance.
+func (p *Pebble) RegisterDiskSlowCallback(f func(vfs.DiskSlowInfo)) {
+	p.diskSlowFunc.Store(&f)
+}
+
+// RegisterLowDiskSpaceCallback registers a callback that will be run when a a
+// disk is running out of space. Only one handler can be registered per Pebble
+// instance.
+func (p *Pebble) RegisterLowDiskSpaceCallback(f func(info pebble.LowDiskSpaceInfo)) {
+	p.lowDiskSpaceFunc.Store(&f)
 }
 
 // AdjustCompactionConcurrency adjusts the compaction concurrency up or down by
@@ -1184,8 +797,8 @@ func (p *Pebble) Download(ctx context.Context, span roachpb.Span, copy bool) err
 		return nil
 	}
 	downloadSpan := pebble.DownloadSpan{
-		StartKey:               span.Key,
-		EndKey:                 span.EndKey,
+		StartKey:               EncodeMVCCKey(MVCCKey{Key: span.Key}),
+		EndKey:                 EncodeMVCCKey(MVCCKey{Key: span.EndKey}),
 		ViaBackingFileDownload: copy,
 	}
 	return p.db.Download(ctx, []pebble.DownloadSpan{downloadSpan})
@@ -1233,7 +846,7 @@ func newPebble(ctx context.Context, cfg engineConfig) (p *Pebble, err error) {
 	cfg.opts.Lock = cfg.env.DirectoryLock
 	cfg.opts.ErrorIfNotExists = cfg.mustExist
 	for i := range cfg.opts.Levels {
-		cfg.opts.Levels[i].Compression = func() sstable.Compression {
+		cfg.opts.Levels[i].Compression = func() block.Compression {
 			return getCompressionAlgorithm(ctx, cfg.settings, CompressionAlgorithmStorage)
 		}
 	}
@@ -1279,14 +892,14 @@ func newPebble(ctx context.Context, cfg engineConfig) (p *Pebble, err error) {
 		// Pebble has better guards against this.
 		return cfg.sharedStorage != nil || !IngestAsFlushable.Get(&cfg.settings.SV)
 	}
-	// Multi-level compactions were discovered to cause excessively large
-	// compactions that can have adverse affects. We disable these types of
-	// compactions for now.
-	// See https://github.com/cockroachdb/pebble/issues/3120
-	// TODO(travers): Re-enable, once the issues are resolved.
-	cfg.opts.Experimental.MultiLevelCompactionHeuristic = pebble.NoMultiLevel{}
 	cfg.opts.Experimental.IngestSplit = func() bool {
 		return IngestSplitEnabled.Get(&cfg.settings.SV)
+	}
+	cfg.opts.Experimental.EnableColumnarBlocks = func() bool {
+		return ColumnarBlocksEnabled.Get(&cfg.settings.SV)
+	}
+	cfg.opts.Experimental.EnableDeleteOnlyCompactionExcises = func() bool {
+		return deleteCompactionsCanExcise.Get(&cfg.settings.SV)
 	}
 
 	auxDir := cfg.opts.FS.PathJoin(cfg.env.Dir, base.AuxiliaryDir)
@@ -1346,27 +959,6 @@ func newPebble(ctx context.Context, cfg engineConfig) (p *Pebble, err error) {
 		replayer:                replay.NewWorkloadCollector(cfg.env.Dir),
 		singleDelLogEvery:       log.Every(5 * time.Minute),
 		diskWriteStatsCollector: cfg.DiskWriteStatsCollector,
-	}
-
-	cfg.opts.Experimental.SingleDeleteInvariantViolationCallback = func(userKey []byte) {
-		logFunc := func(ctx context.Context, format string, args ...interface{}) {}
-		if SingleDeleteCrashOnInvariantViolation.Get(&cfg.settings.SV) {
-			logFunc = log.Fatalf
-		} else if p.singleDelLogEvery.ShouldLog() {
-			logFunc = log.Infof
-		}
-		logFunc(logCtx, "SingleDel invariant violation callback (can be false positive) on key %s", roachpb.Key(userKey))
-		atomic.AddInt64(&p.singleDelInvariantViolationCount, 1)
-	}
-	cfg.opts.Experimental.IneffectualSingleDeleteCallback = func(userKey []byte) {
-		logFunc := func(ctx context.Context, format string, args ...interface{}) {}
-		if SingleDeleteCrashOnInvariantViolation.Get(&cfg.settings.SV) {
-			logFunc = log.Fatalf
-		} else if p.singleDelLogEvery.ShouldLog() {
-			logFunc = log.Infof
-		}
-		logFunc(logCtx, "Ineffectual SingleDel callback (can be false positive) on key %s", roachpb.Key(userKey))
-		atomic.AddInt64(&p.singleDelIneffectualCount, 1)
 	}
 
 	// MaxConcurrentCompactions can be set by multiple sources, but all the
@@ -1535,6 +1127,28 @@ func newPebble(ctx context.Context, cfg engineConfig) (p *Pebble, err error) {
 	return p, nil
 }
 
+var userKeyCategories = pebble.MakeUserKeyCategories(
+	EngineComparer.Compare,
+	category("local-1", keys.LocalRangeIDPrefix.AsRawKey()),
+	category("rangeid", keys.LocalRangeIDPrefix.AsRawKey().PrefixEnd()),
+	category("local-2", keys.LocalRangePrefix),
+	category("range", keys.LocalRangePrefix.PrefixEnd()),
+	category("local-3", keys.LocalRangeLockTablePrefix),
+	category("lock", keys.LocalRangeLockTablePrefix.PrefixEnd()),
+	category("local-4", keys.LocalPrefix.PrefixEnd()),
+	category("meta", keys.MetaMax),
+	category("system", keys.SystemMax),
+	category("tenant", nil),
+)
+
+func category(name string, upperBound roachpb.Key) pebble.UserKeyCategory {
+	if upperBound == nil {
+		return pebble.UserKeyCategory{Name: name}
+	}
+	ek := EngineKey{Key: upperBound}
+	return pebble.UserKeyCategory{Name: name, UpperBound: ek.Encode()}
+}
+
 // async launches the provided function in a new goroutine. It uses a wait group
 // to synchronize with (*Pebble).Close to ensure all launched goroutines have
 // exited before Close returns.
@@ -1633,6 +1247,10 @@ func (p *Pebble) makeMetricEtcEventListener(ctx context.Context) pebble.EventLis
 				return
 			}
 			atomic.AddInt64(&p.diskSlowCount, 1)
+			// Call any custom handlers registered for disk slowness.
+			if fn := p.diskSlowFunc.Load(); fn != nil {
+				(*fn)(info)
+			}
 		},
 		FlushEnd: func(info pebble.FlushInfo) {
 			if info.Err != nil {
@@ -1643,6 +1261,26 @@ func (p *Pebble) makeMetricEtcEventListener(ctx context.Context) pebble.EventLis
 			p.mu.Unlock()
 			if cb != nil {
 				cb()
+			}
+		},
+		LowDiskSpace: func(info pebble.LowDiskSpaceInfo) {
+			if fn := p.lowDiskSpaceFunc.Load(); fn != nil {
+				(*fn)(info)
+			}
+		},
+		PossibleAPIMisuse: func(info pebble.PossibleAPIMisuseInfo) {
+			switch info.Kind {
+			case pebble.IneffectualSingleDelete:
+				if p.singleDelLogEvery.ShouldLog() {
+					log.Infof(p.logCtx, "possible ineffectual SingleDel on key %s", roachpb.Key(info.UserKey))
+				}
+				atomic.AddInt64(&p.singleDelIneffectualCount, 1)
+
+			case pebble.NondeterministicSingleDelete:
+				if p.singleDelLogEvery.ShouldLog() {
+					log.Infof(p.logCtx, "possible nondeterministic SingleDel on key %s", roachpb.Key(info.UserKey))
+				}
+				atomic.AddInt64(&p.singleDelInvariantViolationCount, 1)
 			}
 		},
 	}
@@ -1802,8 +1440,8 @@ func (p *Pebble) ScanInternal(
 ) error {
 	rawLower := EngineKey{Key: lower}.Encode()
 	rawUpper := EngineKey{Key: upper}.Encode()
-	// TODO(sumeer): set CategoryAndQoS.
-	return p.db.ScanInternal(ctx, sstable.CategoryAndQoS{}, rawLower, rawUpper, visitPointKey,
+	// TODO(sumeer): set category.
+	return p.db.ScanInternal(ctx, block.CategoryUnknown, rawLower, rawUpper, visitPointKey,
 		visitRangeDel, visitRangeKey, visitSharedFile, visitExternalFile)
 }
 
@@ -1928,6 +1566,13 @@ func (p *Pebble) ClearMVCCIteratorRange(start, end roachpb.Key, pointKeys, range
 func (p *Pebble) ClearMVCCRangeKey(rangeKey MVCCRangeKey) error {
 	if err := rangeKey.Validate(); err != nil {
 		return err
+	}
+	// If the range key holds an encoded timestamp as it was read from storage,
+	// write the tombstone to clear it using the same encoding of the timestamp.
+	// See #129592.
+	if len(rangeKey.EncodedTimestampSuffix) > 0 {
+		return p.ClearEngineRangeKey(
+			rangeKey.StartKey, rangeKey.EndKey, rangeKey.EncodedTimestampSuffix)
 	}
 	return p.ClearEngineRangeKey(
 		rangeKey.StartKey, rangeKey.EndKey, EncodeMVCCTimestampSuffix(rangeKey.Timestamp))
@@ -2216,8 +1861,15 @@ func (p *Pebble) GetMetrics() Metrics {
 	p.batchCommitStats.Lock()
 	m.BatchCommitStats = p.batchCommitStats.AggregatedBatchCommitStats
 	p.batchCommitStats.Unlock()
-	m.DiskWriteStats = p.diskWriteStatsCollector.GetStats()
+	if p.diskWriteStatsCollector != nil {
+		m.DiskWriteStats = p.diskWriteStatsCollector.GetStats()
+	}
 	return m
+}
+
+// GetPebbleOptions implements the Engine interface.
+func (p *Pebble) GetPebbleOptions() *pebble.Options {
+	return p.cfg.opts
 }
 
 // GetEncryptionRegistries implements the Engine interface.
@@ -2370,21 +2022,16 @@ func (p *Pebble) NewEventuallyFileOnlySnapshot(keyRanges []roachpb.Span) Eventua
 	}
 }
 
-// Type implements the Engine interface.
-func (p *Pebble) Type() enginepb.EngineType {
-	return enginepb.EngineTypePebble
-}
-
 // IngestLocalFiles implements the Engine interface.
 func (p *Pebble) IngestLocalFiles(ctx context.Context, paths []string) error {
-	return p.db.Ingest(paths)
+	return p.db.Ingest(ctx, paths)
 }
 
 // IngestLocalFilesWithStats implements the Engine interface.
 func (p *Pebble) IngestLocalFilesWithStats(
 	ctx context.Context, paths []string,
 ) (pebble.IngestOperationStats, error) {
-	return p.db.IngestWithStats(paths)
+	return p.db.IngestWithStats(ctx, paths)
 }
 
 // IngestAndExciseFiles implements the Engine interface.
@@ -2400,14 +2047,14 @@ func (p *Pebble) IngestAndExciseFiles(
 		Start: EngineKey{Key: exciseSpan.Key}.Encode(),
 		End:   EngineKey{Key: exciseSpan.EndKey}.Encode(),
 	}
-	return p.db.IngestAndExcise(paths, shared, external, rawSpan, sstsContainExciseTombstone)
+	return p.db.IngestAndExcise(ctx, paths, shared, external, rawSpan)
 }
 
 // IngestExternalFiles implements the Engine interface.
 func (p *Pebble) IngestExternalFiles(
 	ctx context.Context, external []pebble.ExternalFile,
 ) (pebble.IngestOperationStats, error) {
-	return p.db.IngestExternalFiles(external)
+	return p.db.IngestExternalFiles(ctx, external)
 }
 
 // PreIngestDelay implements the Engine interface.
@@ -2417,8 +2064,11 @@ func (p *Pebble) PreIngestDelay(ctx context.Context) {
 
 // GetTableMetrics implements the Engine interface.
 func (p *Pebble) GetTableMetrics(start, end roachpb.Key) ([]enginepb.SSTableMetricsInfo, error) {
-	tableInfo, err := p.db.SSTables(pebble.WithKeyRangeFilter(start, end), pebble.WithProperties(), pebble.WithApproximateSpanBytes())
-
+	filterOpt := pebble.WithKeyRangeFilter(
+		EncodeMVCCKey(MVCCKey{Key: start}),
+		EncodeMVCCKey(MVCCKey{Key: end}),
+	)
+	tableInfo, err := p.db.SSTables(filterOpt, pebble.WithProperties(), pebble.WithApproximateSpanBytes())
 	if err != nil {
 		return []enginepb.SSTableMetricsInfo{}, err
 	}
@@ -2433,17 +2083,15 @@ func (p *Pebble) GetTableMetrics(start, end roachpb.Key) ([]enginepb.SSTableMetr
 	for level, sstableInfos := range tableInfo {
 		for _, sstableInfo := range sstableInfos {
 			marshalTableInfo, err := json.Marshal(sstableInfo)
-
 			if err != nil {
 				return []enginepb.SSTableMetricsInfo{}, err
 			}
-
-			tableID := sstableInfo.TableInfo.FileNum
-			approximateSpanBytes, err := strconv.ParseUint(sstableInfo.Properties.UserProperties["approximate-span-bytes"], 10, 64)
-			if err != nil {
-				return []enginepb.SSTableMetricsInfo{}, err
-			}
-			metricsInfo = append(metricsInfo, enginepb.SSTableMetricsInfo{TableID: uint64(tableID), Level: int32(level), ApproximateSpanBytes: approximateSpanBytes, TableInfoJSON: marshalTableInfo})
+			metricsInfo = append(metricsInfo, enginepb.SSTableMetricsInfo{
+				Level:                int32(level),
+				TableID:              uint64(sstableInfo.TableInfo.FileNum),
+				TableInfoJSON:        marshalTableInfo,
+				ApproximateSpanBytes: sstableInfo.ApproximateSpanBytes,
+			})
 		}
 	}
 	return metricsInfo, nil
@@ -2504,9 +2152,20 @@ func (p *Pebble) Compact() error {
 
 // CompactRange implements the Engine interface.
 func (p *Pebble) CompactRange(start, end roachpb.Key) error {
-	bufStart := EncodeMVCCKey(MVCCKey{start, hlc.Timestamp{}})
-	bufEnd := EncodeMVCCKey(MVCCKey{end, hlc.Timestamp{}})
-	return p.db.Compact(bufStart, bufEnd, true /* parallel */)
+	// TODO(jackson): Consider changing Engine.CompactRange's signature to take
+	// in EngineKeys so that it's unambiguous that the arguments have already
+	// been encoded as engine keys. We do need to encode these keys in protocol
+	// buffers when they're sent over the wire during the
+	// crdb_internal.compact_engine_span builtin. Maybe we should have a
+	// roachpb.Key equivalent for EngineKey so we don't lose that type
+	// information?
+	if ek, ok := DecodeEngineKey(start); !ok || ek.Validate() != nil {
+		return errors.Errorf("invalid start key: %q", start)
+	}
+	if ek, ok := DecodeEngineKey(end); !ok || ek.Validate() != nil {
+		return errors.Errorf("invalid end key: %q", end)
+	}
+	return p.db.Compact(start, end, true /* parallel */)
 }
 
 // RegisterFlushCompletedCallback implements the Engine interface.
@@ -2584,8 +2243,7 @@ func (p *Pebble) CreateCheckpoint(dir string, spans []roachpb.Span) error {
 // named version, it can be assumed all *nodes* have ratcheted to the pebble
 // version associated with it, since they did so during the fence version.
 var pebbleFormatVersionMap = map[clusterversion.Key]pebble.FormatMajorVersion{
-	clusterversion.V23_2: pebble.FormatVirtualSSTables,
-	clusterversion.V24_1_PebbleFormatSyntheticPrefixSuffix: pebble.FormatSyntheticPrefixSuffix,
+	clusterversion.V24_3: pebble.FormatColumnarBlocks,
 }
 
 // pebbleFormatVersionKeys contains the keys in the map above, in descending order.
@@ -2607,7 +2265,7 @@ func pebbleFormatVersion(clusterVersion roachpb.Version) pebble.FormatMajorVersi
 	// pebbleFormatVersionKeys are sorted in descending order; find the first one
 	// that is not newer than clusterVersion.
 	for _, k := range pebbleFormatVersionKeys {
-		if clusterVersion.AtLeast(k.FenceVersion()) {
+		if clusterVersion.AtLeast(k.Version().FenceVersion()) {
 			return pebbleFormatVersionMap[k]
 		}
 	}
@@ -2956,7 +2614,7 @@ func (p *pebbleReadOnly) ConsistentIterators() bool {
 // PinEngineStateForIterators implements the Engine interface.
 func (p *pebbleReadOnly) PinEngineStateForIterators(readCategory fs.ReadCategory) error {
 	if p.iter == nil {
-		o := &pebble.IterOptions{CategoryAndQoS: fs.GetCategoryAndQoS(readCategory)}
+		o := &pebble.IterOptions{Category: readCategory.PebbleCategory()}
 		if p.durability == GuaranteedDurability {
 			o.OnlyReadGuaranteedDurable = true
 		}
@@ -3174,8 +2832,8 @@ func (p *pebbleSnapshot) ScanInternal(
 ) error {
 	rawLower := EngineKey{Key: lower}.Encode()
 	rawUpper := EngineKey{Key: upper}.Encode()
-	// TODO(sumeer): set CategoryAndQoS.
-	return p.snapshot.ScanInternal(ctx, sstable.CategoryAndQoS{}, rawLower, rawUpper, visitPointKey,
+	// TODO(sumeer): set category.
+	return p.snapshot.ScanInternal(ctx, block.CategoryUnknown, rawLower, rawUpper, visitPointKey,
 		visitRangeDel, visitRangeKey, visitSharedFile, visitExternalFile)
 }
 
@@ -3298,8 +2956,8 @@ func (p *pebbleEFOS) ScanInternal(
 ) error {
 	rawLower := EngineKey{Key: lower}.Encode()
 	rawUpper := EngineKey{Key: upper}.Encode()
-	// TODO(sumeer): set CategoryAndQoS.
-	return p.efos.ScanInternal(ctx, sstable.CategoryAndQoS{}, rawLower, rawUpper, visitPointKey,
+	// TODO(sumeer): set category.
+	return p.efos.ScanInternal(ctx, block.CategoryUnknown, rawLower, rawUpper, visitPointKey,
 		visitRangeDel, visitRangeKey, visitSharedFile, visitExternalFile)
 }
 

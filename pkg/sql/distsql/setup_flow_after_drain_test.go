@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package distsql
 
@@ -16,8 +11,8 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/execversion"
 	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -52,7 +47,7 @@ func TestSetupFlowAfterDrain(t *testing.T) {
 	)
 
 	// We create some flow; it doesn't matter what.
-	req := execinfrapb.SetupFlowRequest{Version: execinfra.Version}
+	req := execinfrapb.SetupFlowRequest{Version: execversion.Latest}
 	req.Flow = execinfrapb.FlowSpec{
 		Processors: []execinfrapb.ProcessorSpec{
 			{

@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -17,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/backup/backuptestutils"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/clusterstats"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
@@ -138,6 +134,10 @@ func registerOnlineRestorePerf(r registry.Registry) {
 						sp.namePrefix = sp.namePrefix + fmt.Sprintf("/workarounds=%t", useWorkarounds)
 					}
 
+					if sp.skip == "" && !backuptestutils.IsOnlineRestoreSupported() {
+						sp.skip = "online restore is only tested on development branch"
+					}
+
 					sp.initTestName()
 					r.Add(registry.TestSpec{
 						Name:      sp.testName,
@@ -147,10 +147,11 @@ func registerOnlineRestorePerf(r registry.Registry) {
 						Timeout:   sp.timeout,
 						// These tests measure performance. To ensure consistent perf,
 						// disable metamorphic encryption.
-						EncryptionSupport: registry.EncryptionAlwaysDisabled,
-						CompatibleClouds:  sp.backup.CompatibleClouds(),
-						Suites:            sp.suites,
-						Skip:              sp.skip,
+						EncryptionSupport:         registry.EncryptionAlwaysDisabled,
+						CompatibleClouds:          sp.backup.CompatibleClouds(),
+						Suites:                    sp.suites,
+						TestSelectionOptOutSuites: sp.suites,
+						Skip:                      sp.skip,
 						// Takes 10 minutes on OR tests for some reason.
 						SkipPostValidations: registry.PostValidationReplicaDivergence,
 						Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
@@ -221,14 +222,15 @@ func registerOnlineRestoreCorrectness(r registry.Registry) {
 	sp.initTestName()
 	r.Add(
 		registry.TestSpec{
-			Name:                sp.testName,
-			Owner:               registry.OwnerDisasterRecovery,
-			Cluster:             sp.hardware.makeClusterSpecs(r, sp.backup.cloud),
-			Timeout:             sp.timeout,
-			CompatibleClouds:    sp.backup.CompatibleClouds(),
-			Suites:              sp.suites,
-			SkipPostValidations: registry.PostValidationReplicaDivergence,
-			Skip:                sp.skip,
+			Name:                      sp.testName,
+			Owner:                     registry.OwnerDisasterRecovery,
+			Cluster:                   sp.hardware.makeClusterSpecs(r, sp.backup.cloud),
+			Timeout:                   sp.timeout,
+			CompatibleClouds:          sp.backup.CompatibleClouds(),
+			Suites:                    sp.suites,
+			TestSelectionOptOutSuites: sp.suites,
+			SkipPostValidations:       registry.PostValidationReplicaDivergence,
+			Skip:                      sp.skip,
 			Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 				defaultSeed := crdbworkload.NewUint64RandomSeed().Seed()
 				var defaultFakeTime uint32 = 1713818229 // Set to a fixed value for reproducibility
@@ -425,7 +427,7 @@ func exportStats(ctx context.Context, rd restoreDriver, restoreStats restoreStat
 			exportingStats.Stats[latencyQueryKey].Value[i] = 0
 		}
 	}
-	if err := exportingStats.SerializeOutRun(ctx, rd.t, rd.c); err != nil {
+	if err := exportingStats.SerializeOutRun(ctx, rd.t, rd.c, rd.t.ExportOpenmetrics()); err != nil {
 		return errors.Wrap(err, "failed to export stats")
 	}
 	return nil
@@ -455,7 +457,7 @@ func waitForDownloadJob(
 			if err := conn.QueryRow(`SELECT status FROM [SHOW JOBS] WHERE job_type = 'RESTORE' ORDER BY created DESC LIMIT 1`).Scan(&status); err != nil {
 				return downloadJobEndTimeLowerBound, err
 			}
-			if status == string(jobs.StatusSucceeded) {
+			if status == string(jobs.StateSucceeded) {
 				var externalBytes uint64
 				if err := conn.QueryRow(jobutils.GetExternalBytesForConnectedTenant).Scan(&externalBytes); err != nil {
 					return downloadJobEndTimeLowerBound, errors.Wrapf(err, "could not get external bytes")
@@ -468,7 +470,7 @@ func waitForDownloadJob(
 				time.Sleep(postDownloadDelay)
 				downloadJobEndTimeLowerBound = timeutil.Now().Add(-pollingInterval).Add(-postDownloadDelay)
 				return downloadJobEndTimeLowerBound, nil
-			} else if status == string(jobs.StatusRunning) {
+			} else if status == string(jobs.StateRunning) {
 				l.Printf("Download job still running")
 			} else {
 				return downloadJobEndTimeLowerBound, errors.Newf("job unexpectedly found in %s state", status)
@@ -560,16 +562,22 @@ func runRestore(
 			if _, err := db.Exec("SET CLUSTER SETTING kv.range_merge.skip_external_bytes.enabled=true"); err != nil {
 				return err
 			}
-
 		}
-		opts := ""
+		opts := "WITH UNSAFE_RESTORE_INCOMPATIBLE_VERSION"
 		if runOnline {
-			opts = "WITH EXPERIMENTAL DEFERRED COPY"
+			opts = "WITH EXPERIMENTAL DEFERRED COPY, UNSAFE_RESTORE_INCOMPATIBLE_VERSION"
 		}
 		if err := maybeAddSomeEmptyTables(ctx, rd); err != nil {
 			return errors.Wrapf(err, "failed to add some empty tables")
 		}
 		restoreStartTime = timeutil.Now()
+		if runOnline && sp.linkPhaseTimeout != 0 {
+			timer := time.AfterFunc(sp.linkPhaseTimeout, func() {
+				c.CaptureSideEyeSnapshot(ctx)
+			})
+			defer timer.Stop()
+		}
+
 		restoreCmd := rd.restoreCmd(fmt.Sprintf("DATABASE %s", sp.backup.workload.DatabaseName()), opts)
 		t.L().Printf("Running %s", restoreCmd)
 		if _, err = db.ExecContext(ctx, restoreCmd); err != nil {

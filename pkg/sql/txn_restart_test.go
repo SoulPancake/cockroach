@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -36,6 +31,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/pgurlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/caller"
@@ -458,7 +454,7 @@ func TestTxnAutoRetry(t *testing.T) {
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(context.Background())
 	{
-		pgURL, cleanup := sqlutils.PGUrl(t, s.AdvSQLAddr(), "TestTxnAutoRetry", url.User(username.RootUser))
+		pgURL, cleanup := pgurlutils.PGUrl(t, s.AdvSQLAddr(), "TestTxnAutoRetry", url.User(username.RootUser))
 		defer cleanup()
 		if err := aborter.Init(pgURL); err != nil {
 			t.Fatal(err)
@@ -637,7 +633,7 @@ func TestAbortedTxnOnlyRetriedOnce(t *testing.T) {
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(context.Background())
 	{
-		pgURL, cleanup := sqlutils.PGUrl(t, s.AdvSQLAddr(), "TestAbortedTxnOnlyRetriedOnce", url.User(username.RootUser))
+		pgURL, cleanup := pgurlutils.PGUrl(t, s.AdvSQLAddr(), "TestAbortedTxnOnlyRetriedOnce", url.User(username.RootUser))
 		defer cleanup()
 		if err := aborter.Init(pgURL); err != nil {
 			t.Fatal(err)
@@ -674,7 +670,7 @@ CREATE TABLE t.test (k INT PRIMARY KEY, v TEXT);
 // rollbackStrategy is the type of statement which a client can use to
 // rollback aborted txns from retryable errors. We accept two statements
 // for rolling back to the cockroach_restart savepoint. See
-// *Executor.execStmtInAbortedTxn for more about transaction retries.
+// *connExecutor.execStmtInAbortedState for more about transaction retries.
 type rollbackStrategy int
 
 const (
@@ -793,7 +789,7 @@ func TestTxnUserRestart(t *testing.T) {
 				s, sqlDB, _ := serverutils.StartServer(t, params)
 				defer s.Stopper().Stop(context.Background())
 				{
-					pgURL, cleanup := sqlutils.PGUrl(t, s.AdvSQLAddr(), "TestTxnUserRestart", url.User(username.RootUser))
+					pgURL, cleanup := pgurlutils.PGUrl(t, s.AdvSQLAddr(), "TestTxnUserRestart", url.User(username.RootUser))
 					defer cleanup()
 					if err := aborter.Init(pgURL); err != nil {
 						t.Fatal(err)
@@ -909,7 +905,7 @@ func TestErrorOnCommitFinalizesTxn(t *testing.T) {
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(context.Background())
 	{
-		pgURL, cleanup := sqlutils.PGUrl(t, s.AdvSQLAddr(), "TestErrorOnCommitFinalizesTxn", url.User(username.RootUser))
+		pgURL, cleanup := pgurlutils.PGUrl(t, s.AdvSQLAddr(), "TestErrorOnCommitFinalizesTxn", url.User(username.RootUser))
 		defer cleanup()
 		if err := aborter.Init(pgURL); err != nil {
 			t.Fatal(err)
@@ -996,7 +992,7 @@ func TestRollbackInRestartWait(t *testing.T) {
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(context.Background())
 	{
-		pgURL, cleanup := sqlutils.PGUrl(t, s.AdvSQLAddr(), "TestRollbackInRestartWait", url.User(username.RootUser))
+		pgURL, cleanup := pgurlutils.PGUrl(t, s.AdvSQLAddr(), "TestRollbackInRestartWait", url.User(username.RootUser))
 		defer cleanup()
 		if err := aborter.Init(pgURL); err != nil {
 			t.Fatal(err)
@@ -1177,7 +1173,7 @@ func TestReacquireLeaseOnRestart(t *testing.T) {
 						atomic.AddInt32(&restartDone, 1)
 						// Return ReadWithinUncertaintyIntervalError to update
 						// the transaction timestamp on retry.
-						txn := ba.Txn
+						txn := ba.Txn.Clone()
 						txn.ResetObservedTimestamps()
 						now := s.Clock().NowAsClockTimestamp()
 						txn.UpdateObservedTimestamp(s.NodeID(), now)
@@ -1648,6 +1644,8 @@ func TestTxnAutoRetryReasonAvailable(t *testing.T) {
 	r.Exec(t, `
 CREATE DATABASE t;
 CREATE TABLE t.test (k TEXT PRIMARY KEY, v TEXT);
+`)
+	r.Exec(t, `
 INSERT INTO t.test (k, v) VALUES ('test_key', 'test_val');
 SELECT * from t.test WHERE k = 'test_key';
 `)

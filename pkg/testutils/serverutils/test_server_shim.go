@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 // This file provides generic interfaces that allow tests to set up test servers
 // without importing the server package (avoiding circular dependencies).
@@ -31,8 +26,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security/securitytest"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
+	"github.com/cockroachdb/cockroach/pkg/testutils/pgurlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
-	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -42,6 +37,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/errors"
 )
+
+const defaultTestTenantName = roachpb.TenantName("test-tenant")
 
 // defaultTestTenantMessage is a message that is printed when a test is run
 // under cluster virtualization. This is useful for debugging test failures.
@@ -324,6 +321,10 @@ func NewServer(params base.TestServerArgs) (TestServerInterface, error) {
 		return nil, errors.AssertionFailedf("programming error: DefaultTestTenant does not contain a decision\n(maybe call ShouldStartDefaultTestTenant?)")
 	}
 
+	if params.DefaultTenantName == "" {
+		params.DefaultTenantName = defaultTestTenantName
+	}
+
 	srv, err := srvFactoryImpl.New(params)
 	if err != nil {
 		return nil, err
@@ -337,7 +338,7 @@ func NewServer(params base.TestServerArgs) (TestServerInterface, error) {
 func OpenDBConnE(
 	sqlAddr string, useDatabase string, insecure bool, stopper *stop.Stopper,
 ) (*gosql.DB, error) {
-	pgURL, cleanupGoDB, err := sqlutils.PGUrlE(
+	pgURL, cleanupGoDB, err := pgurlutils.PGUrlE(
 		sqlAddr, "StartServer" /* prefix */, url.User(username.RootUser))
 	if err != nil {
 		return nil, err

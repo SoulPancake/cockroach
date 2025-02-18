@@ -1,17 +1,14 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { Loading } from "@cockroachlabs/cluster-ui";
 import isNil from "lodash/isNil";
 import React from "react";
 import { connect } from "react-redux";
 import { withRouter, RouteComponentProps } from "react-router-dom";
 import { createSelector } from "reselect";
-import { Loading } from "@cockroachlabs/cluster-ui";
 
 import { cockroach } from "src/js/protos";
 import {

@@ -60,6 +60,7 @@ upsert descriptor #104
   -    partitioning: {}
   -    predicate: i > 0:::INT8
   -    sharded: {}
+  -    vecConfig: {}
   -    version: 3
   +  indexes: []
      modificationTime: {}
@@ -84,6 +85,7 @@ upsert descriptor #104
   +      partitioning: {}
   +      predicate: i > 0:::INT8
   +      sharded: {}
+  +      vecConfig: {}
   +      version: 3
   +    mutationId: 2
   +    state: WRITE_ONLY
@@ -137,6 +139,8 @@ upsert descriptor #104
   +      columns:
   +        "1": i
   +        "2": j
+  +        "4294967292": crdb_internal_origin_timestamp
+  +        "4294967293": crdb_internal_origin_id
   +        "4294967294": tableoid
   +        "4294967295": crdb_internal_mvcc_timestamp
   +      families:
@@ -176,6 +180,7 @@ upsert descriptor #104
   -    partitioning: {}
   -    predicate: i > 0:::INT8
   -    sharded: {}
+  -    vecConfig: {}
   -    version: 3
   +  indexes: []
      modificationTime: {}
@@ -200,6 +205,7 @@ upsert descriptor #104
   +      partitioning: {}
   +      predicate: i > 0:::INT8
   +      sharded: {}
+  +      vecConfig: {}
   +      version: 3
   +    mutationId: 2
   +    state: WRITE_ONLY
@@ -243,6 +249,7 @@ upsert descriptor #104
          partitioning: {}
   -      predicate: i > 0:::INT8
          sharded: {}
+         vecConfig: {}
          version: 3
        mutationId: 2
   -    state: WRITE_ONLY
@@ -262,10 +269,10 @@ upsert descriptor #104
   -  version: "8"
   +  version: "9"
 persist all catalog changes to storage
-update progress of schema change job #1: "PostCommitNonRevertiblePhase stage 2 of 2 with 3 MutationType ops pending"
+update progress of schema change job #1: "PostCommitNonRevertiblePhase stage 2 of 2 with 4 MutationType ops pending"
 commit transaction #3
 begin transaction #4
-## PostCommitNonRevertiblePhase stage 2 of 2 with 5 MutationType ops
+## PostCommitNonRevertiblePhase stage 2 of 2 with 6 MutationType ops
 upsert descriptor #104
   ...
      createAsOfTime:
@@ -279,6 +286,8 @@ upsert descriptor #104
   -      columns:
   -        "1": i
   -        "2": j
+  -        "4294967292": crdb_internal_origin_timestamp
+  -        "4294967293": crdb_internal_origin_id
   -        "4294967294": tableoid
   -        "4294967295": crdb_internal_mvcc_timestamp
   -      families:
@@ -319,6 +328,7 @@ upsert descriptor #104
   -      name: crdb_internal_index_2_name_placeholder
   -      partitioning: {}
   -      sharded: {}
+  -      vecConfig: {}
   -      version: 3
   -    mutationId: 2
   -    state: DELETE_ONLY

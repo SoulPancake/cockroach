@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -190,7 +185,7 @@ func (r *Replica) executeWriteBatch(
 	// the concurrency guard will be assumed by Raft, so provide the guard to
 	// evalAndPropose. If we return with an error from executeWriteBatch, we
 	// also return the guard which the caller reassumes ownership of.
-	ch, abandon, _, writeBytes, pErr := r.evalAndPropose(ctx, ba, g, &st, ui, tok.Move(ctx))
+	ch, abandonTok, _, writeBytes, pErr := r.evalAndPropose(ctx, ba, g, &st, ui, tok.Move(ctx))
 	if pErr != nil {
 		if cErr, ok := pErr.GetDetail().(*kvpb.ReplicaCorruptionError); ok {
 			// Need to unlock here because setCorruptRaftMuLock needs readOnlyCmdMu not held.
@@ -345,7 +340,7 @@ func (r *Replica) executeWriteBatch(
 						}
 					})
 			}
-			abandon()
+			r.abandon(abandonTok)
 			dur := timeutil.Since(startTime)
 			log.VEventf(ctx, 2, "context cancellation after %.2fs of attempting command %s",
 				dur.Seconds(), ba)
@@ -356,7 +351,7 @@ func (r *Replica) executeWriteBatch(
 		case <-shouldQuiesce:
 			// If shutting down, return an AmbiguousResultError, which indicates
 			// to the caller that the command may have executed.
-			abandon()
+			r.abandon(abandonTok)
 			log.VEventf(ctx, 2, "shutdown cancellation after %0.1fs of attempting command %s",
 				timeutil.Since(startTime).Seconds(), ba)
 			return nil, nil, nil, kvpb.NewError(kvpb.NewAmbiguousResultErrorf(

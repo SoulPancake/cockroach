@@ -1,21 +1,16 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
+import classNames from "classnames/bind";
 import isNil from "lodash/isNil";
 import merge from "lodash/merge";
-import { RouteComponentProps } from "react-router-dom";
-import classNames from "classnames/bind";
 import moment from "moment-timezone";
+import React from "react";
+import { RouteComponentProps } from "react-router-dom";
 
-import { syncHistory } from "src/util/query";
+import { Loading } from "src/loading";
 import { Pagination } from "src/pagination";
 import {
   SortSetting,
@@ -23,13 +18,13 @@ import {
   updateSortSettingQueryParamsOnTab,
   ColumnDescriptor,
 } from "src/sortedtable";
-import { Loading } from "src/loading";
+import statementsPageStyles from "src/statementsPage/statementsPage.module.scss";
 import {
   ICancelSessionRequest,
   ICancelQueryRequest,
 } from "src/store/terminateQuery";
-import statementsPageStyles from "src/statementsPage/statementsPage.module.scss";
 import { TimestampToMoment, unset } from "src/util";
+import { syncHistory } from "src/util/query";
 
 import ColumnsSelector, {
   SelectOption,
@@ -50,20 +45,20 @@ import {
 } from "../statsTableUtil/statsTableUtil";
 import { TableStatistics } from "../tableStatistics";
 
+import { EmptySessionsTablePlaceholder } from "./emptySessionsTablePlaceholder";
 import sessionPageStyles from "./sessionPage.module.scss";
-import TerminateQueryModal, {
-  TerminateQueryModalRef,
-} from "./terminateQueryModal";
-import TerminateSessionModal, {
-  TerminateSessionModalRef,
-} from "./terminateSessionModal";
 import {
   getStatusString,
   makeSessionsColumns,
   SessionInfo,
   SessionsSortedTable,
 } from "./sessionsTable";
-import { EmptySessionsTablePlaceholder } from "./emptySessionsTablePlaceholder";
+import TerminateQueryModal, {
+  TerminateQueryModalRef,
+} from "./terminateQueryModal";
+import TerminateSessionModal, {
+  TerminateSessionModalRef,
+} from "./terminateSessionModal";
 
 const statementsPageCx = classNames.bind(statementsPageStyles);
 const sessionsPageCx = classNames.bind(sessionPageStyles);

@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -32,7 +27,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/constraint"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/explain"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
@@ -200,8 +198,8 @@ func (t virtualSchemaTable) initVirtualTableDesc(
 		nil,
 		sc,
 		id,
-		nil,       /* regionConfig */
-		startTime, /* creationTime */
+		nil, /* regionConfig */
+		virtualTableCreationTime,
 		catpb.NewPrivilegeDescriptor(
 			username.PublicRoleName(),
 			privilege.List{privilege.SELECT},
@@ -217,6 +215,7 @@ func (t virtualSchemaTable) initVirtualTableDesc(
 		&eval.Context{Settings: st}, /* evalCtx */
 		&sessiondata.SessionData{},  /* sessionData */
 		tree.PersistencePermanent,
+		nil, /* colToSequenceRefs */
 	)
 	if err != nil {
 		err = errors.Wrapf(err, "initVirtualDesc problem with schema: \n%s", t.schema)
@@ -322,6 +321,38 @@ func (t virtualSchemaTable) preferIndexOverGenerator(
 	return true
 }
 
+func maybeAdjustVirtualIndexScanForExplain(
+	ctx context.Context, evalCtx *eval.Context, index cat.Index, params exec.ScanParams,
+) (_ cat.Index, _ exec.ScanParams, extraAttribute string) {
+	idx := index.(*optVirtualIndex)
+	if idx.idx != nil && idx.idx.GetID() != 1 && params.IndexConstraint != nil {
+		// If we picked the virtual index, check that we can actually use it.
+		spans := params.IndexConstraint.Spans
+		for i := 0; i < spans.Count(); i++ {
+			if !spans.Get(i).HasSingleKey(ctx, evalCtx) {
+				// We'll have to fall back to the full scan of the virtual
+				// table, so adjust the index choice accordingly (and be careful
+				// to not modify the existing struct just to be safe).
+				idxCopy := *idx
+				idxCopy.idx = nil
+				// Also adjust the scan params since under the hood we'll
+				// effectively perform the "full scan" of the primary index of
+				// the virtual table (while filtering out rows that don't fall
+				// within the index constraint).
+				params.IndexConstraint = nil
+				// Include the detail about the filtering mentioned above.
+				extraAttribute = "virtual table filter"
+				return &idxCopy, params, extraAttribute
+			}
+		}
+	}
+	return idx, params, extraAttribute
+}
+
+func init() {
+	explain.MaybeAdjustVirtualIndexScan = maybeAdjustVirtualIndexScanForExplain
+}
+
 // getSchema is part of the virtualSchemaDef interface.
 func (v virtualSchemaView) getSchema() string {
 	return v.schema
@@ -350,7 +381,7 @@ func (v virtualSchemaView) initVirtualTableDesc(
 		sc.GetID(),
 		id,
 		columns,
-		startTime,
+		virtualTableCreationTime,
 		catpb.NewPrivilegeDescriptor(
 			username.PublicRoleName(),
 			privilege.List{privilege.SELECT},
@@ -392,7 +423,7 @@ var virtualSchemas = map[descpb.ID]virtualSchema{
 	catconstants.PgExtensionSchemaID: pgExtension,
 }
 
-var startTime = hlc.Timestamp{
+var virtualTableCreationTime = hlc.Timestamp{
 	WallTime: time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC).UnixNano(),
 }
 

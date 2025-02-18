@@ -1,27 +1,22 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rttanalysis
 
 import (
 	gosql "database/sql"
-	"sync"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 )
 
 // ClusterConstructor is used to construct a Cluster for an individual case run.
-type ClusterConstructor func(testing.TB) *Cluster
+type ClusterConstructor func(tb testing.TB, measureRoundtrips bool) *Cluster
 
 // MakeClusterConstructor creates a new ClusterConstructor using the provided
 // function. The intention is that the caller will use the provided knobs when
@@ -29,25 +24,25 @@ type ClusterConstructor func(testing.TB) *Cluster
 func MakeClusterConstructor(
 	f func(testing.TB, base.TestingKnobs) (_, _ *gosql.DB, cleanup func()),
 ) ClusterConstructor {
-	return func(t testing.TB) *Cluster {
+	return func(t testing.TB, measureRoundtrips bool) *Cluster {
 		c := &Cluster{}
 		beforePlan := func(trace tracingpb.Recording, stmt string) {
-			if _, ok := c.stmtToKVBatchRequests.Load(stmt); ok {
-				c.stmtToKVBatchRequests.Store(stmt, trace)
+			c.stmtToKVBatchRequests.Store(stmt, &trace)
+		}
+		knobs := base.TestingKnobs{}
+		if measureRoundtrips {
+			knobs.SQLExecutor = &sql.ExecutorTestingKnobs{
+				WithStatementTrace: beforePlan,
 			}
 		}
-		c.adminSQLConn, c.nonAdminSQLConn, c.cleanup = f(t, base.TestingKnobs{
-			SQLExecutor: &sql.ExecutorTestingKnobs{
-				WithStatementTrace: beforePlan,
-			},
-		})
+		c.adminSQLConn, c.nonAdminSQLConn, c.cleanup = f(t, knobs)
 		return c
 	}
 }
 
 // Cluster abstracts a cockroach cluster for use in rttanalysis benchmarks.
 type Cluster struct {
-	stmtToKVBatchRequests sync.Map
+	stmtToKVBatchRequests syncutil.Map[string, tracingpb.Recording]
 	cleanup               func()
 
 	// adminSQLConn should be the default connection for tests. It specifies a
@@ -68,13 +63,14 @@ func (c *Cluster) nonAdminConn() *gosql.DB {
 }
 
 func (c *Cluster) clearStatementTrace(stmt string) {
-	c.stmtToKVBatchRequests.Store(stmt, nil)
+	c.stmtToKVBatchRequests.Delete(stmt)
 }
 
 func (c *Cluster) getStatementTrace(stmt string) (tracingpb.Recording, bool) {
-	out, _ := c.stmtToKVBatchRequests.Load(stmt)
-	r, ok := out.(tracingpb.Recording)
-	return r, ok
+	if out, ok := c.stmtToKVBatchRequests.Load(stmt); ok {
+		return *out, true
+	}
+	return tracingpb.Recording{}, false
 }
 
 func (c *Cluster) close() {

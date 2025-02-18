@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+# Copyright 2022 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 dir="$(dirname $(dirname $(dirname $(dirname "${0}"))))"
 
 set -euxo pipefail
@@ -8,9 +14,9 @@ mkdir -p $ARTIFACTS_DIR
 
 echo "TC_SERVER_URL is $TC_SERVER_URL"
 
-bazel build //pkg/cmd/bazci --config=ci
+bazel build //pkg/cmd/bazci
 
-BAZEL_BIN=$(bazel info bazel-bin --config ci)
+BAZEL_BIN=$(bazel info bazel-bin)
 
 exit_status=0
 # NB: If adjusting the metamorphic test flags below, be sure to also update

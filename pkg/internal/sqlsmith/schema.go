@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlsmith
 
@@ -23,10 +18,12 @@ import (
 	_ "github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/idxtype"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree/treebin"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
 )
 
@@ -114,6 +111,10 @@ func (s *Smither) ReloadSchemas() error {
 	if err != nil {
 		return err
 	}
+	s.types.tableImplicitRecordTypes, s.types.tableImplicitRecordTypeNames, err = s.extractTableImplicitRecordTypes()
+	if err != nil {
+		return err
+	}
 	s.schemas, err = s.extractSchemas()
 	if err != nil {
 		return err
@@ -189,7 +190,7 @@ func (s *Smither) getRandTable() (*aliasedTableRef, bool) {
 		var indexFlags tree.IndexFlags
 		indexNames := make([]tree.Name, 0, len(indexes))
 		for _, index := range indexes {
-			if !index.Inverted {
+			if index.Type == idxtype.FORWARD {
 				indexNames = append(indexNames, index.Name)
 			}
 		}
@@ -270,6 +271,7 @@ func (s *Smither) getRandUserDefinedType() (*types.T, *tree.TypeName, bool) {
 	return s.types.udts[idx], &s.types.udtNames[idx], true
 }
 
+// extractTypes should be called before extractTables.
 func (s *Smither) extractTypes() (*typeInfo, error) {
 	rows, err := s.db.Query(`
 SELECT
@@ -334,6 +336,37 @@ FROM
 		scalarTypes: append(udts, types.Scalar...),
 		seedTypes:   append(udts, randgen.SeedTypes...),
 	}, nil
+}
+
+// extractTableImplicitRecordTypes should only be called after extractTables.
+func (s *Smither) extractTableImplicitRecordTypes() (
+	[]*types.T,
+	[]tree.ResolvableTypeReference,
+	error,
+) {
+	var tableImplicitRecordTypes []*types.T
+	var tableImplicitRecordTypeNames []tree.ResolvableTypeReference
+	for _, t := range s.tables {
+		contents := make([]*types.T, 0, len(t.Columns))
+		labels := make([]string, 0, len(t.Columns))
+		for _, col := range t.Columns {
+			if colinfo.IsSystemColumnName(string(col.Name)) {
+				// Ignore system columns since they are inaccessible.
+				continue
+			}
+			typ, ok := col.Type.(*types.T)
+			if !ok {
+				return nil, nil, errors.AssertionFailedf("unexpectedly column type is not *types.T: %T", col.Type)
+			}
+			contents = append(contents, typ)
+			labels = append(labels, string(col.Name))
+		}
+		typ := types.MakeLabeledTuple(contents, labels)
+		tableImplicitRecordTypes = append(tableImplicitRecordTypes, typ)
+		typeName := tree.MakeSchemaQualifiedTypeName(t.TableName.Schema(), t.TableName.Table())
+		tableImplicitRecordTypeNames = append(tableImplicitRecordTypeNames, &typeName)
+	}
+	return tableImplicitRecordTypes, tableImplicitRecordTypeNames, nil
 }
 
 type schemaRef struct {
@@ -401,8 +434,11 @@ ORDER BY
 		// All non virtual tables contain implicit system columns.
 		for i := range colinfo.AllSystemColumnDescs {
 			col := &colinfo.AllSystemColumnDescs[i]
-			if s.postgres && col.ID == colinfo.MVCCTimestampColumnID {
-				continue
+			if s.postgres {
+				switch col.ID {
+				case colinfo.MVCCTimestampColumnID, colinfo.OriginTimestampColumnID, colinfo.OriginIDColumnID:
+					continue
+				}
 			}
 			currentCols = append(currentCols, &tree.ColumnTableDef{
 				Name:   tree.Name(col.Name),
@@ -501,10 +537,14 @@ func (s *Smither) extractIndexes(
 				return nil, err
 			}
 			if _, ok := indexes[idx]; !ok {
+				indexType := idxtype.FORWARD
+				if inverted {
+					indexType = idxtype.INVERTED
+				}
 				indexes[idx] = &tree.CreateIndex{
-					Name:     idx,
-					Table:    *t.TableName,
-					Inverted: inverted,
+					Name:  idx,
+					Table: *t.TableName,
+					Type:  indexType,
 				}
 			}
 			create := indexes[idx]

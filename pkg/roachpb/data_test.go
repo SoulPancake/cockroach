@@ -1,17 +1,13 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package roachpb
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"math"
 	"math/rand"
@@ -23,6 +19,7 @@ import (
 
 	"github.com/cockroachdb/apd/v3"
 	"github.com/cockroachdb/cockroach/pkg/cli/exit"
+	"github.com/cockroachdb/cockroach/pkg/geo"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/isolation"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/lock"
 	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
@@ -37,6 +34,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeofday"
+	"github.com/cockroachdb/cockroach/pkg/util/timetz"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/redact"
 	"github.com/kr/pretty"
@@ -736,6 +735,32 @@ func TestTransactionUpdateMinTimestamp(t *testing.T) {
 	}
 }
 
+func TestTransactionUpdatePrepared(t *testing.T) {
+	txn := nonZeroTxn
+	txn.Status = PENDING
+
+	txn2 := nonZeroTxn
+	txn2.Status = PREPARED
+
+	// In same epoch, PENDING < PREPARED.
+	txn.Update(&txn2)
+	if a, e := txn.Status, PREPARED; a != e {
+		t.Errorf("expected status %s; got %s", e, a)
+	}
+
+	txn2.Status = PENDING
+	txn.Update(&txn2)
+	if a, e := txn.Status, PREPARED; a != e {
+		t.Errorf("expected status %s; got %s", e, a)
+	}
+
+	txn2.Status = COMMITTED
+	txn.Update(&txn2)
+	if a, e := txn.Status, COMMITTED; a != e {
+		t.Errorf("expected status %s; got %s", e, a)
+	}
+}
+
 func TestTransactionUpdateStaging(t *testing.T) {
 	txn := nonZeroTxn
 	txn.Status = PENDING
@@ -1098,12 +1123,13 @@ func TestLeaseStringAndSafeFormat(t *testing.T) {
 					StoreID:   1,
 					ReplicaID: 1,
 				},
-				Start:      makeClockTS(1, 1),
-				Expiration: makeTS(2, 1).Clone(),
-				ProposedTS: makeClockTS(1, 0),
-				Sequence:   3,
+				Start:           makeClockTS(1, 1),
+				Expiration:      makeTS(2, 1).Clone(),
+				ProposedTS:      makeClockTS(1, 0),
+				Sequence:        3,
+				AcquisitionType: LeaseAcquisitionType_Request,
 			},
-			exp: "repl=(n1,s1):1 seq=3 start=0.000000001,1 exp=0.000000002,1 pro=0.000000001,0",
+			exp: "repl=(n1,s1):1 seq=3 start=0.000000001,1 exp=0.000000002,1 pro=0.000000001,0 acq=Request",
 		},
 		{
 			name: "epoch",
@@ -1113,13 +1139,14 @@ func TestLeaseStringAndSafeFormat(t *testing.T) {
 					StoreID:   1,
 					ReplicaID: 1,
 				},
-				Start:         makeClockTS(1, 1),
-				ProposedTS:    makeClockTS(1, 0),
-				Sequence:      3,
-				Epoch:         4,
-				MinExpiration: makeTS(2, 1),
+				Start:           makeClockTS(1, 1),
+				ProposedTS:      makeClockTS(1, 0),
+				Sequence:        3,
+				Epoch:           4,
+				MinExpiration:   makeTS(2, 1),
+				AcquisitionType: LeaseAcquisitionType_Transfer,
 			},
-			exp: "repl=(n1,s1):1 seq=3 start=0.000000001,1 epo=4 min-exp=0.000000002,1 pro=0.000000001,0",
+			exp: "repl=(n1,s1):1 seq=3 start=0.000000001,1 epo=4 min-exp=0.000000002,1 pro=0.000000001,0 acq=Transfer",
 		},
 		{
 			name: "leader",
@@ -1129,13 +1156,31 @@ func TestLeaseStringAndSafeFormat(t *testing.T) {
 					StoreID:   1,
 					ReplicaID: 1,
 				},
-				Start:         makeClockTS(1, 1),
-				ProposedTS:    makeClockTS(1, 0),
-				Sequence:      3,
-				MinExpiration: makeTS(2, 1),
-				Term:          5,
+				Start:           makeClockTS(1, 1),
+				ProposedTS:      makeClockTS(1, 0),
+				Sequence:        3,
+				MinExpiration:   makeTS(2, 1),
+				Term:            5,
+				AcquisitionType: LeaseAcquisitionType_Transfer,
 			},
-			exp: "repl=(n1,s1):1 seq=3 start=0.000000001,1 term=5 min-exp=0.000000002,1 pro=0.000000001,0",
+			exp: "repl=(n1,s1):1 seq=3 start=0.000000001,1 term=5 min-exp=0.000000002,1 pro=0.000000001,0 acq=Transfer",
+		},
+		{
+			name: "leader",
+			lease: Lease{
+				Replica: ReplicaDescriptor{
+					NodeID:    1,
+					StoreID:   1,
+					ReplicaID: 1,
+				},
+				Start:           makeClockTS(1, 1),
+				ProposedTS:      makeClockTS(1, 0),
+				Sequence:        3,
+				MinExpiration:   makeTS(2, 1),
+				Term:            5,
+				AcquisitionType: LeaseAcquisitionType_Request,
+			},
+			exp: "repl=(n1,s1):1 seq=3 start=0.000000001,1 term=5 min-exp=0.000000002,1 pro=0.000000001,0 acq=Request",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1944,6 +1989,72 @@ func BenchmarkValueGetTuple(b *testing.B) {
 	}
 }
 
+func TestExtendedDecoding(t *testing.T) {
+	// A bit of duplication to avoid import cycles.
+	encodeWithValueHeader := func(v Value, vh enginepb.MVCCValueHeader) []byte {
+		// Extended encoding. Wrap the roachpb.Value encoding with a header containing
+		// MVCC-level metadata. Requires a re-allocation and copy.
+		headerLen := vh.Size()
+		headerSize := extendedPreludeSize + headerLen
+		valueSize := headerSize + len(v.RawBytes)
+		buf := make([]byte, valueSize)
+		// Extended encoding. Wrap the roachpb.Value encoding with a header containing
+		// MVCC-level metadata. Requires a copy.
+		// 4-byte-header-len
+		binary.BigEndian.PutUint32(buf, uint32(headerLen))
+		// 1-byte-sentinel
+		buf[tagPos] = byte(ValueType_MVCC_EXTENDED_ENCODING_SENTINEL)
+		_, err := protoutil.MarshalTo(&vh, buf[extendedPreludeSize:headerSize])
+		require.NoError(t, err)
+		// <4-byte-checksum><1-byte-tag><encoded-data> or empty for tombstone
+		copy(buf[headerSize:], v.RawBytes)
+		return buf
+	}
+
+	key := Key("hello")
+	var boolValue Value
+	boolValue.SetBool(true)
+
+	testValues := map[string]Value{
+		"bool":      boolValue,
+		"tombstone": {Timestamp: hlc.Timestamp{WallTime: 1}},
+		"untagged":  {RawBytes: []byte("val"), Timestamp: hlc.Timestamp{WallTime: 1}},
+	}
+	for name, tv := range testValues {
+		t.Run(name, func(t *testing.T) {
+			tv.InitChecksum(key)
+			extendedValueBytes := encodeWithValueHeader(tv, enginepb.MVCCValueHeader{OriginID: 1})
+			extendedValue := Value{RawBytes: extendedValueBytes, Timestamp: tv.Timestamp}
+
+			// These methods error on degenerate values.
+			if len(tv.RawBytes) >= headerSize {
+				require.NoError(t, tv.Verify(key))
+				require.NoError(t, extendedValue.Verify(key))
+			}
+
+			require.Equal(t, tv.checksum(), extendedValue.checksum())
+			require.Equal(t, tv.computeChecksum(key), tv.computeChecksum(key))
+
+			require.Equal(t, tv.IsPresent(), extendedValue.IsPresent())
+			require.Equal(t, tv.GetTag(), extendedValue.GetTag())
+			vh, err := tv.GetMVCCValueHeader()
+			require.NoError(t, err)
+			require.Equal(t, uint32(0), vh.OriginID)
+
+			vh, err = extendedValue.GetMVCCValueHeader()
+			require.NoError(t, err)
+			require.Equal(t, uint32(1), vh.OriginID)
+
+			// These methods crash if called on tombstones or degenerate values.
+			if len(tv.RawBytes) > tagPos {
+				require.Equal(t, tv.TagAndDataBytes(), extendedValue.TagAndDataBytes())
+				require.True(t, tv.EqualTagAndData(extendedValue))
+				require.True(t, extendedValue.EqualTagAndData(tv))
+			}
+		})
+	}
+}
+
 func TestValuePrettyPrint(t *testing.T) {
 	var boolValue Value
 	boolValue.SetBool(true)
@@ -1983,6 +2094,22 @@ func TestValuePrettyPrint(t *testing.T) {
 	errTagValue.SetInt(7)
 	errTagValue.setTag(ValueType(99))
 
+	var timeTZValue Value
+	timeTZValue.SetTimeTZ(timetz.MakeTimeTZ(timeofday.New(1, 2, 3, 0), 0))
+
+	g, err := geo.ParseGeometry(`{ "type": "Point", "coordinates": [1.0, 1.0] }`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var geoValue Value
+	err = geoValue.SetGeo(g.SpatialObject())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var bbValue Value
+	bbValue.SetBox2D(g.CartesianBoundingBox().BoundingBox)
+
 	tests := []struct {
 		v        Value
 		expected string
@@ -2001,6 +2128,9 @@ func TestValuePrettyPrint(t *testing.T) {
 		{bitArrayValue, "/BITARRAY/B00111010"},
 		{errValue, "/<err: float64 value should be exactly 8 bytes: 1>"},
 		{errTagValue, "/<err: unknown tag: 99>"},
+		{timeTZValue, "/TIMETZ/01:02:03+00:00:00"},
+		{geoValue, `/GEO/type:GeometryType ewkb:"\001\001\000\000\000\000\000\000\000\000\000\360?\000\000\000\000\000\000\360?" shape_type:Point bounding_box:<lo_x:1 hi_x:1 lo_y:1 hi_y:1 > `},
+		{bbValue, "/BOX2D/lo_x:1 hi_x:1 lo_y:1 hi_y:1 "},
 	}
 
 	for i, test := range tests {
@@ -2009,6 +2139,7 @@ func TestValuePrettyPrint(t *testing.T) {
 		}
 	}
 }
+
 func TestUpdateObservedTimestamps(t *testing.T) {
 	f := func(nodeID NodeID, walltime int64) ObservedTimestamp {
 		return ObservedTimestamp{
@@ -2074,12 +2205,12 @@ func TestChangeReplicasTrigger_String(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	repl1 := ReplicaDescriptor{NodeID: 1, StoreID: 2, ReplicaID: 3, Type: VOTER_INCOMING}
-	repl2 := ReplicaDescriptor{NodeID: 4, StoreID: 5, ReplicaID: 6, Type: VOTER_OUTGOING}
+	repl2 := ReplicaDescriptor{NodeID: 4, StoreID: 5, ReplicaID: 6, Type: VOTER_FULL}
 	learner := ReplicaDescriptor{NodeID: 7, StoreID: 8, ReplicaID: 9, Type: LEARNER}
 	repl3 := ReplicaDescriptor{NodeID: 10, StoreID: 11, ReplicaID: 12, Type: VOTER_DEMOTING_LEARNER}
 	crt := ChangeReplicasTrigger{
 		InternalAddedReplicas:   []ReplicaDescriptor{repl1},
-		InternalRemovedReplicas: []ReplicaDescriptor{repl2, repl3},
+		InternalRemovedReplicas: []ReplicaDescriptor{repl3},
 		Desc: &RangeDescriptor{
 			RangeID:  1,
 			StartKey: RKey("a"),
@@ -2095,9 +2226,9 @@ func TestChangeReplicasTrigger_String(t *testing.T) {
 		},
 	}
 	act := crt.String()
-	exp := "ENTER_JOINT(r6 r12 l12 v3) [(n1,s2):3VOTER_INCOMING], " +
-		"[(n4,s5):6VOTER_OUTGOING (n10,s11):12VOTER_DEMOTING_LEARNER]: " +
-		"after=[(n1,s2):3VOTER_INCOMING (n4,s5):6VOTER_OUTGOING (n7,s8):9LEARNER " +
+	exp := "ENTER_JOINT(r12 l12 v3) [(n1,s2):3VOTER_INCOMING], " +
+		"[(n10,s11):12VOTER_DEMOTING_LEARNER]: " +
+		"after=[(n1,s2):3VOTER_INCOMING (n4,s5):6 (n7,s8):9LEARNER " +
 		"(n10,s11):12VOTER_DEMOTING_LEARNER] next=10"
 	require.Equal(t, exp, act)
 
@@ -2160,7 +2291,9 @@ func TestChangeReplicasTrigger_ConfChange(t *testing.T) {
 	vf1 := sl(VOTER_FULL, 1)
 	vo1 := sl(VOTER_OUTGOING, 1)
 	vi1 := sl(VOTER_INCOMING, 1)
-	vl1 := sl(LEARNER, 1)
+	vdl1 := sl(VOTER_DEMOTING_LEARNER, 1)
+	l1 := sl(LEARNER, 1)
+	nv1 := sl(NON_VOTER, 1)
 
 	testCases := []struct {
 		crt mockCRT
@@ -2174,13 +2307,12 @@ func TestChangeReplicasTrigger_ConfChange(t *testing.T) {
 			Transition: raftpb.ConfChangeTransitionJointExplicit,
 			Changes:    []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddNode, NodeID: 1}},
 		}},
+		// A replica of type VOTER_FULL being removed is unsafe.
+		{crt: mk(in{del: vf1}), err: "removal of VOTER_FULL unsafe, demote to LEARNER first"},
+		// A replica of type VOTER_OUTGOING being removed is unsafe.
+		{crt: mk(in{del: vo1}), err: "removal of VOTER_OUTGOING unsafe, demote to LEARNER first"},
 		// A replica of type VOTER_INCOMING being removed makes no sense.
-		{crt: mk(in{del: vi1}), err: "can't remove replica in state VOTER_INCOMING"},
-		// But during a joint removal we can see VOTER_OUTGOING.
-		{crt: mk(in{del: vo1, repls: vo1}), exp: raftpb.ConfChangeV2{
-			Transition: raftpb.ConfChangeTransitionJointExplicit,
-			Changes:    []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeRemoveNode, NodeID: 1}},
-		}},
+		{crt: mk(in{del: vi1}), err: "removal of VOTER_INCOMING unsafe, demote to LEARNER first"},
 
 		// Adding a voter via the V1 path.
 		{crt: mk(in{add: vf1, repls: vf1}), exp: raftpb.ConfChange{
@@ -2188,20 +2320,16 @@ func TestChangeReplicasTrigger_ConfChange(t *testing.T) {
 			NodeID: 1,
 		}},
 		// Adding a learner via the V1 path.
-		{crt: mk(in{add: vl1, repls: vl1}), exp: raftpb.ConfChange{
+		{crt: mk(in{add: l1, repls: l1}), exp: raftpb.ConfChange{
 			Type:   raftpb.ConfChangeAddLearnerNode,
 			NodeID: 1,
 		}},
 
-		// Removing a voter or learner via the V1 path but falsely the replica is still in the descriptor.
-		{crt: mk(in{del: vf1, repls: vf1}), err: "(n3,s2):1 must no longer be present in descriptor"},
-		{crt: mk(in{del: vl1, repls: vl1}), err: "(n3,s2):1LEARNER must no longer be present in descriptor"},
+		// Removing a learner or non-voter via the V1 path but falsely the replica is still in the descriptor.
+		{crt: mk(in{del: l1, repls: l1}), err: "(n3,s2):1LEARNER must no longer be present in descriptor"},
+		{crt: mk(in{del: nv1, repls: nv1}), err: "(n3,s2):1NON_VOTER must no longer be present in descriptor"},
 		// Well-formed examples.
-		{crt: mk(in{del: vf1}), exp: raftpb.ConfChange{
-			Type:   raftpb.ConfChangeRemoveNode,
-			NodeID: 1,
-		}},
-		{crt: mk(in{del: vl1}), exp: raftpb.ConfChange{
+		{crt: mk(in{del: l1}), exp: raftpb.ConfChange{
 			Type:   raftpb.ConfChangeRemoveNode,
 			NodeID: 1,
 		}},
@@ -2225,7 +2353,7 @@ func TestChangeReplicasTrigger_ConfChange(t *testing.T) {
 		// Adding a learner via the V2 path and without joint consensus. (There is currently
 		// no way to request joint consensus when adding a single learner, but there is no
 		// reason one would ever want that).
-		{crt: mk(in{v2: true, add: vl1, repls: vl1}), exp: raftpb.ConfChangeV2{
+		{crt: mk(in{v2: true, add: l1, repls: l1}), exp: raftpb.ConfChangeV2{
 			Transition: raftpb.ConfChangeTransitionAuto,
 			Changes: []raftpb.ConfChangeSingle{{
 				Type:   raftpb.ConfChangeAddLearnerNode,
@@ -2233,16 +2361,9 @@ func TestChangeReplicasTrigger_ConfChange(t *testing.T) {
 			}},
 		}},
 
-		// Removing a voter or learner via the V2 path without joint consensus.
-		// Note that this means that the replica is not in the desc any more.
-		{crt: mk(in{v2: true, del: vf1}), exp: raftpb.ConfChangeV2{
-			Transition: raftpb.ConfChangeTransitionAuto,
-			Changes: []raftpb.ConfChangeSingle{{
-				Type:   raftpb.ConfChangeRemoveNode,
-				NodeID: 1,
-			}},
-		}},
-		{crt: mk(in{v2: true, del: vl1}), exp: raftpb.ConfChangeV2{
+		// Removing a learner via the V2 path without joint consensus. Note that
+		// this means that the replica is not in the desc any more.
+		{crt: mk(in{v2: true, del: l1}), exp: raftpb.ConfChangeV2{
 			Transition: raftpb.ConfChangeTransitionAuto,
 			Changes: []raftpb.ConfChangeSingle{{
 				Type:   raftpb.ConfChangeRemoveNode,
@@ -2250,14 +2371,14 @@ func TestChangeReplicasTrigger_ConfChange(t *testing.T) {
 			}},
 		}},
 
-		// Ditto but with joint consensus. (This can happen only with a voter;
-		// learners disappear immediately).
-		{crt: mk(in{v2: true, del: vo1, repls: vo1}), exp: raftpb.ConfChangeV2{
+		// Demoting a voter or removing a learner via the V2 path with joint
+		// consensus.
+		{crt: mk(in{v2: true, del: vdl1, repls: vdl1}), exp: raftpb.ConfChangeV2{
 			Transition: raftpb.ConfChangeTransitionJointExplicit,
-			Changes: []raftpb.ConfChangeSingle{{
-				Type:   raftpb.ConfChangeRemoveNode,
-				NodeID: 1,
-			}},
+			Changes: []raftpb.ConfChangeSingle{
+				{NodeID: 1, Type: raftpb.ConfChangeRemoveNode},
+				{NodeID: 1, Type: raftpb.ConfChangeAddLearnerNode},
+			},
 		}},
 
 		// Run a more complex change (necessarily) via the V2 path.
@@ -2267,7 +2388,7 @@ func TestChangeReplicasTrigger_ConfChange(t *testing.T) {
 			),
 			del: sl(
 				// Voter removals.
-				LEARNER, 2, VOTER_OUTGOING, 8, VOTER_DEMOTING_LEARNER, 9,
+				LEARNER, 2, VOTER_DEMOTING_LEARNER, 9,
 			),
 			repls: sl(
 				// Replicas.
@@ -2276,14 +2397,12 @@ func TestChangeReplicasTrigger_ConfChange(t *testing.T) {
 				VOTER_INCOMING, 3, // added
 				VOTER_DEMOTING_LEARNER, 9, // removing
 				LEARNER, 4, // added
-				VOTER_OUTGOING, 8, // removing
 				VOTER_FULL, 10,
 			)}),
 			exp: raftpb.ConfChangeV2{
 				Transition: raftpb.ConfChangeTransitionJointExplicit,
 				Changes: []raftpb.ConfChangeSingle{
 					{NodeID: 2, Type: raftpb.ConfChangeRemoveNode},
-					{NodeID: 8, Type: raftpb.ConfChangeRemoveNode},
 					{NodeID: 9, Type: raftpb.ConfChangeRemoveNode},
 					{NodeID: 9, Type: raftpb.ConfChangeAddLearnerNode},
 					{NodeID: 6, Type: raftpb.ConfChangeAddNode},
@@ -2304,7 +2423,7 @@ func TestChangeReplicasTrigger_ConfChange(t *testing.T) {
 			err: "descriptor enters joint state, but trigger is requesting to leave one",
 		},
 		{
-			crt: mk(in{v2: true, repls: sl(VOTER_OUTGOING, 1)}),
+			crt: mk(in{v2: true, repls: sl(VOTER_DEMOTING_LEARNER, 1)}),
 			err: "descriptor enters joint state, but trigger is requesting to leave one",
 		},
 	}
@@ -2401,9 +2520,9 @@ func TestLockStateInfoSafeFormat(t *testing.T) {
 			"  waiting_txn:<nil> active_waiter:false strength:None wait_duration:17ms",
 		redact.Sprint(lockStateInfo).Redact())
 	require.EqualValues(t,
-		"range_id=35 key=‹×› holder=‹×› durability=Unreplicated duration=5m0s\n"+
+		"range_id=35 key=‹×› holder=deadbeef-0000-0000-0000-000000000000 durability=Unreplicated duration=5m0s\n"+
 			" waiters:\n"+
-			"  waiting_txn:‹×› active_waiter:true strength:Exclusive wait_duration:2m15s\n"+
+			"  waiting_txn:6ba7b810-9dad-11d1-80b4-00c04fd430c8 active_waiter:true strength:Exclusive wait_duration:2m15s\n"+
 			"  waiting_txn:<nil> active_waiter:false strength:None wait_duration:17ms",
 		redact.Sprintf("%+v", lockStateInfo).Redact())
 }

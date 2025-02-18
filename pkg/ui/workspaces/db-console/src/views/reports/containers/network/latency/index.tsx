@@ -1,22 +1,17 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import { Badge, Divider, Tooltip } from "antd";
 import { ExclamationCircleOutlined, StopOutlined } from "@ant-design/icons";
+import { util } from "@cockroachlabs/cluster-ui";
+import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import { Badge, Divider, Tooltip } from "antd";
+import { BadgeProps } from "antd/lib/badge";
 import classNames from "classnames";
 import map from "lodash/map";
-import { util } from "@cockroachlabs/cluster-ui";
 import React from "react";
 import { Link } from "react-router-dom";
-import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
-import { BadgeProps } from "antd/lib/badge";
 
 import { Empty } from "src/components/empty";
 import { livenessNomenclature } from "src/redux/nodes";

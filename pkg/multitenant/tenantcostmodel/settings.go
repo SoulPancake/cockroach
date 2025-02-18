@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tenantcostmodel
 
@@ -151,7 +146,8 @@ func validateEstimatedCPUSetting(values *settings.Values, jsonStr string) error 
 		return errors.Wrapf(err, "validating estimated_cpu model: %s", jsonStr)
 	}
 
-	if len(model.ReadBytesCost.PayloadSize) != len(model.ReadBytesCost.CPUPerByte) ||
+	if len(model.ReadRequestCost.BatchSize) != len(model.ReadRequestCost.CPUPerRequest) ||
+		len(model.ReadBytesCost.PayloadSize) != len(model.ReadBytesCost.CPUPerByte) ||
 		len(model.WriteBatchCost.RatePerNode) != len(model.WriteBatchCost.CPUPerBatch) ||
 		len(model.WriteRequestCost.BatchSize) != len(model.WriteRequestCost.CPUPerRequest) ||
 		len(model.WriteBytesCost.PayloadSize) != len(model.WriteBytesCost.CPUPerByte) {

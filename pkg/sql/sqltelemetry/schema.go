@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqltelemetry
 
@@ -90,6 +85,23 @@ var (
 	// index is created. This includes both regular and inverted expression
 	// indexes.
 	ExpressionIndexCounter = telemetry.GetCounterOnce("sql.schema.expression_index")
+
+	// VectorIndexCounter is to be incremented every time a vector index is
+	// created. This includes single-column vector indexes, multi-column vector
+	// indexes, and partial vector indexes.
+	VectorIndexCounter = telemetry.GetCounterOnce("sql.schema.vector_index")
+
+	// PartialVectorIndexCounter is to be incremented every time a partial vector
+	// index is created.
+	PartialVectorIndexCounter = telemetry.GetCounterOnce("sql.schema.partial_vector_index")
+
+	// PartitionedVectorIndexCounter is to be incremented every time a partitioned
+	// vector index is created.
+	PartitionedVectorIndexCounter = telemetry.GetCounterOnce("sql.schema.partitioned_vector_index")
+
+	// MultiColumnVectorIndexCounter is to be incremented every time a
+	// multi-column vector index is created.
+	MultiColumnVectorIndexCounter = telemetry.GetCounterOnce("sql.schema.multi_column_vector_index")
 )
 
 // SchemaChangeIndexCounter is to be incremented for certain CREATE

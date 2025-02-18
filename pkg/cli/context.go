@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -32,8 +27,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
 	"github.com/cockroachdb/cockroach/pkg/ts"
-	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logconfig"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -96,18 +91,7 @@ var serverCfg = func() server.Config {
 }()
 
 func makeClusterSettings() *cluster.Settings {
-	// Even though the code supports upgrading from multiple previous releases,
-	// skipping versions is experimental; by default, we only allow upgrading from
-	// the previous release.
-	//
-	// Version skipping can be enabled by setting COCKROACH_ALLOW_VERSION_SKIPPING=1.
-	var minSupported clusterversion.Key
-	if envutil.EnvOrDefaultBool("COCKROACH_ALLOW_VERSION_SKIPPING", false) {
-		minSupported = clusterversion.MinSupported
-	} else {
-		minSupported = clusterversion.PreviousRelease
-	}
-	st := cluster.MakeClusterSettingsWithVersions(clusterversion.Latest.Version(), minSupported.Version())
+	st := cluster.MakeClusterSettings()
 	logcrash.SetGlobalSettings(&st.SV)
 	return st
 }
@@ -262,9 +246,12 @@ var certCtx struct {
 	certPrincipalMap []string
 	// tenantScope indicates a tenantID(s) that a certificate is being
 	// scoped to. By creating a tenant-scoped certicate, the usage of that certificate
-	// is restricted to a specific tenant.
+	// is restricted to a specific tenant(s).
 	tenantScope []roachpb.TenantID
-
+	// tenantNameScope indicates a tenantName(s) that a certificate is being scoped to.
+	// By creating a tenant-scoped certificate, the usage of that certificate is
+	// restricted to a specific tenant(s).
+	tenantNameScope []roachpb.TenantName
 	// disableUsernameValidation removes the username syntax check on
 	// the input.
 	disableUsernameValidation bool
@@ -281,9 +268,9 @@ func setCertContextDefaults() {
 	certCtx.generatePKCS8Key = false
 	certCtx.disableUsernameValidation = false
 	certCtx.certPrincipalMap = nil
-	// Note: we set tenantScope to nil so that by default, client certs
-	// are not scoped to a specific tenant and can be used to connect to
-	// any tenant.
+	// Note: we set tenantScope and tenantNameScope to nil so that by default,
+	// client certs are not scoped to a specific tenant and can be used to
+	// connect to any tenant.
 	//
 	// Note that the scoping is generally useful for security, and it is
 	// used in CockroachCloud. However, CockroachCloud does not use our
@@ -295,6 +282,7 @@ func setCertContextDefaults() {
 	// other, defaulting to certs that are valid on every tenant is a
 	// good choice.
 	certCtx.tenantScope = nil
+	certCtx.tenantNameScope = nil
 }
 
 var sqlExecCtx = clisqlexec.Context{
@@ -461,7 +449,7 @@ var debugCtx struct {
 	sizes             bool
 	replicated        bool
 	inputFile         string
-	ballastSize       base.SizeSpec
+	ballastSize       storagepb.SizeSpec
 	printSystemConfig bool
 	maxResults        int
 	decodeAsTableDesc string
@@ -479,7 +467,7 @@ func setDebugContextDefaults() {
 	debugCtx.sizes = false
 	debugCtx.replicated = false
 	debugCtx.inputFile = ""
-	debugCtx.ballastSize = base.SizeSpec{InBytes: 1000000000}
+	debugCtx.ballastSize = storagepb.SizeSpec{Capacity: 1000000000}
 	debugCtx.maxResults = 0
 	debugCtx.printSystemConfig = false
 	debugCtx.decodeAsTableDesc = ""
@@ -578,6 +566,8 @@ var drainCtx struct {
 	// nodeDrainSelf indicates that the command should target
 	// the node we're connected to (this is the default behavior).
 	nodeDrainSelf bool
+	// shutdown is true if the node should be shutdown after draining.
+	shutdown bool
 }
 
 // setDrainContextDefaults set the default values in drainCtx.  This
@@ -586,6 +576,7 @@ var drainCtx struct {
 func setDrainContextDefaults() {
 	drainCtx.drainWait = 10 * time.Minute
 	drainCtx.nodeDrainSelf = false
+	drainCtx.shutdown = false
 }
 
 // nodeCtx captures the command-line parameters of the `node` command.
@@ -760,6 +751,6 @@ func GetServerCfgStores() base.StoreSpecList {
 // WARNING: consider very carefully whether you should be using this.
 // If you are not writing CCL code that performs command-line flag
 // parsing, you probably should not be using this.
-func GetWALFailoverConfig() *base.WALFailoverConfig {
-	return &serverCfg.WALFailover
+func GetWALFailoverConfig() *storagepb.WALFailover {
+	return &serverCfg.StorageConfig.WALFailover
 }

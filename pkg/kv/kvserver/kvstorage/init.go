@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvstorage
 
@@ -411,6 +406,9 @@ func (r Replica) Load(
 	sl := stateloader.Make(r.Desc.RangeID)
 	var err error
 	if ls.LastIndex, err = sl.LoadLastIndex(ctx, eng); err != nil {
+		return LoadedReplicaState{}, err
+	}
+	if ls.TruncState, err = sl.LoadRaftTruncatedState(ctx, eng); err != nil {
 		return LoadedReplicaState{}, err
 	}
 	if ls.ReplState, err = sl.Load(ctx, eng, r.Desc); err != nil {

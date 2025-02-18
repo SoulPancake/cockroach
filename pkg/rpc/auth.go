@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rpc
 
@@ -329,11 +324,7 @@ func (a kvAuth) authenticateNetworkRequest(ctx context.Context) (authnResult, er
 				"root and node roles do not have valid DNs set which subject_required cluster setting mandates",
 			)
 		}
-		certUserScope, err := security.GetCertificateUserScope(clientCert)
-		if err != nil {
-			return nil, err
-		}
-		if err := checkRootOrNodeInScope(certUserScope, a.tenant.tenantID); err != nil {
+		if err := checkRootOrNodeInScope(clientCert, a.tenant.tenantID); err != nil {
 			return nil, err
 		}
 	}
@@ -399,21 +390,28 @@ func (a kvAuth) selectAuthzMethod(
 
 // checkRootOrNodeInScope checks that the root or node principals are
 // present in the cert user scopes.
-func checkRootOrNodeInScope(
-	certUserScope []security.CertificateUserScope, serverTenantID roachpb.TenantID,
-) error {
-	for _, scope := range certUserScope {
+func checkRootOrNodeInScope(clientCert *x509.Certificate, serverTenantID roachpb.TenantID) error {
+	containsFn := func(scope security.CertificateUserScope) bool {
 		// Only consider global scopes or scopes that match this server.
 		if !(scope.Global || scope.TenantID == serverTenantID) {
-			continue
+			return false
 		}
 
 		// If we get a scope that matches the Node user, immediately return.
 		if scope.Username == username.NodeUser || scope.Username == username.RootUser {
-			return nil
+			return true
 		}
-	}
 
+		return false
+	}
+	ok, err := security.CertificateUserScopeContainsFunc(clientCert, containsFn)
+	if ok || err != nil {
+		return err
+	}
+	certUserScope, err := security.GetCertificateUserScope(clientCert)
+	if err != nil {
+		return err
+	}
 	return authErrorf(
 		"need root or node client cert to perform RPCs on this server (this is tenant %v; cert is valid for %s)",
 		serverTenantID, security.FormatUserScopes(certUserScope))

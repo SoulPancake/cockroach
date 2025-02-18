@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package span
 
@@ -20,7 +15,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -79,7 +73,7 @@ func TestSpanFrontier(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	testutils.RunTrueAndFalse(t, "btree", func(t *testing.T, useBtreeFrontier bool) {
-		defer enableBtreeFrontier(useBtreeFrontier)()
+		defer EnableBtreeFrontier(useBtreeFrontier)()
 
 		keyA, keyB := roachpb.Key("a"), roachpb.Key("b")
 		keyC, keyD := roachpb.Key("c"), roachpb.Key("d")
@@ -203,7 +197,7 @@ func TestSpanFrontierDisjointSpans(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	testutils.RunTrueAndFalse(t, "btree", func(t *testing.T, useBtreeFrontier bool) {
-		defer enableBtreeFrontier(useBtreeFrontier)()
+		defer EnableBtreeFrontier(useBtreeFrontier)()
 
 		keyA, keyB, keyC := roachpb.Key("a"), roachpb.Key("b"), roachpb.Key("c")
 		keyD, keyE, keyF := roachpb.Key("d"), roachpb.Key("e"), roachpb.Key("f")
@@ -301,7 +295,7 @@ func TestSequentialSpans(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	testutils.RunTrueAndFalse(t, "btree", func(t *testing.T, useBtreeFrontier bool) {
-		defer enableBtreeFrontier(useBtreeFrontier)()
+		defer EnableBtreeFrontier(useBtreeFrontier)()
 
 		f, err := MakeFrontier(roachpb.Span{Key: roachpb.Key("A"), EndKey: roachpb.Key("Z")})
 		require.NoError(t, err)
@@ -345,7 +339,7 @@ func TestSpanEntries(t *testing.T) {
 	}
 
 	testutils.RunTrueAndFalse(t, "btree", func(t *testing.T, useBtreeFrontier bool) {
-		defer enableBtreeFrontier(useBtreeFrontier)()
+		defer EnableBtreeFrontier(useBtreeFrontier)()
 
 		t.Run("contiguous frontier", func(t *testing.T) {
 			spAZ := makeSpan("A", "Z")
@@ -409,14 +403,14 @@ func advanceFrontier(t *testing.T, f Frontier, s roachpb.Span, wall int64) {
 	require.NoError(t, err)
 }
 
-// TestForwardInvertedSpan is a replay of a failure uncovered by FuzzLLRBFrontier test.
+// TestForwardInvertedSpan is a replay of a failure uncovered by fuzzLLRBFrontier test.
 // It verifies frontier behaves as expected when attempting to forward inverted span.
 func TestForwardInvertedSpan(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	spAZ := makeSpan("A", "Z")
 	testutils.RunTrueAndFalse(t, "btree", func(t *testing.T, useBtreeFrontier bool) {
-		defer enableBtreeFrontier(useBtreeFrontier)()
+		defer EnableBtreeFrontier(useBtreeFrontier)()
 
 		f, err := MakeFrontier(spAZ)
 		require.NoError(t, err)
@@ -441,7 +435,7 @@ func TestForwardInvertedSpan(t *testing.T) {
 }
 
 func TestForwardToSameTimestamp(t *testing.T) {
-	defer enableBtreeFrontier(true)() // LLRB frontier fails this test
+	defer EnableBtreeFrontier(true)() // LLRB frontier fails this test
 	spAZ := makeSpan("A", "Z")
 
 	f, err := MakeFrontier(spAZ)
@@ -453,7 +447,6 @@ func TestForwardToSameTimestamp(t *testing.T) {
 }
 
 func TestFrontierImplementationsMatch(t *testing.T) {
-	skip.WithIssue(t, 120987)
 	rng, seed := randutil.NewPseudoRand()
 	t.Logf("seed: %d", seed)
 
@@ -468,8 +461,8 @@ func TestFrontierImplementationsMatch(t *testing.T) {
 	totalSpan := mkSpan(start, start+total)
 
 	for run := 1; run <= 10; run++ {
-		l := newLLBRFrontier()
-		b := newBTreeFrontier()
+		l := newLLRBFrontier()
+		b := newBtreeFrontier()
 		require.NoError(t, l.AddSpansAt(hlc.Timestamp{}, totalSpan))
 		require.NoError(t, b.AddSpansAt(hlc.Timestamp{}, totalSpan))
 
@@ -506,7 +499,7 @@ func TestAddOverlappingSpans(t *testing.T) {
 	}
 
 	testutils.RunTrueAndFalse(t, "btree", func(t *testing.T, useBtreeFrontier bool) {
-		defer enableBtreeFrontier(useBtreeFrontier)()
+		defer EnableBtreeFrontier(useBtreeFrontier)()
 
 		f, err := MakeFrontier()
 		require.NoError(t, err)
@@ -525,7 +518,7 @@ func TestBtreeFrontierMergesSpansDuringInitialization(t *testing.T) {
 	}
 
 	testutils.RunTrueAndFalse(t, "btree", func(t *testing.T, useBtreeFrontier bool) {
-		defer enableBtreeFrontier(useBtreeFrontier)()
+		defer EnableBtreeFrontier(useBtreeFrontier)()
 
 		f, err := MakeFrontier()
 		require.NoError(t, err)
@@ -550,7 +543,7 @@ func TestForwardDeepNestedFrontierEntry(t *testing.T) {
 	}
 
 	testutils.RunTrueAndFalse(t, "btree", func(t *testing.T, useBtreeFrontier bool) {
-		defer enableBtreeFrontier(useBtreeFrontier)()
+		defer EnableBtreeFrontier(useBtreeFrontier)()
 		f, err := MakeFrontier()
 		require.NoError(t, err)
 
@@ -616,7 +609,7 @@ func BenchmarkFrontier(b *testing.B) {
 
 	for _, enableBtree := range []bool{false, true} {
 		b.Run(fmt.Sprintf("btree=%t/rnd", enableBtree), func(b *testing.B) {
-			defer enableBtreeFrontier(enableBtree)()
+			defer EnableBtreeFrontier(enableBtree)()
 
 			b.StopTimer()
 			// Reset rnd so that we get the same inputs for both benchmarks.
@@ -634,7 +627,7 @@ func BenchmarkFrontier(b *testing.B) {
 		// Bench a case where frontier tracks multiple disjoint spans.
 		for _, numRanges := range []int{128, 1024, 4096, 8192, 16384} {
 			b.Run(fmt.Sprintf("btree=%t/r=%d", enableBtree, numRanges), func(b *testing.B) {
-				defer enableBtreeFrontier(enableBtree)()
+				defer EnableBtreeFrontier(enableBtree)()
 
 				b.StopTimer()
 				// Reset rnd so that we get the same inputs for both benchmarks.

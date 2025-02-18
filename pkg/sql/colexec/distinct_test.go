@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexec
 
@@ -471,6 +466,7 @@ func runDistinctBenchmarks(
 	ctx context.Context,
 	b *testing.B,
 	distinctConstructor func(allocator *colmem.Allocator, input colexecop.Operator, distinctCols []uint32, numOrderedCols int, typs []*types.T) (colexecop.Operator, error),
+	afterEachRun func(),
 	getNumOrderedCols func(nCols int) int,
 	namePrefix string,
 	isExternal bool,
@@ -616,6 +612,7 @@ func runDistinctBenchmarks(
 								distinct.Init(ctx)
 								for b := distinct.Next(); b.Length() > 0; b = distinct.Next() {
 								}
+								afterEachRun()
 							}
 							b.StopTimer()
 						})
@@ -648,6 +645,7 @@ func BenchmarkDistinct(b *testing.B) {
 			ctx,
 			b,
 			distinctConstructor,
+			func() {},
 			func(nCols int) int {
 				return int(float64(nCols) * orderedColsFraction[distinctIdx])
 			},

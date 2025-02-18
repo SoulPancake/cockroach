@@ -1,20 +1,17 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import Long from "long";
-import { createSelector } from "@reduxjs/toolkit";
-import { RouteComponentProps } from "react-router-dom";
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import { createSelector } from "@reduxjs/toolkit";
+import Long from "long";
 import moment from "moment-timezone";
+import { RouteComponentProps } from "react-router-dom";
 
 import { AppState } from "../store";
+import { selectTimeScale } from "../store/utils/selectors";
+import { TimeScale, toRoundedDateRange } from "../timeScaleDropdown";
 import {
   appNamesAttr,
   statementAttr,
@@ -22,8 +19,6 @@ import {
   queryByName,
   generateStmtDetailsToID,
 } from "../util";
-import { TimeScale, toRoundedDateRange } from "../timeScaleDropdown";
-import { selectTimeScale } from "../store/utils/selectors";
 
 type StatementDetailsResponseMessage =
   cockroach.server.serverpb.StatementDetailsResponse;

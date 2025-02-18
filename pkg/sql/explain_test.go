@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -84,7 +79,6 @@ func TestStatementReuses(t *testing.T) {
 		`ALTER TABLE a SCATTER`,
 
 		`ALTER INDEX a@woo RENAME TO waa`,
-		`ALTER INDEX a@woo CONFIGURE ZONE USING DEFAULT`,
 		`ALTER INDEX a@woo SPLIT AT VALUES(1)`,
 		`ALTER INDEX a@woo SCATTER`,
 

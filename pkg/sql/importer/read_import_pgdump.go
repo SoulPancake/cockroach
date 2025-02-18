@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package importer
 
@@ -280,7 +275,7 @@ func createPostgresSchemas(
 		ctx context.Context, txn descs.Txn,
 	) error {
 		schemaDescs = nil // reset for retries
-		dbDesc, err := txn.Descriptors().ByID(txn.KV()).WithoutNonPublic().Get().Database(ctx, parentID)
+		dbDesc, err := txn.Descriptors().ByIDWithoutLeased(txn.KV()).WithoutNonPublic().Get().Database(ctx, parentID)
 		if err != nil {
 			return err
 		}
@@ -647,7 +642,7 @@ func readPostgresStmt(
 			Name:             stmt.Name,
 			Columns:          stmt.Columns,
 			Storing:          stmt.Storing,
-			Inverted:         stmt.Inverted,
+			Type:             stmt.Type,
 			PartitionByIndex: stmt.PartitionByIndex,
 			StorageParams:    stmt.StorageParams,
 			// Postgres doesn't support NotVisible Index, so NotVisible is not populated here.
@@ -877,7 +872,7 @@ func readPostgresStmt(
 		for _, name := range names {
 			tableName := name.ToUnresolvedObjectName().String()
 			if err := sql.DescsTxn(ctx, p.ExecCfg(), func(ctx context.Context, txn isql.Txn, col *descs.Collection) error {
-				dbDesc, err := col.ByID(txn.KV()).Get().Database(ctx, parentID)
+				dbDesc, err := col.ByIDWithoutLeased(txn.KV()).Get().Database(ctx, parentID)
 				if err != nil {
 					return err
 				}

@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sessiondata
 
@@ -108,6 +103,8 @@ func TestUpdateSessionData(t *testing.T) {
 		{variable: "VectorizeMode", value: "on", localOnly: false, expectedSubstring: `vectorize_mode:on`},
 		// duration type.
 		{variable: "LockTimeout", value: "42s", localOnly: false, expectedSubstring: `lock_timeout:<seconds:42 >`},
+		// duration type.
+		{variable: "DeadlockTimeout", value: "42s", localOnly: false, expectedSubstring: `deadlock_timeout:<seconds:42 >`},
 		// This variable has a custom name, int64 type.
 		{variable: "OptimizerFKCascadesLimit", value: "123", localOnly: true, expectedSubstring: `optimizer_fk_cascades_limit:123`},
 		// bool type.

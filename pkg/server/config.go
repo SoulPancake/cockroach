@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -33,15 +28,17 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilities"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
+	"github.com/cockroachdb/cockroach/pkg/server/license"
 	"github.com/cockroachdb/cockroach/pkg/server/status"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/disk"
-	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/storage/fs"
+	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
 	"github.com/cockroachdb/cockroach/pkg/ts"
 	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/cidr"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -130,8 +127,9 @@ func (mo *MaxOffsetType) String() string {
 // BaseConfig holds parameters that are needed to setup either a KV or a SQL
 // server.
 type BaseConfig struct {
-	Settings *cluster.Settings
 	*base.Config
+
+	Settings *cluster.Settings
 
 	Tracer *tracing.Tracer
 
@@ -172,9 +170,6 @@ type BaseConfig struct {
 	// run-time metrics instead of constructing a fresh one.
 	RuntimeStatSampler *status.RuntimeStatSampler
 
-	// DiskWriteStatsCollector will be used to categorically track disk write metrics.
-	DiskWriteStatsCollector *vfs.DiskWriteStatsCollector
-
 	// GoroutineDumpDirName is the directory name for goroutine dumps using
 	// goroutinedumper. Only used if DisableRuntimeStatsMonitor is false.
 	GoroutineDumpDirName string
@@ -199,10 +194,6 @@ type BaseConfig struct {
 
 	// Locality is a description of the topography of the server.
 	Locality roachpb.Locality
-
-	// StorageEngine specifies the engine type (eg. rocksdb, pebble) to use to
-	// instantiate stores.
-	StorageEngine enginepb.EngineType
 
 	// TestingKnobs is used for internal test controls only.
 	TestingKnobs base.TestingKnobs
@@ -231,20 +222,14 @@ type BaseConfig struct {
 	// Stores is specified to enable durable key-value storage.
 	Stores base.StoreSpecList
 
-	// WALFailover enables and configures automatic WAL failover when latency to
-	// a store's primary WAL increases.
-	WALFailover base.WALFailoverConfig
+	// StorageConfig is the configuration of storage based on the Stores,
+	// WALFailover and SharedStorage and BootstrapMount.
+	StorageConfig storagepb.NodeConfig
 
-	// SharedStorage is specified to enable disaggregated shared storage.
-	SharedStorage                    string
 	EarlyBootExternalStorageAccessor *cloud.EarlyBootExternalStorageAccessor
 	// ExternalIODirConfig is used to configure external storage
 	// access (http://, nodelocal://, etc)
 	ExternalIODirConfig base.ExternalIODirConfig
-
-	// SecondaryCache is the size of the secondary cache used for each store, to
-	// store blocks from disaggregated shared storage. For use with SharedStorage.
-	SecondaryCache base.SizeSpec
 
 	// StartDiagnosticsReporting starts the asynchronous goroutine that
 	// checks for CockroachDB upgrades and periodically reports
@@ -270,11 +255,6 @@ type BaseConfig struct {
 	// route SQL connections instead.
 	DisableSQLListener bool
 
-	// ObsServiceAddr is the address of the OTLP sink to send events to, if any.
-	// These events are meant for the Observability Service, but they might pass
-	// through an OpenTelemetry Collector.
-	ObsServiceAddr string
-
 	// RPCListenerFactory provides an alternate implementation of
 	// ListenAndUpdateAddrs for use when creating gPRC
 	// listeners. This is set by in-memory tenants if the user has
@@ -283,6 +263,17 @@ type BaseConfig struct {
 
 	// DiskMonitorManager provides metrics for individual disks.
 	DiskMonitorManager *disk.MonitorManager
+
+	// DiskWriteStats is used to categorically track disk write metrics.
+	DiskWriteStats disk.WriteStatsManager
+
+	// CidrLookup is used to look up the tag name for a given IP address.
+	CidrLookup *cidr.Lookup
+
+	// ExternalIODir is the local file path under which remotely-initiated
+	// operations that can specify node-local I/O paths (such as BACKUP, RESTORE
+	// or IMPORT) can access files.
+	ExternalIODir string
 }
 
 // MakeBaseConfig returns a BaseConfig with default values.
@@ -318,8 +309,7 @@ func (cfg *BaseConfig) SetDefaults(
 	cfg.MaxOffset = MaxOffsetType(base.DefaultMaxClockOffset)
 	cfg.DisableMaxOffsetCheck = false
 	cfg.DefaultZoneConfig = zonepb.DefaultZoneConfig()
-	cfg.StorageEngine = storage.DefaultStorageEngine
-	cfg.WALFailover = base.WALFailoverConfig{Mode: base.WALFailoverDefault}
+	cfg.StorageConfig.WALFailover = storagepb.WALFailover{}
 	cfg.TestingInsecureWebAccess = disableWebLogin
 	cfg.Stores = base.StoreSpecList{
 		Specs: []base.StoreSpec{storeSpec},
@@ -331,9 +321,10 @@ func (cfg *BaseConfig) SetDefaults(
 	cfg.AmbientCtx.AddLogTag("n", cfg.IDContainer)
 	cfg.Config.InitDefaults()
 	cfg.InitTestingKnobs()
-	cfg.EarlyBootExternalStorageAccessor = cloud.NewEarlyBootExternalStorageAccessor(st, cfg.ExternalIODirConfig)
+	cfg.CidrLookup = cidr.NewLookup(&st.SV)
+	cfg.EarlyBootExternalStorageAccessor = cloud.NewEarlyBootExternalStorageAccessor(st, cfg.ExternalIODirConfig, cfg.CidrLookup)
 	cfg.DiskMonitorManager = disk.NewMonitorManager(vfs.Default)
-	cfg.DiskWriteStatsCollector = vfs.NewDiskWriteStatsCollector()
+	cfg.DiskWriteStats = disk.NewWriteStatsManager(vfs.Default)
 }
 
 // InitTestingKnobs sets up any testing knobs based on e.g. envvars.
@@ -493,8 +484,9 @@ type SQLConfig struct {
 	// The tenant that the SQL server runs on the behalf of.
 	TenantID roachpb.TenantID
 
-	// If set, will to be called at server startup to obtain the tenant id.
-	DelayedSetTenantID func(context.Context) (roachpb.TenantID, error)
+	// If set, will to be called at server startup to obtain the tenant id and
+	// locality.
+	DelayedSetTenantID func(context.Context) (roachpb.TenantID, roachpb.Locality, error)
 
 	// TempStorageConfig is used to configure temp storage, which stores
 	// ephemeral data when processing large queries.
@@ -536,6 +528,9 @@ type SQLConfig struct {
 	// NodeMetricsRecorder is the node's MetricRecorder; the tenant's metrics will
 	// be recorded with it. Nil if this is not a shared-process tenant.
 	NodeMetricsRecorder *status.MetricsRecorder
+
+	// LicenseEnforcer is used to enforce license policies.
+	LicenseEnforcer *license.Enforcer
 }
 
 // LocalKVServerInfo is used to group information about the local KV server
@@ -569,6 +564,7 @@ func (sqlCfg *SQLConfig) SetDefaults(tempStorageCfg base.TempStorageConfig) {
 	sqlCfg.TableStatCacheSize = defaultSQLTableStatCacheSize
 	sqlCfg.QueryCacheSize = defaultSQLQueryCacheSize
 	sqlCfg.TempStorageConfig = tempStorageCfg
+	sqlCfg.LicenseEnforcer = license.NewEnforcer(nil)
 }
 
 // setOpenFileLimit sets the soft limit for open file descriptors to the hard
@@ -641,6 +637,10 @@ func makeStorageCfg(
 
 // String implements the fmt.Stringer interface.
 func (cfg *Config) String() string {
+	return redact.StringWithoutMarkers(cfg)
+}
+
+func (cfg *Config) SafeFormat(sp redact.SafePrinter, _ rune) {
 	var buf bytes.Buffer
 
 	w := tabwriter.NewWriter(&buf, 2, 1, 2, ' ', 0)
@@ -656,7 +656,7 @@ func (cfg *Config) String() string {
 	}
 	_ = w.Flush()
 
-	return buf.String()
+	sp.Print(redact.SafeString(buf.String()))
 }
 
 // Report logs an overview of the server configuration parameters via
@@ -667,7 +667,7 @@ func (cfg *Config) Report(ctx context.Context) {
 	} else {
 		log.Infof(ctx, "system total memory: %s", humanizeutil.IBytes(memSize))
 	}
-	log.Infof(ctx, "server configuration:\n%s", log.SafeManaged(cfg))
+	log.Infof(ctx, "server configuration:\n%s", cfg)
 }
 
 // Engines is a container of engines, allowing convenient closing.
@@ -709,11 +709,11 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 	defer pebbleCache.Unref()
 
 	var sharedStorage cloud.ExternalStorage
-	if cfg.SharedStorage != "" {
+	if cfg.StorageConfig.SharedStorage.URI != "" {
 		var err error
 		// Note that we don't pass an io interceptor here. Instead, we record shared
 		// storage metrics on a per-store basis; see storage.Metrics.
-		sharedStorage, err = cloud.ExternalStorageFromURI(ctx, cfg.SharedStorage,
+		sharedStorage, err = cloud.ExternalStorageFromURI(ctx, cfg.StorageConfig.SharedStorage.URI,
 			base.ExternalIODirConfig{}, cfg.Settings, nil, cfg.User, nil,
 			nil, cloud.NilMetrics)
 		if err != nil {
@@ -734,12 +734,12 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 
 	log.Event(ctx, "initializing engines")
 
-	var tableCache *pebble.TableCache
-	// TODO(radu): use the tableCache for in-memory stores as well.
+	var fileCache *pebble.FileCache
+	// TODO(radu): use the fileCache for in-memory stores as well.
 	if physicalStores > 0 {
-		perStoreLimit := pebble.TableCacheSize(int(openFileLimitPerStore))
+		perStoreLimit := pebble.FileCacheSize(int(openFileLimitPerStore))
 		totalFileLimit := perStoreLimit * physicalStores
-		tableCache = pebble.NewTableCache(pebbleCache, runtime.GOMAXPROCS(0), totalFileLimit)
+		fileCache = pebble.NewFileCache(runtime.GOMAXPROCS(0), totalFileLimit)
 	}
 
 	var storeKnobs kvserver.StoreTestingKnobs
@@ -752,13 +752,13 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 		stickyRegistry = serverKnobs.StickyVFSRegistry
 	}
 
-	storeEnvs, err := fs.InitEnvsFromStoreSpecs(ctx, cfg.Stores.Specs, fs.ReadWrite, stickyRegistry, cfg.DiskWriteStatsCollector)
+	storeEnvs, err := fs.InitEnvsFromStoreSpecs(ctx, cfg.Stores.Specs, fs.ReadWrite, stickyRegistry, cfg.DiskWriteStats)
 	if err != nil {
 		return Engines{}, err
 	}
 	defer storeEnvs.CloseAll()
 
-	walFailoverConfig := storage.WALFailover(cfg.WALFailover, storeEnvs, vfs.Default, cfg.DiskWriteStatsCollector)
+	walFailoverConfig := storage.WALFailover(cfg.StorageConfig.WALFailover, storeEnvs, vfs.Default, cfg.DiskWriteStats)
 
 	for i, spec := range cfg.Stores.Specs {
 		log.Eventf(ctx, "initializing %+v", spec)
@@ -767,7 +767,6 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 			walFailoverConfig,
 			storage.Attributes(spec.Attributes),
 			storage.If(storeKnobs.SmallEngineBlocks, storage.BlockSize(1)),
-			storage.DiskWriteStatsCollector(cfg.DiskWriteStatsCollector),
 			storage.BlockConcurrencyLimitDivisor(len(cfg.Stores.Specs)),
 		}
 		if len(storeKnobs.EngineKnobs) > 0 {
@@ -778,7 +777,7 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 		}
 
 		if spec.InMemory {
-			var sizeInBytes = spec.Size.InBytes
+			var sizeInBytes = spec.Size.Capacity
 			if spec.Size.Percent > 0 {
 				sysMem, err := status.GetTotalMemory(ctx)
 				if err != nil {
@@ -803,7 +802,7 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 			if err != nil {
 				return Engines{}, errors.Wrap(err, "retrieving disk usage")
 			}
-			var sizeInBytes = spec.Size.InBytes
+			var sizeInBytes = spec.Size.Capacity
 			if spec.Size.Percent > 0 {
 				sizeInBytes = int64(float64(du.TotalBytes) * spec.Size.Percent / 100)
 			}
@@ -816,6 +815,12 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 				return Engines{}, errors.Wrap(err, "creating disk monitor")
 			}
 
+			statsCollector, err := cfg.DiskWriteStats.GetOrCreateCollector(spec.Path)
+			if err != nil {
+				return Engines{}, errors.Wrap(err, "retrieving stats collector")
+			}
+			addCfgOpt(storage.DiskWriteStatsCollector(statsCollector))
+
 			if spec.Size.Percent > 0 {
 				detail(redact.Sprintf("store %d: max size %s (calculated from %.2f percent of total), max open file limit %d", i, humanizeutil.IBytes(sizeInBytes), spec.Size.Percent, openFileLimitPerStore))
 				addCfgOpt(storage.MaxSizePercent(spec.Size.Percent / 100))
@@ -824,15 +829,15 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 				addCfgOpt(storage.MaxSizeBytes(sizeInBytes))
 			}
 			addCfgOpt(storage.BallastSize(storage.BallastSizeBytes(spec, du)))
-			addCfgOpt(storage.Caches(pebbleCache, tableCache))
+			addCfgOpt(storage.Caches(pebbleCache, fileCache))
 			// TODO(radu): move up all remaining settings below so they apply to in-memory stores as well.
 			addCfgOpt(storage.MaxOpenFiles(int(openFileLimitPerStore)))
 			addCfgOpt(storage.MaxWriterConcurrency(2))
 			addCfgOpt(storage.RemoteStorageFactory(cfg.EarlyBootExternalStorageAccessor))
 			if sharedStorage != nil {
 				addCfgOpt(storage.SharedStorage(sharedStorage))
+				addCfgOpt(storage.SecondaryCache(storage.SecondaryCacheBytes(cfg.StorageConfig.SharedStorage.Cache, du)))
 			}
-			addCfgOpt(storage.SecondaryCache(storage.SecondaryCacheBytes(cfg.SecondaryCache, du)))
 			addCfgOpt(storage.DiskMonitor(monitor))
 			// If the spec contains Pebble options, set those too.
 			if spec.PebbleOptions != "" {
@@ -848,9 +853,6 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 					},
 				}))
 			}
-			if len(spec.RocksDBOptions) > 0 {
-				return nil, errors.Errorf("store %d: using Pebble storage engine but StoreSpec provides RocksDB options", i)
-			}
 		}
 		eng, err := storage.Open(ctx, storeEnvs[i], cfg.Settings, storageConfigOpts...)
 		if err != nil {
@@ -865,9 +867,9 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 		engines = append(engines, eng)
 	}
 
-	if tableCache != nil {
+	if fileCache != nil {
 		// Unref the table cache now that the engines hold references to it.
-		if err := tableCache.Unref(); err != nil {
+		if err := fileCache.Unref(); err != nil {
 			return nil, err
 		}
 	}

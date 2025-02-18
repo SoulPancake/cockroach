@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package roachpb
 
@@ -16,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/raft"
 	"github.com/cockroachdb/cockroach/pkg/raft/confchange"
 	"github.com/cockroachdb/cockroach/pkg/raft/quorum"
 	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
@@ -188,8 +182,8 @@ func TestReplicaDescriptorsConfState(t *testing.T) {
 	for _, test := range tests {
 		t.Run("", func(t *testing.T) {
 			r := MakeReplicaSet(test.in)
-			cs := r.ConfState()
-			require.Equal(t, test.out, raft.DescribeConfState(cs))
+			cs := r.ConfState().Describe()
+			require.Equal(t, test.out, cs)
 		})
 	}
 }
@@ -338,7 +332,12 @@ func TestReplicaDescriptorsCanMakeProgressRandom(t *testing.T) {
 
 		raftCanMakeProgress, skip := func() (res bool, skip bool) {
 			cfg, _, err := confchange.Restore(
-				confchange.Changer{Tracker: tracker.MakeProgressTracker(1, 0)},
+				confchange.Changer{
+					Config:           quorum.MakeEmptyConfig(),
+					ProgressMap:      tracker.MakeEmptyProgressMap(),
+					MaxInflight:      1,
+					MaxInflightBytes: 0,
+				},
 				rng.ConfState(),
 			)
 			if err != nil {

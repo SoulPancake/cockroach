@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package stats
 
@@ -265,7 +260,7 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 
 		return testutils.SucceedsSoonError(func() error {
 			tableStats, err := cache.getTableStatsFromCache(
-				ctx, tableID, nil /* forecast */, nil, /* udtCols */
+				ctx, tableID, nil /* forecast */, nil /* udtCols */, nil, /* typeResolver */
 			)
 			if err != nil {
 				return err
@@ -275,7 +270,7 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 				stat := &testData[i]
 				if stat.TableID != tableID {
 					stats, err := cache.getTableStatsFromCache(
-						ctx, stat.TableID, nil /* forecast */, nil, /* udtCols */
+						ctx, stat.TableID, nil /* forecast */, nil /* udtCols */, nil, /* typeResolver */
 					)
 					if err != nil {
 						return err
@@ -563,7 +558,7 @@ func TestDeleteOldStatsForOtherColumns(t *testing.T) {
 
 		return testutils.SucceedsSoonError(func() error {
 			tableStats, err := cache.getTableStatsFromCache(
-				ctx, tableID, nil /* forecast */, nil, /* udtCols */
+				ctx, tableID, nil /* forecast */, nil /* udtCols */, nil, /* typeResolver */
 			)
 			if err != nil {
 				return err
@@ -573,7 +568,7 @@ func TestDeleteOldStatsForOtherColumns(t *testing.T) {
 				stat := &testData[i]
 				if stat.TableID != tableID {
 					stats, err := cache.getTableStatsFromCache(
-						ctx, stat.TableID, nil /* forecast */, nil, /* udtCols */
+						ctx, stat.TableID, nil /* forecast */, nil /* udtCols */, nil, /* typeResolver */
 					)
 					if err != nil {
 						return err

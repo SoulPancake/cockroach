@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -16,12 +11,15 @@ import (
 	"io"
 	"math/rand"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestflags"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/task"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
@@ -36,10 +34,15 @@ import (
 // each node in the cluster.
 const perfArtifactsDir = "perf"
 
-// goCoverArtifactsDir the directory on cluster nodes in which go coverage
+// goCoverArtifactsDir is the directory on cluster nodes in which go coverage
 // profiles are dumped. At the end of a test this directory is copied into the
 // test's ArtifactsDir() from each node in the cluster.
 const goCoverArtifactsDir = "gocover"
+
+// cpuProfilesDir is the directory on cluster nodes in which pprof (CPU) profiles
+// are dumped. At the end of a test, this directory is copied into the test's
+// ArtifactsDir() from each node in the cluster if --force-cpu-profile is set.
+const cpuProfilesDir = "pprof_dump"
 
 type testStatus struct {
 	msg      string
@@ -63,10 +66,10 @@ type testImpl struct {
 	spec *registry.TestSpec
 
 	cockroach   string // path to main cockroach binary
-	cockroachEA string // path to cockroach-short binary compiled with --crdb_test build tag
+	cockroachEA string // path to cockroach binary compiled with --crdb_test build tag
 
 	randomCockroachOnce sync.Once
-	randomizedCockroach string // either `cockroach` or `cockroach-short`, picked randomly
+	randomizedCockroach string // either `cockroach` or `cockroach-ea`, picked randomly
 
 	deprecatedWorkload string // path to workload binary
 	debug              bool   // whether the test is in debug mode.
@@ -75,7 +78,14 @@ type testImpl struct {
 	buildVersion *version.Version
 
 	// l is the logger that the test will use for its output.
-	l *logger.Logger
+	//
+	// N.B. We need to use an atomic pointer here since the test
+	// runner can swap the logger out when running post test assertions
+	// and artifacts collection.
+	l atomic.Pointer[logger.Logger]
+
+	// taskManager manages tasks (goroutines) for tests.
+	taskManager task.Manager
 
 	runner string
 	// runnerID is the test's main goroutine ID.
@@ -121,6 +131,11 @@ type testImpl struct {
 		// TODO(test-eng): this should just be an in-mem (ring) buffer attached to
 		// `t.L()`.
 		output []byte
+
+		// extraParams are test-specific parameters that will be added to the Github issue as
+		// parameters if there is a failure. They will additionally be logged in the test itself
+		// in case github issue posting is disabled.
+		extraParams map[string]string
 	}
 	// Map from version to path to the cockroach binary to be used when
 	// mixed-version test wants a binary for that binary. If a particular version
@@ -133,6 +148,11 @@ type testImpl struct {
 	// If true, go coverage is enabled and the BAZEL_COVER_DIR env var will be set
 	// when starting nodes.
 	goCoverEnabled bool
+	// If true, the stats exporter will export metrics in openmetrics format.
+	// else the exporter will export in the JSON format.
+	exportOpenmetrics bool
+	// If set, this is used for adding labels to the benchmark metrics
+	runID string
 }
 
 func newFailure(squashedErr error, errs []error) failure {
@@ -146,44 +166,55 @@ func (t *testImpl) BuildVersion() *version.Version {
 }
 
 // Cockroach will return either `RuntimeAssertionsCockroach()` or
-// `StandardCockroach()`, picked randomly. Once a random choice has
-// been made, the same binary will be returned on every call to
-// `Cockroach`, to avoid errors that may arise from binaries having a
+// StandardCockroach(), picked based off of the test spec. Once a choice
+// has been made, the same binary will be returned on every call to
+// Cockroach, to avoid errors that may arise from binaries having a
 // different value for metamorphic constants.
 func (t *testImpl) Cockroach() string {
-	// If the test is a benchmark test, we don't want to enable assertions
-	// as it will slow down performance.
-	if t.spec.Benchmark {
-		t.l.Printf("Benchmark test, running with standard cockroach")
-		return t.StandardCockroach()
-	}
 	t.randomCockroachOnce.Do(func() {
-		//TODO(SR): assertions are temporarily disabled for _all_ tests except those using t.RuntimeAssertionsCockroach()
-		// directly, until after the stability period for 23.2. See https://github.com/cockroachdb/cockroach/issues/114615
-		assertionsEnabledProbability := 0.0
-		// If the user specified a custom seed to be used with runtime
-		// assertions, assume they want to run the test with assertions
-		// enabled, making it easier to reproduce issues.
-		if os.Getenv(test.EnvAssertionsEnabledSeed) != "" {
-			assertionsEnabledProbability = 1
-		}
-
-		if rand.Float64() < assertionsEnabledProbability {
-			// The build with runtime assertions should exist in every nightly
-			// CI build, but we can't assume it exists in every roachtest call.
-			if path := t.RuntimeAssertionsCockroach(); path != "" {
-				t.l.Printf("Runtime assertions enabled")
-				t.randomizedCockroach = path
+		switch t.Spec().(*registry.TestSpec).CockroachBinary {
+		case registry.RandomizedCockroach:
+			// If the test is a benchmark test, we don't want to enable assertions
+			// as it will slow down performance.
+			if t.spec.Benchmark {
+				t.L().Printf("Benchmark test, running with standard cockroach")
+				t.randomizedCockroach = t.StandardCockroach()
 				return
-			} else {
-				t.l.Printf("WARNING: running without runtime assertions since the corresponding binary was not specified")
 			}
+
+			if rand.Float64() < roachtestflags.CockroachEAProbability {
+				// The build with runtime assertions should exist in every nightly
+				// CI build, but we can't assume it exists in every roachtest call.
+				if path := t.RuntimeAssertionsCockroach(); path != "" {
+					t.L().Printf("Runtime assertions enabled")
+					t.randomizedCockroach = path
+					return
+				} else {
+					t.L().Printf("WARNING: running without runtime assertions since the corresponding binary was not specified")
+				}
+			}
+			t.L().Printf("Runtime assertions disabled")
+			t.randomizedCockroach = t.StandardCockroach()
+		case registry.StandardCockroach:
+			t.L().Printf("Runtime assertions disabled: registry.StandardCockroach set")
+			t.randomizedCockroach = t.StandardCockroach()
+		case registry.RuntimeAssertionsCockroach:
+			t.L().Printf("Runtime assertions enabled: registry.RuntimeAssertionsCockroach set")
+			t.randomizedCockroach = t.RuntimeAssertionsCockroach()
+		default:
+			t.Fatal("Specified cockroach binary does not exist.")
 		}
-		t.l.Printf("Runtime assertions disabled")
-		t.randomizedCockroach = t.StandardCockroach()
 	})
 
 	return t.randomizedCockroach
+}
+
+func (t *testImpl) ExportOpenmetrics() bool {
+	return t.exportOpenmetrics
+}
+
+func (t *testImpl) GetRunId() string {
+	return t.runID
 }
 
 func (t *testImpl) RuntimeAssertionsCockroach() string {
@@ -195,6 +226,12 @@ func (t *testImpl) StandardCockroach() string {
 }
 
 func (t *testImpl) DeprecatedWorkload() string {
+	// Discourage usage of the deprecated workload by gating it behind the
+	// 'RequiresDeprecatedWorkload' test spec. Tests should use 'cockroach
+	// workload' instead when possible.
+	if !t.spec.RequiresDeprecatedWorkload {
+		t.Fatal("Using deprecated workload but `RequiresDeprecatedWorkload` is not set in test spec.")
+	}
 	return t.deprecatedWorkload
 }
 
@@ -217,19 +254,22 @@ func (t *testImpl) Name() string {
 	return t.spec.Name
 }
 
+func (t *testImpl) Owner() string {
+	return string(t.spec.Owner)
+}
+
 func (t *testImpl) SnapshotPrefix() string {
 	return t.spec.SnapshotPrefix
 }
 
 // L returns the test's logger.
 func (t *testImpl) L() *logger.Logger {
-	return t.l
+	return t.l.Load()
 }
 
 // ReplaceL replaces the test's logger.
 func (t *testImpl) ReplaceL(l *logger.Logger) {
-	// TODO(tbg): get rid of this, this is racy & hacky.
-	t.l = l
+	t.l.Store(l)
 }
 
 func (t *testImpl) status(ctx context.Context, id int64, args ...interface{}) {
@@ -263,6 +303,26 @@ func (t *testImpl) status(ctx context.Context, id int64, args ...interface{}) {
 // status message is erased.
 func (t *testImpl) Status(args ...interface{}) {
 	t.status(context.TODO(), t.runnerID, args...)
+}
+
+// AddParam adds a parameter to the test. This parameter will be logged both in
+// the github issue if one is created and in the artifacts directory. This is useful if a test
+// has metamorphic properties as it makes it easier to spot the differences between runs
+// without digging into the logs (i.e. mixed version test deployment mode). It also helps
+// debugging when the test failure is not posted to github (i.e. qualification runs).
+func (t *testImpl) AddParam(label, value string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.mu.extraParams == nil {
+		t.mu.extraParams = make(map[string]string)
+	}
+	t.mu.extraParams[label] = value
+}
+
+func (t *testImpl) getExtraParams() map[string]string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.mu.extraParams
 }
 
 // IsDebug returns true if the test is in a debug state.
@@ -533,20 +593,64 @@ func failuresMatchingError(failures []failure, refError any) bool {
 	return false
 }
 
-// failuresSpecifyOwner checks if any of the errors in any of the
-// given failures is a failure that is associated with an owner. If
-// such an error is found, it is returned; otherwise, nil is returned.
-func failuresSpecifyOwner(failures []failure) *registry.ErrorWithOwnership {
-	var ref registry.ErrorWithOwnership
+var transientErrorRegex = regexp.MustCompile(`TRANSIENT_ERROR\((.+)\)`)
+
+// transientErrorOwnershipFallback string matches for `TRANSIENT_ERROR` in the provided
+// failures and returns a new ErrorWithOwnership if it does. It iterates through each failure,
+// checking both the squashedErr and list of errors for `TRANSIENT_ERROR`.
+//
+// This is needed as the `require` package does not preserve the error object needed
+// for us to properly check if it is a transient error using `failuresMatchingError`.
+// Note the match is additionally guarded by the unique substring which denotes that
+// the error originated from the require package. If we see somewhere else that does not
+// preserve the error object, we want to investigate whether it can be fixed before resorting
+// to this fallback. See: #131094
+func transientErrorOwnershipFallback(failures []failure) *registry.ErrorWithOwnership {
+	const unexpectedErrPrefix = "Received unexpected error:"
+	var errWithOwner registry.ErrorWithOwnership
+	isTransient := func(err error) bool {
+		// Both squashedErr and errors should be non nil in actual roachtest failures,
+		// but for testing we sometimes only set one for simplicity.
+		if err == nil {
+			return false
+		}
+		// The require package prepends this message to `require.NoError` failures.
+		// We may see `TRANSIENT_ERROR` without this prefix, but don't mark it as
+		// a flake as we may be able to fix the code that doesn't preserve the error.
+		if !strings.Contains(err.Error(), unexpectedErrPrefix) {
+			return false
+		}
+
+		if match := transientErrorRegex.FindString(err.Error()); match != "" {
+			problemCause := strings.TrimPrefix(match, "TRANSIENT_ERROR(")
+			problemCause = strings.TrimSuffix(problemCause, ")")
+			// The cause will be used to create the github issue creation, so we don't want
+			// it to be blank. Instead, return false and let us investigate what is creating
+			// a transient error with no cause.
+			if problemCause == "" {
+				return false
+			}
+
+			errWithOwner = registry.ErrorWithOwner(
+				registry.OwnerTestEng, err,
+				registry.WithTitleOverride(problemCause),
+				registry.InfraFlake,
+			)
+			return true
+		}
+
+		return false
+	}
+
 	for _, f := range failures {
 		for _, err := range f.errors {
-			if errors.As(err, &ref) {
-				return &ref
+			if isTransient(err) {
+				return &errWithOwner
 			}
 		}
 
-		if errors.As(f.squashedErr, &ref) {
-			return &ref
+		if isTransient(f.squashedErr) {
+			return &errWithOwner
 		}
 	}
 
@@ -586,6 +690,38 @@ func (t *testImpl) IsBuildVersion(minVersion string) bool {
 	// greater than "v2.1.0-alpha.x".
 	vers = version.MustParse(minVersion + "-0")
 	return t.BuildVersion().AtLeast(vers)
+}
+
+// defaultTaskOptions returns the default options for a task started by the test.
+func defaultTaskOptions() []task.Option {
+	return []task.Option{
+		task.PanicHandler(func(_ context.Context, name string, l *logger.Logger, r interface{}) error {
+			return fmt.Errorf("test task %s panicked: %v", name, r)
+		}),
+	}
+}
+
+// GoWithCancel runs the given function in a goroutine and returns a
+// CancelFunc that can be used to cancel the function.
+func (t *testImpl) GoWithCancel(fn task.Func, opts ...task.Option) context.CancelFunc {
+	return t.taskManager.GoWithCancel(
+		fn, task.OptionList(defaultTaskOptions()...), task.OptionList(opts...),
+	)
+}
+
+// Go is like GoWithCancel but without a cancel function.
+func (t *testImpl) Go(fn task.Func, opts ...task.Option) {
+	_ = t.GoWithCancel(fn, task.OptionList(opts...))
+}
+
+// NewGroup starts a new task group.
+func (t *testImpl) NewGroup(opts ...task.Option) task.Group {
+	return t.taskManager.NewGroup(task.OptionList(defaultTaskOptions()...), task.OptionList(opts...))
+}
+
+// NewErrorGroup starts a new task error group.
+func (t *testImpl) NewErrorGroup(opts ...task.Option) task.ErrorGroup {
+	return t.taskManager.NewErrorGroup(task.OptionList(defaultTaskOptions()...), task.OptionList(opts...))
 }
 
 // TeamCityEscape escapes a string for use as <value> in a key='<value>' attribute

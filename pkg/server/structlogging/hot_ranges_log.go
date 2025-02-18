@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package structlogging
 
@@ -114,10 +109,10 @@ func (s *hotRangesLoggingScheduler) start(ctx context.Context, stopper *stop.Sto
 					hrEvent := &eventpb.HotRangesStats{
 						RangeID:             int64(r.RangeID),
 						Qps:                 r.QPS,
-						DatabaseName:        r.DatabaseName,
+						Databases:           r.Databases,
+						Tables:              r.Tables,
+						Indexes:             r.Indexes,
 						SchemaName:          r.SchemaName,
-						TableName:           r.TableName,
-						IndexName:           r.IndexName,
 						CPUTimePerSecond:    r.CPUTimePerSecond,
 						ReadBytesPerSecond:  r.ReadBytesPerSecond,
 						WriteBytesPerSecond: r.WriteBytesPerSecond,

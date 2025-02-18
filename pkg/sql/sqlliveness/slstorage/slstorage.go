@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package slstorage
 
@@ -200,7 +195,15 @@ const (
 func (s *Storage) isAlive(
 	ctx context.Context, sid sqlliveness.SessionID, syncOrAsync readType,
 ) (alive bool, _ error) {
-
+	// Confirm the session ID has the correct format, and if it
+	// doesn't then we can consider it as dead without any extra
+	// work.
+	if err := s.keyCodec.validate(sid); err != nil {
+		// This SessionID may be invalid because of the wrong format
+		// so consider it as dead.
+		//nolint:returnerrcheck
+		return false, nil
+	}
 	// If wait is false, alive is set and future is unset.
 	// If wait is true, alive is unset and future is set.
 	alive, wait, future, err := func() (bool, bool, singleflight.Future, error) {
@@ -318,6 +321,9 @@ func (s *Storage) deleteOrFetchSession(
 	ctx = multitenant.WithTenantCostControlExemption(ctx)
 	livenessProber := regionliveness.NewLivenessProber(s.db, s.codec, nil, s.settings)
 	k, regionPhysicalRep, err := s.keyCodec.encode(sid)
+	if err != nil {
+		return false, hlc.Timestamp{}, err
+	}
 	if err := s.txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		// Reset captured variable in case of retry.
 		deleted, expiration, prevExpiration = false, hlc.Timestamp{}, hlc.Timestamp{}
@@ -523,7 +529,7 @@ func (s *Storage) Insert(
 
 		}
 		v := encodeValue(expiration)
-		batch.InitPut(k, &v, true)
+		batch.CPut(k, &v, nil /* expValue */)
 
 		return txn.CommitInBatch(ctx, batch)
 	}); err != nil {

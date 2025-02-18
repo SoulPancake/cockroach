@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord_test
 
@@ -15,20 +10,22 @@ import (
 	"fmt"
 	"math/rand"
 	"reflect"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
+	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/desctestutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -36,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/span"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
@@ -137,7 +135,7 @@ func rangeFeed(
 
 	g := ctxgroup.WithContext(ctx)
 	g.GoCtx(func(ctx context.Context) (err error) {
-		return ds.RangeFeed(ctx, []roachpb.Span{sp}, startFrom, events, opts...)
+		return ds.RangeFeed(ctx, []kvcoord.SpanTimePair{{Span: sp, StartAfter: startFrom}}, events, opts...)
 	})
 	g.GoCtx(func(ctx context.Context) error {
 		for {
@@ -306,6 +304,119 @@ func TestMuxRangeCatchupScanQuotaReleased(t *testing.T) {
 	channelWaitWithTimeout(t, enoughErrors)
 }
 
+// TestMuxRangeFeedDoesNotStallOnError tests that the mux rangefeed
+// client does not stall forever when all replicas return errors for
+// the initial MuxRangeFeed call.
+func TestMuxRangeFeedDoesNotStallOnError(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	skip.UnderDuress(t, "slow test")
+
+	ctx := context.Background()
+
+	var (
+		rfMethod = "/cockroach.roachpb.Internal/MuxRangeFeed"
+
+		maxErrors   = 10
+		shouldError atomic.Bool
+		errCount    int
+	)
+
+	streamInterceptor := func(target string, class rpc.ConnectionClass) grpc.StreamClientInterceptor {
+		return func(
+			ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn,
+			method string, streamer grpc.Streamer, opts ...grpc.CallOption,
+		) (grpc.ClientStream, error) {
+			if method == rfMethod {
+				if shouldError.Load() && errCount <= maxErrors {
+					errCount++
+					return nil, errors.Newf("test error %d", errCount)
+				}
+			}
+			return streamer(ctx, desc, cc, method, opts...)
+		}
+	}
+	const numServers int = 3
+	serverArgs := base.TestServerArgs{
+		RetryOptions: retry.Options{
+			InitialBackoff: 10 * time.Millisecond,
+			MaxBackoff:     10 * time.Millisecond,
+		},
+		Knobs: base.TestingKnobs{
+			Server: &server.TestingKnobs{
+				ContextTestingKnobs: rpc.ContextTestingKnobs{
+					StreamClientInterceptor: streamInterceptor,
+				},
+			},
+			JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
+		},
+		// Scan like a bat out of hell to ensure down-replication happens quickly.
+		ScanInterval: 50 * time.Millisecond,
+	}
+
+	tc := testcluster.StartTestCluster(t, numServers, base.TestClusterArgs{ServerArgs: serverArgs})
+	defer tc.Stopper().Stop(ctx)
+	ts := tc.ApplicationLayer(0)
+
+	startFrom := ts.Clock().Now()
+
+	sqlDB := sqlutils.MakeSQLRunner(ts.SQLConn(t))
+
+	// The goal here is to try make sure that the rangefeed is forced to
+	// connect to a remote node. Local connections don't go through the
+	// server interceptors set up above.
+	sqlDB.ExecMultiple(t,
+		`SET CLUSTER SETTING kv.rangefeed.enabled = true`,
+		`SET CLUSTER SETTING kv.closed_timestamp.target_duration='100ms'`,
+		`SET CLUSTER SETTING kv.closed_timestamp.side_transport_interval = '50ms'`,
+		`SET CLUSTER SETTING kv.rangefeed.closed_timestamp_refresh_interval = '50ms'`,
+		`ALTER DATABASE defaultdb CONFIGURE ZONE USING num_replicas = 1`,
+		`CREATE TABLE foo (key INT PRIMARY KEY)`,
+	)
+
+	// Waiting for the initial range to go start removing replicas makes the wait
+	// below substantially shorter.
+	testutils.SucceedsSoon(t, func() error {
+		var replicaCount int
+		sqlDB.QueryRow(t,
+			"SELECT sum(cardinality(replicas)) FROM [SHOW RANGES FROM TABLE foo WITH DETAILS]").
+			Scan(&replicaCount)
+		if replicaCount != 1 {
+			return errors.Newf("too many replicas: %d", replicaCount)
+		}
+		return nil
+	})
+
+	sqlDB.ExecMultiple(t,
+		`INSERT INTO foo (key) SELECT * FROM generate_series(1, 100)`,
+		`ALTER TABLE foo SPLIT AT (SELECT * FROM generate_series(10, 90, 10))`,
+	)
+
+	// We scatter and wait until we have at least one range without replicas on n1.
+	testutils.SucceedsSoon(t, func() error {
+		sqlDB.Exec(t, `ALTER TABLE foo SCATTER`)
+		var nonLocalCount int
+		sqlDB.QueryRow(t,
+			"SELECT count(1) FROM [SHOW RANGES FROM TABLE foo WITH DETAILS] WHERE array_position(replicas, 1) IS NULL").
+			Scan(&nonLocalCount)
+		if nonLocalCount == 0 {
+			return errors.New("at least one non-local range required for test")
+		}
+		return nil
+	})
+
+	fooDesc := desctestutils.TestingGetPublicTableDescriptor(
+		ts.DB(), ts.Codec(), "defaultdb", "foo")
+	fooSpan := fooDesc.PrimaryIndexSpan(ts.Codec())
+
+	shouldError.Store(true)
+	allSeen, onValue := observeNValues(100)
+	closeFeed := rangeFeed(ts.DistSenderI(), fooSpan, startFrom, onValue)
+	defer closeFeed()
+	channelWaitWithTimeout(t, allSeen)
+}
+
 // Test to make sure the various metrics used by rangefeed are correctly
 // updated during the lifetime of the rangefeed and when the rangefeed completes.
 func TestRangeFeedMetricsManagement(t *testing.T) {
@@ -325,7 +436,7 @@ func TestRangeFeedMetricsManagement(t *testing.T) {
 	// Insert 1000 rows, and split them into 10 ranges.
 	const numRanges = 10
 	sqlDB.ExecMultiple(t,
-		`ALTER DATABASE defaultdb  CONFIGURE ZONE USING num_replicas = 1`,
+		`ALTER DATABASE defaultdb CONFIGURE ZONE USING num_replicas = 1`,
 		`CREATE TABLE foo (key INT PRIMARY KEY)`,
 		`INSERT INTO foo (key) SELECT * FROM generate_series(1, 1000)`,
 		`ALTER TABLE foo SPLIT AT (SELECT * FROM generate_series(100, 900, 100))`,
@@ -617,7 +728,7 @@ func TestMuxRangeFeedCanCloseStream(t *testing.T) {
 		}, 10*time.Second)
 	}
 
-	var observedStreams sync.Map
+	var observedStreams syncutil.Set[int64]
 	var capturedSender atomic.Value
 
 	ignoreValues := func(event kvcoord.RangeFeedMessage) {}
@@ -634,7 +745,7 @@ func TestMuxRangeFeedCanCloseStream(t *testing.T) {
 			func(ctx context.Context, s roachpb.Span, streamID int64, event *kvpb.RangeFeedEvent) (skip bool, _ error) {
 				switch t := event.GetValue().(type) {
 				case *kvpb.RangeFeedCheckpoint:
-					observedStreams.Store(streamID, nil)
+					observedStreams.Add(streamID)
 					_, err := frontier.Forward(t.Span, t.ResolvedTS)
 					if err != nil {
 						return true, err
@@ -672,13 +783,12 @@ func TestMuxRangeFeedCanCloseStream(t *testing.T) {
 		// we know the rangefeed is started, all ranges are running.
 		expectFrontierAdvance()
 
-		// Pick some number of streams to close. Since sync.Map iteration order is non-deterministic,
-		// we'll pick few random streams.
+		// Pick some number of streams to close. Since syncutil.Map iteration order
+		// is non-deterministic, we'll pick few random streams.
 		initialClosed := numRestartStreams.Load()
 		numToCancel := 1 + rand.Int31n(3)
 		var numCancelled int32 = 0
-		observedStreams.Range(func(key any, _ any) bool {
-			streamID := key.(int64)
+		observedStreams.Range(func(streamID int64) bool {
 			if _, wasCancelled := cancelledStreams[streamID]; wasCancelled {
 				return true // try another stream.
 			}

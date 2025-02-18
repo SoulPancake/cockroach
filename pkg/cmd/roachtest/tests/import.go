@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -14,7 +9,6 @@ import (
 	"context"
 	gosql "database/sql"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -27,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/errors"
 )
@@ -126,10 +119,9 @@ func registerImportNodeShutdown(r registry.Registry) {
 func registerImportTPCC(r registry.Registry) {
 	runImportTPCC := func(ctx context.Context, t test.Test, c cluster.Cluster, testName string,
 		timeout time.Duration, warehouses int) {
-		c.Put(ctx, t.DeprecatedWorkload(), "./workload")
 		t.Status("starting csv servers")
 		c.Start(ctx, t.L(), option.DefaultStartOpts(), install.MakeClusterSettings())
-		c.Run(ctx, option.WithNodes(c.All()), `./workload csv-server --port=8081 &> logs/workload-csv-server.log < /dev/null &`)
+		c.Run(ctx, option.WithNodes(c.All()), `./cockroach workload csv-server --port=8081 &> logs/workload-csv-server.log < /dev/null &`)
 
 		t.Status("running workload")
 		m := c.NewMonitor(ctx)
@@ -144,7 +136,10 @@ func registerImportTPCC(r registry.Registry) {
 			m.Go(hc.Runner)
 		}
 
-		tick, perfBuf := initBulkJobPerfArtifacts(testName, timeout)
+		exporter := roachtestutil.CreateWorkloadHistogramExporter(t, c)
+		tick, perfBuf := initBulkJobPerfArtifacts(timeout, t, exporter)
+		defer roachtestutil.CloseExporter(ctx, exporter, t, c, perfBuf, c.Node(1), "")
+
 		workloadStr := `./cockroach workload fixtures import tpcc --warehouses=%d --csv-server='http://localhost:8081' {pgurl:1}`
 		m.Go(func(ctx context.Context) error {
 			defer dul.Done()
@@ -162,16 +157,6 @@ func registerImportTPCC(r registry.Registry) {
 			tick()
 			c.Run(ctx, option.WithNodes(c.Node(1)), cmd)
 			tick()
-
-			// Upload the perf artifacts to any one of the nodes so that the test
-			// runner copies it into an appropriate directory path.
-			dest := filepath.Join(t.PerfArtifactsDir(), "stats.json")
-			if err := c.RunE(ctx, option.WithNodes(c.Node(1)), "mkdir -p "+filepath.Dir(dest)); err != nil {
-				log.Errorf(ctx, "failed to create perf dir: %+v", err)
-			}
-			if err := c.PutString(ctx, perfBuf.String(), dest, 0755, c.Node(1)); err != nil {
-				log.Errorf(ctx, "failed to upload perf artifacts to node: %s", err.Error())
-			}
 			return nil
 		})
 		m.Wait()
@@ -245,7 +230,9 @@ func registerImportTPCH(r registry.Registry) {
 			EncryptionSupport: registry.EncryptionMetamorphic,
 			Leases:            registry.MetamorphicLeases,
 			Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-				tick, perfBuf := initBulkJobPerfArtifacts(t.Name(), item.timeout)
+				exporter := roachtestutil.CreateWorkloadHistogramExporter(t, c)
+				tick, perfBuf := initBulkJobPerfArtifacts(item.timeout, t, exporter)
+				defer roachtestutil.CloseExporter(ctx, exporter, t, c, perfBuf, c.Node(1), "")
 
 				c.Start(ctx, t.L(), option.DefaultStartOpts(), install.MakeClusterSettings())
 				conn := c.Conn(ctx, t.L(), 1)
@@ -329,16 +316,6 @@ func registerImportTPCH(r registry.Registry) {
 						return errors.Wrap(err, "import failed")
 					}
 					tick()
-
-					// Upload the perf artifacts to any one of the nodes so that the test
-					// runner copies it into an appropriate directory path.
-					dest := filepath.Join(t.PerfArtifactsDir(), "stats.json")
-					if err := c.RunE(ctx, option.WithNodes(c.Node(1)), "mkdir -p "+filepath.Dir(dest)); err != nil {
-						log.Errorf(ctx, "failed to create perf dir: %+v", err)
-					}
-					if err := c.PutString(ctx, perfBuf.String(), dest, 0755, c.Node(1)); err != nil {
-						log.Errorf(ctx, "failed to upload perf artifacts to node: %s", err.Error())
-					}
 					return nil
 				})
 
@@ -356,10 +333,9 @@ func registerImportDecommissioned(r registry.Registry) {
 			warehouses = 10
 		}
 
-		c.Put(ctx, t.DeprecatedWorkload(), "./workload")
 		t.Status("starting csv servers")
 		c.Start(ctx, t.L(), option.DefaultStartOpts(), install.MakeClusterSettings())
-		c.Run(ctx, option.WithNodes(c.All()), `./workload csv-server --port=8081 &> logs/workload-csv-server.log < /dev/null &`)
+		c.Run(ctx, option.WithNodes(c.All()), `./cockroach workload csv-server --port=8081 &> logs/workload-csv-server.log < /dev/null &`)
 
 		// Decommission a node.
 		nodeToDecommission := 2

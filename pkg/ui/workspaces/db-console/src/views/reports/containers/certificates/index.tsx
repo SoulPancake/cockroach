@@ -1,34 +1,29 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { Loading, util } from "@cockroachlabs/cluster-ui";
+import isEmpty from "lodash/isEmpty";
+import isEqual from "lodash/isEqual";
+import isNaN from "lodash/isNaN";
+import join from "lodash/join";
+import map from "lodash/map";
+import sortBy from "lodash/sortBy";
 import React, { Fragment } from "react";
 import { Helmet } from "react-helmet";
 import { connect } from "react-redux";
 import { RouteComponentProps, withRouter } from "react-router-dom";
-import { Loading, util } from "@cockroachlabs/cluster-ui";
-import map from "lodash/map";
-import isEqual from "lodash/isEqual";
-import isEmpty from "lodash/isEmpty";
-import join from "lodash/join";
-import sortBy from "lodash/sortBy";
-import isNaN from "lodash/isNaN";
 
-import { BackToAdvanceDebug } from "src/views/reports/containers/util";
-import { getMatchParamByName } from "src/util/query";
-import { nodeIDAttr } from "src/util/constants";
-import { AdminUIState } from "src/redux/state";
+import * as protos from "src/js/protos";
 import {
   certificatesRequestKey,
   refreshCertificates,
 } from "src/redux/apiReducers";
-import * as protos from "src/js/protos";
+import { AdminUIState } from "src/redux/state";
+import { nodeIDAttr } from "src/util/constants";
+import { getMatchParamByName } from "src/util/query";
+import { BackToAdvanceDebug } from "src/views/reports/containers/util";
 
 interface CertificatesOwnProps {
   certificates: protos.cockroach.server.serverpb.CertificatesResponse;
@@ -97,8 +92,9 @@ export class Certificates extends React.Component<CertificatesProps, {}> {
         </th>
         <td className="certs-table__cell" title={join(values, "\n")}>
           <ul className="certs-entries-list">
-            {sortBy(values)
-              .map((value, key) => <li key={key}>{value}</li>)}
+            {sortBy(values).map((value, key) => (
+              <li key={key}>{value}</li>
+            ))}
           </ul>
         </td>
       </tr>

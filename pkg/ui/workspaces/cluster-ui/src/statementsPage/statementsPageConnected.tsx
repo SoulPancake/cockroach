@@ -1,50 +1,53 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { connect } from "react-redux";
 import { RouteComponentProps, withRouter } from "react-router-dom";
 import { Dispatch } from "redux";
 
+import { StatementsRequest } from "src/api/statementsApi";
 import { AppState, uiConfigActions } from "src/store";
-import { actions as statementDiagnosticsActions } from "src/store/statementDiagnostics";
 import { actions as analyticsActions } from "src/store/analytics";
+import { actions as databasesListActions } from "src/store/databasesList";
 import {
   actions as localStorageActions,
   updateStmtsPageLimitAction,
   updateStmsPageReqSortAction,
 } from "src/store/localStorage";
 import { actions as sqlStatsActions } from "src/store/sqlStats";
-import { actions as databasesListActions } from "src/store/databasesList";
-import { StatementsRequest } from "src/api/statementsApi";
+import { actions as statementDiagnosticsActions } from "src/store/statementDiagnostics";
 
-import {
-  actions as nodesActions,
-  nodeRegionsByIDSelector,
-} from "../store/nodes";
-import {
-  selectTimeScale,
-  selectStmtsPageLimit,
-  selectStmtsPageReqSort,
-} from "../store/utils/selectors";
-import {
-  selectIsTenant,
-  selectHasViewActivityRedactedRole,
-  selectHasAdminRole,
-} from "../store/uiConfig";
-import { TimeScale } from "../timeScaleDropdown";
 import {
   InsertStmtDiagnosticRequest,
   StatementDiagnosticsReport,
   SqlStatsSortType,
 } from "../api";
+import {
+  actions as nodesActions,
+  nodeRegionsByIDSelector,
+} from "../store/nodes";
+import {
+  selectIsTenant,
+  selectHasViewActivityRedactedRole,
+  selectHasAdminRole,
+} from "../store/uiConfig";
+import {
+  selectTimeScale,
+  selectStmtsPageLimit,
+  selectStmtsPageReqSort,
+} from "../store/utils/selectors";
+import { TimeScale } from "../timeScaleDropdown";
 
+import {
+  mapDispatchToActiveStatementsPageProps,
+  mapStateToActiveStatementsPageProps,
+} from "./activeStatementsPage.selectors";
+import {
+  ActiveStatementsViewDispatchProps,
+  ActiveStatementsViewStateProps,
+} from "./activeStatementsView";
 import {
   StatementsPageDispatchProps,
   StatementsPageStateProps,
@@ -61,14 +64,6 @@ import {
   StatementsPageRoot,
   StatementsPageRootProps,
 } from "./statementsPageRoot";
-import {
-  ActiveStatementsViewDispatchProps,
-  ActiveStatementsViewStateProps,
-} from "./activeStatementsView";
-import {
-  mapDispatchToActiveStatementsPageProps,
-  mapStateToActiveStatementsPageProps,
-} from "./activeStatementsPage.selectors";
 
 type StateProps = {
   fingerprintsPageProps: StatementsPageStateProps & RouteComponentProps;

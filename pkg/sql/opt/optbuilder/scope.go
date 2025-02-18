@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package optbuilder
 
@@ -16,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
@@ -142,6 +138,7 @@ const (
 	exprKindWhere
 	exprKindWindowFrameStart
 	exprKindWindowFrameEnd
+	exprKindWhen
 )
 
 var exprKindName = [...]string{
@@ -165,6 +162,7 @@ var exprKindName = [...]string{
 	exprKindWhere:             "WHERE",
 	exprKindWindowFrameStart:  "WINDOW FRAME START",
 	exprKindWindowFrameEnd:    "WINDOW FRAME END",
+	exprKindWhen:              "WHEN",
 }
 
 func (k exprKind) String() string {
@@ -509,7 +507,7 @@ func (s *scope) resolveTypeAndReject(
 
 // ensureNullType tests the type of the given expression. If types.Unknown, then
 // ensureNullType wraps the expression in a CAST to the desired type (assuming
-// it is not types.Any). types.Unknown is a special type used for null values,
+// it is not types.AnyElement). types.Unknown is a special type used for null values,
 // and can be cast to any other type.
 func (s *scope) ensureNullType(texpr tree.TypedExpr, desired *types.T) tree.TypedExpr {
 	if desired.Family() != types.AnyFamily && texpr.ResolvedType().Family() == types.UnknownFamily {
@@ -566,6 +564,17 @@ func (s *scope) colList() opt.ColList {
 		colList[i] = s.cols[i].id
 	}
 	return colList
+}
+
+// forEachColWithExtras applies the given function to every column in the scope,
+// including extra columns.
+func (s *scope) forEachColWithExtras(fn func(col *scopeColumn)) {
+	for i := range s.cols {
+		fn(&s.cols[i])
+	}
+	for i := range s.extraCols {
+		fn(&s.extraCols[i])
+	}
 }
 
 // hasSameColumns returns true if this scope has the same columns
@@ -661,6 +670,20 @@ func (s *scope) findFuncArgCol(idx tree.PlaceholderIdx) *scopeColumn {
 		for i := range s.cols {
 			col := &s.cols[i]
 			if col.funcParamReferencedBy(idx) {
+				return col
+			}
+		}
+	}
+	return nil
+}
+
+// findAnonymousColumnWithMetadataName returns the first anonymous column that
+// has the given name in the query metadata.
+func (s *scope) findAnonymousColumnWithMetadataName(metadataName string) *scopeColumn {
+	for ; s != nil; s = s.parent {
+		for i := range s.cols {
+			col := &s.cols[i]
+			if col.name.refName == "" && col.name.metadataName == metadataName {
 				return col
 			}
 		}
@@ -1045,12 +1068,30 @@ func (s *scope) VisitPre(expr tree.Expr) (recurse bool, newExpr tree.Expr) {
 			// It may be a reference to a table, e.g. SELECT tbl FROM tbl.
 			// Attempt to resolve as a TupleStar.
 			if sqlerrors.IsUndefinedColumnError(resolveErr) {
+				if s.context == exprKindWhen {
+					panic(errors.WithHint(resolveErr,
+						"column references in a trigger WHEN clause must be prefixed with NEW or OLD"))
+				}
 				// Attempt to resolve as columnname.*, which allows items
 				// such as SELECT row_to_json(tbl_name) FROM tbl_name to work.
 				return func() (bool, tree.Expr) {
 					defer wrapColTupleStarPanic(resolveErr)
 					return s.VisitPre(columnNameAsTupleStar(string(t.ColumnName)))
 				}()
+			}
+			if sqlerrors.IsUndefinedRelationError(resolveErr) && t.TableName.Object() != "" {
+				// Attempt to resolve as columnname.fieldname in order to provide a more
+				// helpful error message.
+				_, sourceResolveErr := colinfo.ResolveColumnItem(
+					s.builder.ctx, s, &tree.ColumnItem{ColumnName: tree.Name(t.TableName.Object())},
+				)
+				if sourceResolveErr == nil {
+					panic(errors.WithIssueLink(errors.WithHint(resolveErr,
+						"to access a field of a composite-typed column or variable, "+
+							"surround the column/variable name in parentheses: (varName).fieldName"),
+						errors.IssueLink{IssueURL: build.MakeIssueURL(114687)},
+					))
+				}
 			}
 			panic(resolveErr)
 		}
@@ -1165,7 +1206,7 @@ func (s *scope) replaceSRF(f *tree.FuncExpr, def *tree.ResolvedFunctionDefinitio
 		tree.RejectAggregates|tree.RejectWindowApplications|tree.RejectNestedGenerators)
 
 	expr := f.Walk(s)
-	typedFunc, err := tree.TypeCheck(s.builder.ctx, expr, s.builder.semaCtx, types.Any)
+	typedFunc, err := tree.TypeCheck(s.builder.ctx, expr, s.builder.semaCtx, types.AnyElement)
 	if err != nil {
 		panic(err)
 	}
@@ -1266,7 +1307,7 @@ func (s *scope) replaceAggregate(f *tree.FuncExpr, def *tree.ResolvedFunctionDef
 		copy(fCopy.Exprs, oldExprs)
 
 		// Add implicit column to the input expressions.
-		fCopy.Exprs = append(fCopy.Exprs, s.resolveType(fCopy.OrderBy[0].Expr, types.Any))
+		fCopy.Exprs = append(fCopy.Exprs, s.resolveType(fCopy.OrderBy[0].Expr, types.AnyElement))
 	}
 
 	expr := fCopy.Walk(s)
@@ -1285,14 +1326,14 @@ func (s *scope) replaceAggregate(f *tree.FuncExpr, def *tree.ResolvedFunctionDef
 			defer func() { s.builder.semaCtx.Properties.Restore(oldProps) }()
 
 			s.builder.semaCtx.Properties.Require("FILTER", tree.RejectSpecial)
-			_, err := tree.TypeCheck(s.builder.ctx, expr.(*tree.FuncExpr).Filter, s.builder.semaCtx, types.Any)
+			_, err := tree.TypeCheck(s.builder.ctx, expr.(*tree.FuncExpr).Filter, s.builder.semaCtx, types.AnyElement)
 			if err != nil {
 				panic(err)
 			}
 		}()
 	}
 
-	typedFunc, err := tree.TypeCheck(s.builder.ctx, expr, s.builder.semaCtx, types.Any)
+	typedFunc, err := tree.TypeCheck(s.builder.ctx, expr, s.builder.semaCtx, types.AnyElement)
 	if err != nil {
 		panic(err)
 	}
@@ -1364,7 +1405,7 @@ func (s *scope) replaceWindowFn(f *tree.FuncExpr, def *tree.ResolvedFunctionDefi
 
 	expr := fCopy.Walk(s)
 
-	typedFunc, err := tree.TypeCheck(s.builder.ctx, expr, s.builder.semaCtx, types.Any)
+	typedFunc, err := tree.TypeCheck(s.builder.ctx, expr, s.builder.semaCtx, types.AnyElement)
 	if err != nil {
 		panic(err)
 	}
@@ -1385,7 +1426,7 @@ func (s *scope) replaceWindowFn(f *tree.FuncExpr, def *tree.ResolvedFunctionDefi
 	oldPartitions := f.WindowDef.Partitions
 	f.WindowDef.Partitions = make(tree.Exprs, len(oldPartitions))
 	for i, e := range oldPartitions {
-		typedExpr := s.resolveType(e, types.Any)
+		typedExpr := s.resolveType(e, types.AnyElement)
 		f.WindowDef.Partitions[i] = typedExpr
 	}
 
@@ -1396,7 +1437,7 @@ func (s *scope) replaceWindowFn(f *tree.FuncExpr, def *tree.ResolvedFunctionDefi
 		if ord.OrderType != tree.OrderByColumn {
 			panic(errOrderByIndexInWindow)
 		}
-		typedExpr := s.resolveType(ord.Expr, types.Any)
+		typedExpr := s.resolveType(ord.Expr, types.AnyElement)
 		ord.Expr = typedExpr
 		f.WindowDef.OrderBy[i] = &ord
 	}
@@ -1448,7 +1489,7 @@ func (s *scope) replaceSQLFn(f *tree.FuncExpr, def *tree.ResolvedFunctionDefinit
 	s.builder.semaCtx.Properties.Require("SQL function", tree.RejectSpecial)
 
 	expr := f.Walk(s)
-	typedFunc, err := tree.TypeCheck(s.builder.ctx, expr, s.builder.semaCtx, types.Any)
+	typedFunc, err := tree.TypeCheck(s.builder.ctx, expr, s.builder.semaCtx, types.AnyElement)
 	if err != nil {
 		panic(err)
 	}
@@ -1594,7 +1635,7 @@ func (s *scope) replaceCount(
 			// We call TypeCheck to fill in FuncExpr internals. This is a fixed
 			// expression; we should not hit an error here.
 			semaCtx := tree.MakeSemaContext(nil /* resolver */)
-			if _, err := e.TypeCheck(s.builder.ctx, &semaCtx, types.Any); err != nil {
+			if _, err := e.TypeCheck(s.builder.ctx, &semaCtx, types.AnyElement); err != nil {
 				panic(err)
 			}
 			newDef, err := e.Func.Resolve(s.builder.ctx, s.builder.semaCtx.SearchPath, nil /* resolver */)

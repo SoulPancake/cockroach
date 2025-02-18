@@ -1,18 +1,14 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -122,6 +118,7 @@ func TestMVCCValueFormat(t *testing.T) {
 	intVal.SetInt(17)
 	var importEpoch uint32 = 3
 	var originID uint32 = 1
+	var originTs = hlc.Timestamp{WallTime: 1, Logical: 1}
 
 	valHeader := enginepb.MVCCValueHeader{}
 	valHeader.LocalTimestamp = hlc.ClockTimestamp{WallTime: 9}
@@ -129,30 +126,36 @@ func TestMVCCValueFormat(t *testing.T) {
 	valHeaderFull := valHeader
 	valHeaderFull.ImportEpoch = importEpoch
 	valHeaderFull.OriginID = originID
+	valHeaderFull.OriginTimestamp = originTs
 
 	valHeaderWithJobIDOnly := enginepb.MVCCValueHeader{ImportEpoch: importEpoch}
 
 	valHeaderWithOriginIDOnly := enginepb.MVCCValueHeader{OriginID: originID}
 
+	valHeaderWithOriginTsOnly := enginepb.MVCCValueHeader{OriginTimestamp: originTs}
+
 	testcases := map[string]struct {
 		val    MVCCValue
 		expect string
 	}{
-		"tombstone":                    {val: MVCCValue{}, expect: "/<empty>"},
-		"bytes":                        {val: MVCCValue{Value: strVal}, expect: "/BYTES/foo"},
-		"int":                          {val: MVCCValue{Value: intVal}, expect: "/INT/17"},
-		"header+tombstone":             {val: MVCCValue{MVCCValueHeader: valHeader}, expect: "{localTs=0.000000009,0}/<empty>"},
-		"header+bytes":                 {val: MVCCValue{MVCCValueHeader: valHeader, Value: strVal}, expect: "{localTs=0.000000009,0}/BYTES/foo"},
-		"header+int":                   {val: MVCCValue{MVCCValueHeader: valHeader, Value: intVal}, expect: "{localTs=0.000000009,0}/INT/17"},
-		"headerJobIDOnly+tombstone":    {val: MVCCValue{MVCCValueHeader: valHeaderWithJobIDOnly}, expect: "{importEpoch=3}/<empty>"},
-		"headerJobIDOnly+bytes":        {val: MVCCValue{MVCCValueHeader: valHeaderWithJobIDOnly, Value: strVal}, expect: "{importEpoch=3}/BYTES/foo"},
-		"headerJobIDOnly+int":          {val: MVCCValue{MVCCValueHeader: valHeaderWithJobIDOnly, Value: intVal}, expect: "{importEpoch=3}/INT/17"},
-		"headerOriginIDOnly+tombstone": {val: MVCCValue{MVCCValueHeader: valHeaderWithOriginIDOnly}, expect: "{originID=1}/<empty>"},
-		"headerOriginIDOnly+bytes":     {val: MVCCValue{MVCCValueHeader: valHeaderWithOriginIDOnly, Value: strVal}, expect: "{originID=1}/BYTES/foo"},
-		"headerOriginIDOnly+int":       {val: MVCCValue{MVCCValueHeader: valHeaderWithOriginIDOnly, Value: intVal}, expect: "{originID=1}/INT/17"},
-		"headerFull+tombstone":         {val: MVCCValue{MVCCValueHeader: valHeaderFull}, expect: "{localTs=0.000000009,0, importEpoch=3, originID=1}/<empty>"},
-		"headerFull+bytes":             {val: MVCCValue{MVCCValueHeader: valHeaderFull, Value: strVal}, expect: "{localTs=0.000000009,0, importEpoch=3, originID=1}/BYTES/foo"},
-		"headerFull+int":               {val: MVCCValue{MVCCValueHeader: valHeaderFull, Value: intVal}, expect: "{localTs=0.000000009,0, importEpoch=3, originID=1}/INT/17"},
+		"tombstone":            {val: MVCCValue{}, expect: "/<empty>"},
+		"bytes":                {val: MVCCValue{Value: strVal}, expect: "/BYTES/foo"},
+		"int":                  {val: MVCCValue{Value: intVal}, expect: "/INT/17"},
+		"timestamp+tombstone":  {val: MVCCValue{MVCCValueHeader: valHeader}, expect: "{localTs=0.000000009,0}/<empty>"},
+		"timestamp+bytes":      {val: MVCCValue{MVCCValueHeader: valHeader, Value: strVal}, expect: "{localTs=0.000000009,0}/BYTES/foo"},
+		"timestamp+int":        {val: MVCCValue{MVCCValueHeader: valHeader, Value: intVal}, expect: "{localTs=0.000000009,0}/INT/17"},
+		"jobid+tombstone":      {val: MVCCValue{MVCCValueHeader: valHeaderWithJobIDOnly}, expect: "{importEpoch=3}/<empty>"},
+		"jobid+bytes":          {val: MVCCValue{MVCCValueHeader: valHeaderWithJobIDOnly, Value: strVal}, expect: "{importEpoch=3}/BYTES/foo"},
+		"jobid+int":            {val: MVCCValue{MVCCValueHeader: valHeaderWithJobIDOnly, Value: intVal}, expect: "{importEpoch=3}/INT/17"},
+		"originid+tombstone":   {val: MVCCValue{MVCCValueHeader: valHeaderWithOriginIDOnly}, expect: "{originID=1}/<empty>"},
+		"originid+bytes":       {val: MVCCValue{MVCCValueHeader: valHeaderWithOriginIDOnly, Value: strVal}, expect: "{originID=1}/BYTES/foo"},
+		"originid+int":         {val: MVCCValue{MVCCValueHeader: valHeaderWithOriginIDOnly, Value: intVal}, expect: "{originID=1}/INT/17"},
+		"fullheader+tombstone": {val: MVCCValue{MVCCValueHeader: valHeaderFull}, expect: "{localTs=0.000000009,0, importEpoch=3, originID=1, originTs=0.000000001,1}/<empty>"},
+		"fullheader+bytes":     {val: MVCCValue{MVCCValueHeader: valHeaderFull, Value: strVal}, expect: "{localTs=0.000000009,0, importEpoch=3, originID=1, originTs=0.000000001,1}/BYTES/foo"},
+		"fullheader+int":       {val: MVCCValue{MVCCValueHeader: valHeaderFull, Value: intVal}, expect: "{localTs=0.000000009,0, importEpoch=3, originID=1, originTs=0.000000001,1}/INT/17"},
+		"origints+tombstone":   {val: MVCCValue{MVCCValueHeader: valHeaderWithOriginTsOnly}, expect: "{originTs=0.000000001,1}/<empty>"},
+		"origints+bytes":       {val: MVCCValue{MVCCValueHeader: valHeaderWithOriginTsOnly, Value: strVal}, expect: "{originTs=0.000000001,1}/BYTES/foo"},
+		"origints+int":         {val: MVCCValue{MVCCValueHeader: valHeaderWithOriginTsOnly, Value: intVal}, expect: "{originTs=0.000000001,1}/INT/17"},
 	}
 	for name, tc := range testcases {
 		t.Run(name, func(t *testing.T) {
@@ -163,6 +166,9 @@ func TestMVCCValueFormat(t *testing.T) {
 
 func TestEncodeDecodeMVCCValue(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+
+	// Force the production fast path by deactivating the
+	// `disableSimpleValueEncoding` test constant.
 	DisableMetamorphicSimpleValueEncoding(t)
 
 	var strVal, intVal roachpb.Value
@@ -170,6 +176,7 @@ func TestEncodeDecodeMVCCValue(t *testing.T) {
 	intVal.SetInt(17)
 	var importEpoch uint32 = 3
 	var originID uint32 = 1
+	var originTs = hlc.Timestamp{WallTime: math.MaxInt64, Logical: 1}
 
 	valHeader := enginepb.MVCCValueHeader{}
 	valHeader.LocalTimestamp = hlc.ClockTimestamp{WallTime: 9}
@@ -177,9 +184,11 @@ func TestEncodeDecodeMVCCValue(t *testing.T) {
 	valHeaderFull := valHeader
 	valHeaderFull.ImportEpoch = importEpoch
 	valHeaderFull.OriginID = originID
+	valHeaderFull.OriginTimestamp = originTs
 
 	valHeaderWithJobIDOnly := enginepb.MVCCValueHeader{ImportEpoch: importEpoch}
 	valHeaderWithOriginIDOnly := enginepb.MVCCValueHeader{OriginID: originID}
+	valHeaderWithOriginTsOnly := enginepb.MVCCValueHeader{OriginTimestamp: originTs}
 
 	testcases := map[string]struct {
 		val MVCCValue
@@ -199,6 +208,9 @@ func TestEncodeDecodeMVCCValue(t *testing.T) {
 		"headerFull+tombstone":         {val: MVCCValue{MVCCValueHeader: valHeaderFull}},
 		"headerFull+bytes":             {val: MVCCValue{MVCCValueHeader: valHeaderFull, Value: strVal}},
 		"headerFull+int":               {val: MVCCValue{MVCCValueHeader: valHeaderFull, Value: intVal}},
+		"headerOriginTsOnly+tombstone": {val: MVCCValue{MVCCValueHeader: valHeaderWithOriginTsOnly}},
+		"headerOriginTsOnly+bytes":     {val: MVCCValue{MVCCValueHeader: valHeaderWithOriginTsOnly, Value: strVal}},
+		"headerOriginTsOnly+int":       {val: MVCCValue{MVCCValueHeader: valHeaderWithOriginTsOnly, Value: intVal}},
 	}
 	w := echotest.NewWalker(t, datapathutils.TestDataPath(t, t.Name()))
 	for name, tc := range testcases {
@@ -383,7 +395,7 @@ func BenchmarkDecodeMVCCValue(b *testing.B) {
 							var ok bool
 							res, ok, err = tryDecodeSimpleMVCCValue(buf)
 							if !ok && err == nil {
-								res, err = decodeExtendedMVCCValue(buf)
+								res, err = decodeExtendedMVCCValue(buf, true)
 							}
 						} else {
 							res, err = DecodeMVCCValue(buf)

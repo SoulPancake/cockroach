@@ -953,12 +953,28 @@ SELECT '_'::DECIMAL(2,1) -- literals removed
 SELECT 'foo'::DECIMAL(2,1) -- identifiers removed
 
 parse
+SELECT 'foo'::BIT
+----
+SELECT 'foo'::BIT
+SELECT (('foo')::BIT) -- fully parenthesized
+SELECT '_'::BIT -- literals removed
+SELECT 'foo'::BIT -- identifiers removed
+
+parse
 SELECT 'foo'::BIT(3)
 ----
 SELECT 'foo'::BIT(3)
 SELECT (('foo')::BIT(3)) -- fully parenthesized
 SELECT '_'::BIT(3) -- literals removed
 SELECT 'foo'::BIT(3) -- identifiers removed
+
+parse
+SELECT 'foo'::BIT(0)
+----
+SELECT 'foo'::BIT(0)
+SELECT (('foo')::BIT(0)) -- fully parenthesized
+SELECT '_'::BIT(0) -- literals removed
+SELECT 'foo'::BIT(0) -- identifiers removed
 
 parse
 SELECT 'foo'::VARBIT(3)
@@ -1939,6 +1955,30 @@ at or near "EOF": syntax error: type void[] does not exist
 DETAIL: source SQL:
 SELECT ''::void[]
                  ^
+
+parse
+SELECT ''::trigger
+----
+SELECT ''::TRIGGER -- normalized!
+SELECT (('')::TRIGGER) -- fully parenthesized
+SELECT '_'::TRIGGER -- literals removed
+SELECT ''::TRIGGER -- identifiers removed
+
+parse
+SELECT '':::trigger
+----
+SELECT '':::TRIGGER -- normalized!
+SELECT ((''):::TRIGGER) -- fully parenthesized
+SELECT '_':::TRIGGER -- literals removed
+SELECT '':::TRIGGER -- identifiers removed
+
+error
+SELECT ''::trigger[]
+----
+at or near "EOF": syntax error: type trigger[] does not exist
+DETAIL: source SQL:
+SELECT ''::trigger[]
+                    ^
 
 parse
 SELECT overlaps(

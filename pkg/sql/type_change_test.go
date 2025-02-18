@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -231,6 +226,7 @@ INSERT INTO use_greetings VALUES(1, 'yo');
 	}{
 		{
 			`BEGIN;
+SET LOCAL autocommit_before_ddl = false;
 ALTER TYPE greetings DROP VALUE 'hello'; 
 ALTER TYPE greetings ADD VALUE 'howdy'; 
 ALTER TYPE greetings DROP VALUE 'yo'; 
@@ -246,6 +242,7 @@ COMMIT`,
 		},
 		{
 			`BEGIN;
+SET LOCAL autocommit_before_ddl = false;
 ALTER TYPE greetings ADD VALUE 'sup'; 
 ALTER TYPE greetings ADD VALUE 'howdy'; 
 ALTER TYPE greetings DROP VALUE 'yo'; 
@@ -261,6 +258,7 @@ COMMIT`,
 		},
 		{
 			`BEGIN;
+SET LOCAL autocommit_before_ddl = false;
 ALTER TYPE greetings DROP VALUE 'hi'; 
 ALTER TYPE greetings DROP VALUE 'hello'; 
 ALTER TYPE greetings DROP VALUE 'yo'; 
@@ -275,6 +273,7 @@ COMMIT`,
 		},
 		{
 			`BEGIN;
+SET LOCAL autocommit_before_ddl = false;
 ALTER TYPE greetings ADD VALUE 'sup'; 
 ALTER TYPE greetings ADD VALUE 'howdy'; 
 ALTER TYPE greetings DROP VALUE 'hello'; 
@@ -291,6 +290,7 @@ COMMIT`,
 		{
 			// This test works on a type created in the same txn that modifies it.
 			`BEGIN;
+SET LOCAL autocommit_before_ddl = false;
 CREATE TYPE abc AS ENUM ('a', 'b', 'c');
 ALTER TYPE abc ADD VALUE 'd';
 ALTER TYPE abc DROP VALUE 'c';
@@ -382,7 +382,10 @@ CREATE TYPE ab AS ENUM ('a', 'b')`,
 	}
 
 	go func() {
-		_, err := sqlDB.Exec(`BEGIN; ALTER TYPE ab DROP VALUE 'a'; ALTER TYPE ab ADD VALUE 'c'; COMMIT`)
+		_, err := sqlDB.Exec(`BEGIN;
+SET LOCAL autocommit_before_ddl = false;
+ALTER TYPE ab DROP VALUE 'a'; ALTER TYPE ab ADD VALUE 'c';
+COMMIT`)
 		if err != nil {
 			t.Error(err)
 		}
@@ -400,7 +403,11 @@ CREATE TYPE ab AS ENUM ('a', 'b')`,
 			}
 			mu.Unlock()
 		}
-		_, err := sqlDB.Exec(`BEGIN; ALTER TYPE ab DROP VALUE 'b'; ALTER TYPE ab ADD VALUE 'd'; COMMIT`)
+		_, err := sqlDB.Exec(`BEGIN;
+SET LOCAL autocommit_before_ddl = false;
+ALTER TYPE ab DROP VALUE 'b';
+ALTER TYPE ab ADD VALUE 'd';
+COMMIT`)
 		if err == nil {
 			t.Error("expected error, found nil")
 		}
@@ -468,17 +475,17 @@ func TestTypeChangeJobCancelSemantics(t *testing.T) {
 		},
 		{
 			"txn add drop",
-			"BEGIN; ALTER TYPE db.greetings ADD VALUE 'sup'; ALTER TYPE db.greetings DROP VALUE 'yo'; COMMIT",
+			"BEGIN; SET LOCAL autocommit_before_ddl = false; ALTER TYPE db.greetings ADD VALUE 'sup'; ALTER TYPE db.greetings DROP VALUE 'yo'; COMMIT",
 			true,
 		},
 		{
 			"txn add add",
-			"BEGIN; ALTER TYPE db.greetings ADD VALUE 'sup'; ALTER TYPE db.greetings ADD VALUE 'hello'; COMMIT",
+			"BEGIN; SET LOCAL autocommit_before_ddl = false; ALTER TYPE db.greetings ADD VALUE 'sup'; ALTER TYPE db.greetings ADD VALUE 'hello'; COMMIT",
 			false,
 		},
 		{
 			"txn drop drop",
-			"BEGIN; ALTER TYPE db.greetings DROP VALUE 'yo'; ALTER TYPE db.greetings DROP VALUE 'hi'; COMMIT",
+			"BEGIN; SET LOCAL autocommit_before_ddl = false; ALTER TYPE db.greetings DROP VALUE 'yo'; ALTER TYPE db.greetings DROP VALUE 'hi'; COMMIT",
 			true,
 		},
 	}
@@ -535,7 +542,7 @@ SELECT job_id FROM [SHOW JOBS]
 WHERE 
 	job_type = 'TYPEDESC SCHEMA CHANGE' AND 
 	status = $1
-	)`, jobs.StatusRunning)
+	)`, jobs.StateRunning)
 
 			if !tc.cancelable && !testutils.IsError(err, "not cancelable") {
 				t.Fatalf("expected type schema change job to be not cancelable; found %v ", err)

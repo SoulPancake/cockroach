@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserverbase
 
@@ -45,10 +40,7 @@ type BulkAdderOptions struct {
 
 	// DisallowShadowingBelow controls whether shadowing of existing keys is
 	// permitted when the SSTables produced by this adder are ingested. See the
-	// comment on kvpb.AddSSTableRequest for more details. Note that if this is
-	// set to a non-empty timestamp, the older flag DisallowShadowing will be set
-	// on all requests as well, so callers should expect older nodes to handle any
-	// requests accordingly or check the MVCCAddSSTable version gate.
+	// comment on kvpb.AddSSTableRequest for more details.
 	DisallowShadowingBelow hlc.Timestamp
 
 	// BatchTimestamp is the timestamp to use on AddSSTable requests (which can be

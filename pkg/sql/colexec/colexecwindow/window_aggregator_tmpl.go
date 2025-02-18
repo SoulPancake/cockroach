@@ -1,16 +1,10 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // {{/*
 //go:build execgen_template
-// +build execgen_template
 
 //
 // This file is the execgen template for window_aggregator.eg.go. It's formatted
@@ -252,6 +246,11 @@ func (a *slidingWindowAggregator) processBatch(batch coldata.Batch, startIdx, en
 	})
 }
 
+// INVARIANT: the rows within a window frame are always processed in the same
+// order, regardless of whether the user specified an ordering. This means that
+// two rows with the exact same frame will produce the same result for a given
+// aggregation.
+//
 // execgen:inline
 // execgen:template<removeRows>
 func aggregateOverIntervals(intervals []windowInterval, removeRows bool) {

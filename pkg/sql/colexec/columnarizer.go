@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexec
 
@@ -214,6 +209,20 @@ func (c *Columnarizer) GetStats() *execinfrapb.ComponentStats {
 	}
 	s.Component = componentID
 	return s
+}
+
+// IsFastPathNode returns true if the provided RowSource is the
+// planNodeToRowSource wrapper with "fast-path" enabled. The logic is injected
+// in the sql package to avoid an import cycle.
+var IsFastPathNode func(source execinfra.RowSource) bool
+
+// IsColumnarizerAroundFastPathNode returns true if the provided Operator is a
+// Columnarizer that has "fast-path" enabled planNodeToRowSource wrapper as the
+// input.
+func IsColumnarizerAroundFastPathNode(o colexecop.Operator) bool {
+	o = MaybeUnwrapInvariantsChecker(o)
+	c, ok := o.(*Columnarizer)
+	return ok && IsFastPathNode(c.input)
 }
 
 // Next is part of the colexecop.Operator interface.

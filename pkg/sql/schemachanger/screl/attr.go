@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package screl
 
@@ -79,6 +74,8 @@ const (
 	// zone config element. Those two DatabaseZoneConfig nodes in the graph will
 	// have different SeqNum attribute.
 	SeqNum
+	// TriggerID is the ID of a trigger.
+	TriggerID
 
 	// TargetStatus is the target status of an element.
 	TargetStatus
@@ -104,6 +101,16 @@ const (
 
 	// Expr corresponds to the string representation of a SQL expression for an element.
 	Expr
+	// TypeName corresponds to the SQL string name of the type.
+	TypeName
+	// PartitionName corresponds to the name of a partition.
+	PartitionName
+	// Usage is an attribute for column compute expression to identify why it's
+	// being added.
+	Usage
+	// PolicyID is an attribute for row-level security policies to uniquely
+	// identify a policy within a table.
+	PolicyID
 
 	// AttrMax is the largest possible Attr value.
 	// Note: add any new enum values before TargetStatus, leave these at the end.
@@ -237,6 +244,10 @@ var elementSchemaOptions = []rel.SchemaOption{
 	rel.EntityMapping(t((*scpb.RowLevelTTL)(nil)),
 		rel.EntityAttr(DescID, "TableID"),
 	),
+	rel.EntityMapping(t((*scpb.Trigger)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+		rel.EntityAttr(TriggerID, "TriggerID"),
+	),
 	// Multi-region elements.
 	rel.EntityMapping(t((*scpb.TableLocalityGlobal)(nil)),
 		rel.EntityAttr(DescID, "TableID"),
@@ -262,6 +273,7 @@ var elementSchemaOptions = []rel.SchemaOption{
 		rel.EntityAttr(ColumnFamilyID, "FamilyID"),
 		rel.EntityAttr(ColumnID, "ColumnID"),
 		rel.EntityAttr(ReferencedTypeIDs, "ClosedTypeIDs"),
+		rel.EntityAttr(TypeName, "TypeName"),
 	),
 	rel.EntityMapping(t((*scpb.SequenceOption)(nil)),
 		rel.EntityAttr(DescID, "SequenceID"),
@@ -285,6 +297,13 @@ var elementSchemaOptions = []rel.SchemaOption{
 		rel.EntityAttr(ColumnID, "ColumnID"),
 		rel.EntityAttr(ReferencedSequenceIDs, "UsesSequenceIDs"),
 		rel.EntityAttr(ReferencedTypeIDs, "UsesTypeIDs"),
+	),
+	rel.EntityMapping(t((*scpb.ColumnComputeExpression)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+		rel.EntityAttr(ColumnID, "ColumnID"),
+		rel.EntityAttr(ReferencedSequenceIDs, "UsesSequenceIDs"),
+		rel.EntityAttr(ReferencedTypeIDs, "UsesTypeIDs"),
+		rel.EntityAttr(Usage, "Usage"),
 	),
 	rel.EntityMapping(t((*scpb.ColumnNotNull)(nil)),
 		rel.EntityAttr(DescID, "TableID"),
@@ -310,6 +329,71 @@ var elementSchemaOptions = []rel.SchemaOption{
 		rel.EntityAttr(DescID, "TableID"),
 		rel.EntityAttr(ConstraintID, "ConstraintID"),
 		rel.EntityAttr(Name, "Name"),
+	),
+	// Trigger elements.
+	rel.EntityMapping(t((*scpb.TriggerName)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+		rel.EntityAttr(TriggerID, "TriggerID"),
+	),
+	rel.EntityMapping(t((*scpb.TriggerEnabled)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+		rel.EntityAttr(TriggerID, "TriggerID"),
+	),
+	rel.EntityMapping(t((*scpb.TriggerTiming)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+		rel.EntityAttr(TriggerID, "TriggerID"),
+	),
+	rel.EntityMapping(t((*scpb.TriggerEvents)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+		rel.EntityAttr(TriggerID, "TriggerID"),
+	),
+	rel.EntityMapping(t((*scpb.TriggerTransition)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+		rel.EntityAttr(TriggerID, "TriggerID"),
+	),
+	rel.EntityMapping(t((*scpb.TriggerWhen)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+		rel.EntityAttr(TriggerID, "TriggerID"),
+	),
+	rel.EntityMapping(t((*scpb.TriggerFunctionCall)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+		rel.EntityAttr(TriggerID, "TriggerID"),
+	),
+	rel.EntityMapping(t((*scpb.TriggerDeps)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+		rel.EntityAttr(TriggerID, "TriggerID"),
+	),
+	// Policy elements
+	rel.EntityMapping(t((*scpb.Policy)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+		rel.EntityAttr(PolicyID, "PolicyID"),
+	),
+	rel.EntityMapping(t((*scpb.PolicyName)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+		rel.EntityAttr(PolicyID, "PolicyID"),
+		rel.EntityAttr(Name, "Name"),
+	),
+	rel.EntityMapping(t((*scpb.PolicyRole)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+		rel.EntityAttr(PolicyID, "PolicyID"),
+		rel.EntityAttr(Name, "RoleName"),
+	),
+	rel.EntityMapping(t((*scpb.PolicyUsingExpr)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+		rel.EntityAttr(PolicyID, "PolicyID"),
+		rel.EntityAttr(Expr, "Expr"),
+	),
+	rel.EntityMapping(t((*scpb.PolicyWithCheckExpr)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+		rel.EntityAttr(PolicyID, "PolicyID"),
+		rel.EntityAttr(Expr, "Expr"),
+	),
+	rel.EntityMapping(t((*scpb.PolicyDeps)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+		rel.EntityAttr(PolicyID, "PolicyID"),
+		rel.EntityAttr(ReferencedTypeIDs, "UsesTypeIDs"),
+		rel.EntityAttr(ReferencedSequenceIDs, "UsesRelationIDs"),
+		rel.EntityAttr(ReferencedFunctionIDs, "UsesFunctionIDs"),
 	),
 	// Common elements.
 	rel.EntityMapping(t((*scpb.Namespace)(nil)),
@@ -379,6 +463,10 @@ var elementSchemaOptions = []rel.SchemaOption{
 		rel.EntityAttr(IndexID, "IndexID"),
 		rel.EntityAttr(ColumnID, "ColumnID"),
 	),
+	rel.EntityMapping(t((*scpb.NamedRangeZoneConfig)(nil)),
+		rel.EntityAttr(DescID, "RangeID"),
+		rel.EntityAttr(SeqNum, "SeqNum"),
+	),
 	rel.EntityMapping(t((*scpb.DatabaseZoneConfig)(nil)),
 		rel.EntityAttr(DescID, "DatabaseID"),
 		rel.EntityAttr(SeqNum, "SeqNum"),
@@ -390,6 +478,13 @@ var elementSchemaOptions = []rel.SchemaOption{
 	rel.EntityMapping(t((*scpb.IndexZoneConfig)(nil)),
 		rel.EntityAttr(DescID, "TableID"),
 		rel.EntityAttr(IndexID, "IndexID"),
+		rel.EntityAttr(SeqNum, "SeqNum"),
+	),
+	rel.EntityMapping(t((*scpb.PartitionZoneConfig)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+		rel.EntityAttr(IndexID, "IndexID"),
+		rel.EntityAttr(PartitionName, "PartitionName"),
+		rel.EntityAttr(SeqNum, "SeqNum"),
 	),
 	rel.EntityMapping(t((*scpb.DatabaseData)(nil)),
 		rel.EntityAttr(DescID, "DatabaseID"),
@@ -408,6 +503,15 @@ var elementSchemaOptions = []rel.SchemaOption{
 	rel.EntityMapping(t((*scpb.TableSchemaLocked)(nil)),
 		rel.EntityAttr(DescID, "TableID"),
 	),
+	rel.EntityMapping(t((*scpb.RowLevelSecurityEnabled)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+	),
+	rel.EntityMapping(t((*scpb.RowLevelSecurityForced)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+	),
+	rel.EntityMapping(t((*scpb.LDRJobIDs)(nil)),
+		rel.EntityAttr(DescID, "TableID"),
+	),
 	rel.EntityMapping(t((*scpb.Function)(nil)),
 		rel.EntityAttr(DescID, "FunctionID"),
 	),
@@ -424,6 +528,9 @@ var elementSchemaOptions = []rel.SchemaOption{
 		rel.EntityAttr(DescID, "FunctionID"),
 	),
 	rel.EntityMapping(t((*scpb.FunctionBody)(nil)),
+		rel.EntityAttr(DescID, "FunctionID"),
+	),
+	rel.EntityMapping(t((*scpb.FunctionSecurity)(nil)),
 		rel.EntityAttr(DescID, "FunctionID"),
 	),
 }

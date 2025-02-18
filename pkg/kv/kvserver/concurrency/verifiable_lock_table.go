@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package concurrency
 
@@ -54,6 +49,12 @@ func (v verifyingLockTable) Enable(sequence roachpb.LeaseSequence) {
 func (v verifyingLockTable) Clear(disable bool) {
 	defer v.lt.verify()
 	v.lt.Clear(disable)
+}
+
+// ClearGE implements the lockTable interface.
+func (v verifyingLockTable) ClearGE(key roachpb.Key) []roachpb.LockAcquisition {
+	defer v.lt.verify()
+	return v.lt.ClearGE(key)
 }
 
 // ScanAndEnqueue implements the lockTable interface.

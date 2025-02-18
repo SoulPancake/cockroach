@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scbuild_test
 
@@ -56,6 +51,8 @@ func TestBuildDataDriven(t *testing.T) {
 
 	ctx := context.Background()
 
+	skip.UnderRace(t, "expensive and can easily extend past test timeout")
+
 	datadriven.Walk(t, datapathutils.TestDataPath(t), func(t *testing.T, path string) {
 		for _, depsType := range []struct {
 			name                string
@@ -94,12 +91,14 @@ func TestBuildDataDriven(t *testing.T) {
 								sctestdeps.ReadSessionDataFromDB(
 									t,
 									tdb,
-									func(sd *sessiondata.SessionData) {
+									func(sd *sessiondata.SessionData, localData sessiondatapb.LocalOnlySessionData) {
 										// For setting up a builder inside tests we will ensure that the new schema
 										// changer will allow non-fully implemented operations.
-										sd.NewSchemaChangerMode = sessiondatapb.UseNewSchemaChangerUnsafe
+										sd.NewSchemaChangerMode = sessiondatapb.UseNewSchemaChangerUnsafeAlways
 										sd.ApplicationName = ""
 										sd.EnableUniqueWithoutIndexConstraints = true
+										sd.RowLevelSecurityEnabled = true
+										sd.SerialNormalizationMode = localData.SerialNormalizationMode
 									},
 								),
 							),
@@ -314,7 +313,7 @@ func TestBuildIsMemoryMonitored(t *testing.T) {
 	tdb.Exec(t, `use system;`)
 
 	monitor := mon.NewMonitor(mon.Options{
-		Name:     "test-sc-build-mon",
+		Name:     mon.MakeMonitorName("test-sc-build-mon"),
 		Settings: s.ClusterSettings(),
 	})
 	monitor.Start(ctx, nil, mon.NewStandaloneBudget(5*1024*1024 /* 5MiB */))

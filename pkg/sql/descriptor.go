@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -63,7 +58,7 @@ func (p *planner) createDatabase(
 	if dbID, err := p.Descriptors().LookupDatabaseID(ctx, p.txn, dbName); err == nil && dbID != descpb.InvalidID {
 		if database.IfNotExists {
 			// Check if the database is in a dropping state
-			desc, err := p.Descriptors().ByID(p.txn).Get().Database(ctx, dbID)
+			desc, err := p.Descriptors().ByIDWithoutLeased(p.txn).Get().Database(ctx, dbID)
 			if err != nil {
 				return nil, false, err
 			}
@@ -191,10 +186,6 @@ func (p *planner) createDatabase(
 			return nil, false, err
 		}
 
-	}
-
-	if err := p.maybeUpdateSystemDBSurvivalGoal(ctx); err != nil {
-		return nil, false, err
 	}
 
 	return db, true, nil

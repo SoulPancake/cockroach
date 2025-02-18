@@ -1,17 +1,15 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { connect } from "react-redux";
 import { RouteComponentProps, withRouter } from "react-router-dom";
 import { Dispatch } from "redux";
 
+import { SortSetting } from "src/sortedtable";
+import { AppState, uiConfigActions } from "src/store";
+import { selectDropUnusedIndexDuration } from "src/store/clusterSettings/clusterSettings.selectors";
 import {
   actions,
   selectSchemaInsights,
@@ -22,14 +20,11 @@ import {
   selectFilters,
   selectSortSetting,
 } from "src/store/schemaInsights";
-import { AppState, uiConfigActions } from "src/store";
-import { SortSetting } from "src/sortedtable";
-import { selectDropUnusedIndexDuration } from "src/store/clusterSettings/clusterSettings.selectors";
 
-import { SchemaInsightEventFilters } from "../types";
+import { actions as analyticsActions } from "../../store/analytics";
 import { actions as localStorageActions } from "../../store/localStorage";
 import { selectHasAdminRole } from "../../store/uiConfig";
-import { actions as analyticsActions } from "../../store/analytics";
+import { SchemaInsightEventFilters } from "../types";
 
 import {
   SchemaInsightsView,

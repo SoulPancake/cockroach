@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package syntheticprivilegecache
 
@@ -90,14 +85,18 @@ func (c *Cache) Get(
 	}
 	privDesc, err := c.c.LoadValueOutsideOfCacheSingleFlight(ctx, fmt.Sprintf("%s-%d", spo.GetPath(), desc.GetVersion()),
 		func(loadCtx context.Context) (_ interface{}, retErr error) {
-			return c.readFromStorage(ctx, txn, spo)
+			privDesc, err := c.readFromStorage(loadCtx, txn, spo)
+			if err != nil {
+				return nil, err
+			}
+			entrySize := int64(len(spo.GetPath())) + computePrivDescSize(privDesc)
+			// Only write back to the cache if the table version is committed.
+			c.c.MaybeWriteBackToCache(ctx, []descpb.DescriptorVersion{desc.GetVersion()}, spo.GetPath(), *privDesc, entrySize)
+			return privDesc, nil
 		})
 	if err != nil {
 		return nil, err
 	}
-	entrySize := int64(len(spo.GetPath())) + computePrivDescSize(privDesc)
-	// Only write back to the cache if the table version is committed.
-	c.c.MaybeWriteBackToCache(ctx, []descpb.DescriptorVersion{desc.GetVersion()}, spo.GetPath(), *privDesc, entrySize)
 	return privDesc, nil
 }
 

@@ -1,15 +1,9 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 //go:build race
-// +build race
 
 package kvcoord
 
@@ -79,7 +73,7 @@ func (tr raceTransport) SendNext(
 // GRPCTransportFactory during race builds wraps the implementation and
 // intercepts all BatchRequests, reading them asynchronously in a tight loop.
 // This allows the race detector to catch any mutations of a batch passed to the
-// transport. The dealio is that batches passed to the transport are immutable -
+// transport. The dealio is that batches passed to these transport are immutable -
 // the server is not allowed to mutate anything and this transport makes sure
 // they don't. See client.Sender() for more.
 //

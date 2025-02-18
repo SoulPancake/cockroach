@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package valueside
 
@@ -72,10 +67,17 @@ func decodeArray(a *tree.DatumAlloc, arrayType *types.T, b []byte) (tree.Datum, 
 		return nil, b, err
 	}
 	elementType := arrayType.ArrayContents()
+	return decodeArrayWithHeader(header, a, arrayType, elementType, b)
+}
+
+func decodeArrayWithHeader(
+	header arrayHeader, a *tree.DatumAlloc, arrayType, elementType *types.T, b []byte,
+) (tree.Datum, []byte, error) {
 	result := tree.DArray{
 		Array:    make(tree.Datums, header.length),
 		ParamTyp: elementType,
 	}
+	var err error
 	if err = result.MaybeSetCustomOid(arrayType); err != nil {
 		return nil, b, err
 	}
@@ -192,6 +194,8 @@ func decodeArrayHeader(b []byte) (arrayHeader, []byte, error) {
 	}, b, nil
 }
 
+var errNestedArraysNotFullySupported = unimplemented.NewWithIssueDetail(32552, "", "nested arrays are not fully supported")
+
 // DatumTypeToArrayElementEncodingType decides an encoding type to
 // place in the array header given a datum type. The element encoding
 // type is then used to encode/decode array elements.
@@ -240,11 +244,34 @@ func DatumTypeToArrayElementEncodingType(t *types.T) (encoding.Type, error) {
 	case types.TupleFamily:
 		return encoding.Tuple, nil
 	case types.ArrayFamily:
-		return 0, unimplemented.NewWithIssueDetail(32552, "", "nested arrays are not fully supported")
+		return 0, errNestedArraysNotFullySupported
 	default:
 		return 0, errors.AssertionFailedf("no known encoding type for %s", t.Family().Name())
 	}
 }
+
+func init() {
+	encoding.PrettyPrintArrayValueEncoded = func(b []byte) (string, error) {
+		header, b, err := decodeArrayHeader(b)
+		if err != nil {
+			return "", err
+		}
+		elementType, err := encodingTypeToDatumType(header.elementType)
+		if err != nil {
+			return "", err
+		}
+		arrayType := types.MakeArray(elementType)
+		d, rem, err := decodeArrayWithHeader(header, nil /* a */, arrayType, elementType, b)
+		if err != nil {
+			return "", err
+		}
+		if len(rem) != 0 {
+			return "", errors.Newf("unexpected remainder after decoding array: %v", rem)
+		}
+		return d.String(), nil
+	}
+}
+
 func checkElementType(paramType *types.T, elemType *types.T) error {
 	if paramType.Family() != elemType.Family() {
 		return errors.Errorf("type of array contents %s doesn't match column type %s",
@@ -320,7 +347,8 @@ func encodeArrayElement(b []byte, d tree.Datum) ([]byte, error) {
 		}
 		return encoding.EncodeUntaggedBytesValue(b, encoded), nil
 	case *tree.DTuple:
-		return encodeUntaggedTuple(t, b, encoding.NoColumnID, nil)
+		res, _, err := encodeUntaggedTuple(t, b, nil)
+		return res, err
 	case *tree.DTSQuery:
 		encoded := tsearch.EncodeTSQueryPGBinary(nil, t.TSQuery)
 		return encoding.EncodeUntaggedBytesValue(b, encoded), nil

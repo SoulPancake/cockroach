@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord
 
@@ -444,13 +439,22 @@ func (h *txnHeartbeater) heartbeat(ctx context.Context) bool {
 // Returns true if heartbeating should continue, false if the transaction is no
 // longer Pending and so there's no point in heartbeating further.
 func (h *txnHeartbeater) heartbeatLocked(ctx context.Context) bool {
-	if h.mu.txn.Status != roachpb.PENDING {
-		if h.mu.txn.Status == roachpb.COMMITTED {
-			log.Fatalf(ctx, "txn committed but heartbeat loop hasn't been signaled to stop: %s", h.mu.txn)
-		}
+	switch h.mu.txn.Status {
+	case roachpb.PENDING:
+		// Continue heartbeating.
+	case roachpb.PREPARED:
+		// If the transaction is prepared, there's no point in heartbeating. The
+		// transaction will remain active without heartbeats until it is committed
+		// or rolled back.
+		return false
+	case roachpb.ABORTED:
 		// If the transaction is aborted, there's no point in heartbeating. The
 		// client needs to send a rollback.
 		return false
+	case roachpb.COMMITTED:
+		log.Fatalf(ctx, "txn committed but heartbeat loop hasn't been signaled to stop: %s", h.mu.txn)
+	default:
+		log.Fatalf(ctx, "unexpected txn status in heartbeat loop: %s", h.mu.txn)
 	}
 
 	// Clone the txn in order to put it in the heartbeat request.

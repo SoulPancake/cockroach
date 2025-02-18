@@ -1,28 +1,23 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import isNil from "lodash/isNil";
 import React, { useEffect, useState } from "react";
 import { Helmet } from "react-helmet";
 import { connect, useSelector } from "react-redux";
 
+import { InlineAlert } from "src/components";
+import { refreshNodes, refreshUserSQLRoles } from "src/redux/apiReducers";
+import { getCookieValue, setCookie } from "src/redux/cookies";
+import { nodeIDsStringifiedSelector } from "src/redux/nodes";
+import { AdminUIState, featureFlagSelector } from "src/redux/state";
+import { selectHasViewActivityRedactedRole } from "src/redux/user";
 import { getDataFromServer } from "src/util/dataFromServer";
 import DebugAnnotation from "src/views/shared/components/debugAnnotation";
 import InfoBox from "src/views/shared/components/infoBox";
 import LicenseType from "src/views/shared/components/licenseType";
-import { AdminUIState, featureFlagSelector } from "src/redux/state";
-import { nodeIDsStringifiedSelector } from "src/redux/nodes";
-import { refreshNodes, refreshUserSQLRoles } from "src/redux/apiReducers";
-import { selectHasViewActivityRedactedRole } from "src/redux/user";
-import { getCookieValue, setCookie } from "src/redux/cookies";
-import { InlineAlert } from "src/components";
 import {
   PanelSection,
   PanelTitle,
@@ -432,7 +427,7 @@ export default function Debug() {
           />
           <DebugTableLink
             name="Heap (recent allocs)"
-            url="debug/pprof/ui/heap/"
+            url="debug/pprof/ui/allocs/"
             params={{ node: nodeID, seconds: "5", si: "alloc_objects" }}
           />
           <DebugTableLink

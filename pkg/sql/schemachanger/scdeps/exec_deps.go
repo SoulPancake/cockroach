@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scdeps
 
@@ -155,12 +150,12 @@ func (d *txnDeps) InsertTemporarySchema(schemaName string, id descpb.ID, databas
 func (d *txnDeps) MustReadImmutableDescriptors(
 	ctx context.Context, ids ...descpb.ID,
 ) ([]catalog.Descriptor, error) {
-	return d.descsCollection.ByID(d.txn.KV()).WithoutSynthetic().Get().Descs(ctx, ids)
+	return d.descsCollection.ByIDWithoutLeased(d.txn.KV()).WithoutSynthetic().Get().Descs(ctx, ids)
 }
 
 // GetFullyQualifiedName implements the scmutationexec.CatalogReader interface
 func (d *txnDeps) GetFullyQualifiedName(ctx context.Context, id descpb.ID) (string, error) {
-	g := d.descsCollection.ByID(d.txn.KV()).WithoutSynthetic().Get()
+	g := d.descsCollection.ByIDWithoutLeased(d.txn.KV()).WithoutSynthetic().Get()
 	objectDesc, err := g.Desc(ctx, id)
 	if err != nil {
 		return "", err
@@ -224,8 +219,28 @@ func (d *txnDeps) DeleteDescriptor(ctx context.Context, id descpb.ID) error {
 	return d.descsCollection.DeleteDescToBatch(ctx, d.kvTrace, id, d.getOrCreateBatch())
 }
 
+// GetZoneConfig implements the scexec.Catalog interface.
+func (d *txnDeps) GetZoneConfig(ctx context.Context, id descpb.ID) (catalog.ZoneConfig, error) {
+	zc, err := d.descsCollection.GetZoneConfig(ctx, d.txn.KV(), id)
+	if err != nil {
+		return nil, err
+	}
+	return zc, nil
+}
+
+// WriteZoneConfigToBatch implements the scexec.Catalog interface.
+func (d *txnDeps) WriteZoneConfigToBatch(
+	ctx context.Context, id descpb.ID, zc catalog.ZoneConfig,
+) error {
+	err := d.descsCollection.WriteZoneConfigToBatch(ctx, d.kvTrace, d.getOrCreateBatch(), id, zc)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 // UpdateZoneConfig implements the scexec.Catalog interface.
-func (d *txnDeps) UpdateZoneConfig(ctx context.Context, id descpb.ID, zc zonepb.ZoneConfig) error {
+func (d *txnDeps) UpdateZoneConfig(ctx context.Context, id descpb.ID, zc *zonepb.ZoneConfig) error {
 	var newZc catalog.ZoneConfig
 	oldZc, err := d.descsCollection.GetZoneConfig(ctx, d.txn.KV(), id)
 	if err != nil {
@@ -239,13 +254,92 @@ func (d *txnDeps) UpdateZoneConfig(ctx context.Context, id descpb.ID, zc zonepb.
 	if oldZc != nil {
 		rawBytes = oldZc.GetRawBytesInStorage()
 	}
-	newZc = zone.NewZoneConfigWithRawBytes(&zc, rawBytes)
+	newZc = zone.NewZoneConfigWithRawBytes(zc, rawBytes)
 	return d.descsCollection.WriteZoneConfigToBatch(ctx, d.kvTrace, d.getOrCreateBatch(), id, newZc)
+}
+
+// UpdateSubzoneConfig implements the scexec.Catalog interface.
+func (d *txnDeps) UpdateSubzoneConfig(
+	ctx context.Context,
+	parentZone catalog.ZoneConfig,
+	subzone zonepb.Subzone,
+	subzoneSpans []zonepb.SubzoneSpan,
+	idxRefToDelete int32,
+) (catalog.ZoneConfig, error) {
+	var rawBytes []byte
+	var zc *zonepb.ZoneConfig
+	// If the zone config already exists, we need to preserve the raw bytes as the
+	// expected value that we will be updating. Otherwise, this will be a clean
+	// insert with no expected raw bytes.
+	if parentZone != nil {
+		rawBytes = parentZone.GetRawBytesInStorage()
+		zc = parentZone.ZoneConfigProto()
+	} else {
+		// If no zone config exists, create a new one that is a subzone placeholder.
+		zc = zonepb.NewZoneConfig()
+		zc.DeleteTableConfig()
+	}
+
+	if idxRefToDelete == -1 {
+		idxRefToDelete = zc.GetSubzoneIndex(subzone.IndexID, subzone.PartitionName)
+	}
+
+	// Update the subzone in the zone config.
+	zc.SetSubzone(subzone)
+	// Update the subzone spans.
+	subzoneSpansToWrite := subzoneSpans
+	// If there are subzone spans that currently exist, merge those with the new
+	// spans we are updating. Otherwise, the zone config's set of subzone spans
+	// will be our input subzoneSpans.
+	if len(zc.SubzoneSpans) != 0 {
+		zc.DeleteSubzoneSpansForSubzoneIndex(idxRefToDelete)
+		zc.MergeSubzoneSpans(subzoneSpansToWrite)
+		subzoneSpansToWrite = zc.SubzoneSpans
+	}
+	zc.SubzoneSpans = subzoneSpansToWrite
+
+	newZc := zone.NewZoneConfigWithRawBytes(zc, rawBytes)
+	return newZc, nil
 }
 
 // DeleteZoneConfig implements the scexec.Catalog interface.
 func (d *txnDeps) DeleteZoneConfig(ctx context.Context, id descpb.ID) error {
 	return d.descsCollection.DeleteZoneConfigInBatch(ctx, d.kvTrace, d.getOrCreateBatch(), id)
+}
+
+// DeleteSubzoneConfig implements the scexec.Catalog interface.
+func (d *txnDeps) DeleteSubzoneConfig(
+	ctx context.Context, tableID descpb.ID, subzone zonepb.Subzone, subzoneSpans []zonepb.SubzoneSpan,
+) error {
+	var newZc catalog.ZoneConfig
+	oldZc, err := d.descsCollection.GetZoneConfig(ctx, d.txn.KV(), tableID)
+	if err != nil {
+		return err
+	}
+
+	var rawBytes []byte
+	var zc *zonepb.ZoneConfig
+	if oldZc != nil {
+		rawBytes = oldZc.GetRawBytesInStorage()
+		zc = oldZc.ZoneConfigProto()
+	} else {
+		// No-op if nothing is there for us to discard.
+		return nil
+	}
+
+	// Delete the subzone in the zone config.
+	zc.DeleteSubzone(subzone.IndexID, subzone.PartitionName)
+	// If there are no more subzones after our delete and this table is a
+	// placeholder, we can just delete the table zone config.
+	if len(zc.Subzones) == 0 && zc.IsSubzonePlaceholder() {
+		return d.DeleteZoneConfig(ctx, tableID)
+	}
+	// Delete the subzone spans.
+	zc.DeleteSubzoneSpans(subzoneSpans)
+
+	newZc = zone.NewZoneConfigWithRawBytes(zc, rawBytes)
+	return d.descsCollection.WriteZoneConfigToBatch(ctx, d.kvTrace, d.getOrCreateBatch(),
+		tableID, newZc)
 }
 
 // Validate implements the scexec.Catalog interface.
@@ -338,7 +432,7 @@ func (d *txnDeps) CreatedJobs() []jobspb.JobID {
 func (d *txnDeps) GetResumeSpans(
 	ctx context.Context, tableID descpb.ID, indexID descpb.IndexID,
 ) ([]roachpb.Span, error) {
-	table, err := d.descsCollection.ByID(d.txn.KV()).WithoutNonPublic().WithoutSynthetic().Get().Table(ctx, tableID)
+	table, err := d.descsCollection.ByIDWithoutLeased(d.txn.KV()).WithoutNonPublic().WithoutSynthetic().Get().Table(ctx, tableID)
 	if err != nil {
 		return nil, err
 	}

@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package telemetryccl
 
@@ -25,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
@@ -267,7 +265,9 @@ func TestBulkJobTelemetryLogging(t *testing.T) {
 			query: fmt.Sprintf(`IMPORT INTO a CSV DATA ('%s')`, srv.URL),
 			sampleQueryEvent: expectedSampleQueryEvent{
 				eventType: "import",
-				stmt:      fmt.Sprintf(`IMPORT INTO defaultdb.public.a CSV DATA ('%s')`, srv.URL),
+				stmt: fmt.Sprintf(
+					`IMPORT INTO defaultdb.public.a CSV DATA (%s)`, tree.PasswordSubstitution,
+				),
 			},
 			recoveryEvent: expectedRecoveryEvent{
 				numRows:      3,
@@ -279,7 +279,10 @@ func TestBulkJobTelemetryLogging(t *testing.T) {
 			query: fmt.Sprintf(`IMPORT INTO a CSV DATA ('%s') WITH detached`, srv.URL),
 			sampleQueryEvent: expectedSampleQueryEvent{
 				eventType: "import",
-				stmt:      fmt.Sprintf(`IMPORT INTO defaultdb.public.a CSV DATA ('%s') WITH OPTIONS (detached)`, srv.URL),
+				stmt: fmt.Sprintf(
+					`IMPORT INTO defaultdb.public.a CSV DATA (%s) WITH OPTIONS (detached)`,
+					tree.PasswordSubstitution,
+				),
 			},
 			recoveryEvent: expectedRecoveryEvent{
 				numRows:      3,
@@ -291,7 +294,7 @@ func TestBulkJobTelemetryLogging(t *testing.T) {
 			query: fmt.Sprintf(`BACKUP DATABASE mydb INTO '%s'`, nodelocal.MakeLocalStorageURI("test1")),
 			sampleQueryEvent: expectedSampleQueryEvent{
 				eventType: "backup",
-				stmt:      fmt.Sprintf(`BACKUP DATABASE mydb INTO '%s'`, nodelocal.MakeLocalStorageURI("test1")),
+				stmt:      fmt.Sprintf(`BACKUP DATABASE mydb INTO %s`, tree.PasswordSubstitution),
 			},
 			recoveryEvent: expectedRecoveryEvent{
 				numRows:      3,
@@ -303,7 +306,7 @@ func TestBulkJobTelemetryLogging(t *testing.T) {
 			query: fmt.Sprintf(`BACKUP DATABASE mydb INTO '%s' WITH detached`, nodelocal.MakeLocalStorageURI("test1")),
 			sampleQueryEvent: expectedSampleQueryEvent{
 				eventType: "backup",
-				stmt:      fmt.Sprintf(`BACKUP DATABASE mydb INTO '%s' WITH OPTIONS (detached)`, nodelocal.MakeLocalStorageURI("test1")),
+				stmt:      fmt.Sprintf(`BACKUP DATABASE mydb INTO %s WITH OPTIONS (detached)`, tree.PasswordSubstitution),
 			},
 			recoveryEvent: expectedRecoveryEvent{
 				numRows:      3,
@@ -315,7 +318,7 @@ func TestBulkJobTelemetryLogging(t *testing.T) {
 			query: fmt.Sprintf(`RESTORE DATABASE mydb FROM LATEST IN '%s'`, nodelocal.MakeLocalStorageURI("test1")),
 			sampleQueryEvent: expectedSampleQueryEvent{
 				eventType: "restore",
-				stmt:      fmt.Sprintf(`RESTORE DATABASE mydb FROM 'latest' IN '%s'`, nodelocal.MakeLocalStorageURI("test1")),
+				stmt:      fmt.Sprintf(`RESTORE DATABASE mydb FROM 'latest' IN %s`, tree.PasswordSubstitution),
 			},
 			recoveryEvent: expectedRecoveryEvent{
 				numRows:      3,
@@ -327,7 +330,7 @@ func TestBulkJobTelemetryLogging(t *testing.T) {
 			query: fmt.Sprintf(`RESTORE DATABASE mydb FROM LATEST IN '%s' WITH detached`, nodelocal.MakeLocalStorageURI("test1")),
 			sampleQueryEvent: expectedSampleQueryEvent{
 				eventType: "restore",
-				stmt:      fmt.Sprintf(`RESTORE DATABASE mydb FROM 'latest' IN '%s' WITH OPTIONS (detached)`, nodelocal.MakeLocalStorageURI("test1")),
+				stmt:      fmt.Sprintf(`RESTORE DATABASE mydb FROM 'latest' IN %s WITH OPTIONS (detached)`, tree.PasswordSubstitution),
 			},
 			recoveryEvent: expectedRecoveryEvent{
 				numRows:      3,
@@ -355,13 +358,15 @@ func TestBulkJobTelemetryLogging(t *testing.T) {
 
 		if strings.Contains(tc.query, "WITH detached") {
 			err = db.DB.QueryRowContext(ctx, tc.query).Scan(&jobID)
-		} else {
+		} else if strings.HasPrefix(tc.query, "IMPORT") {
 			err = db.DB.QueryRowContext(ctx, tc.query).Scan(&jobID, &unused, &unused, &unused, &unused, &unused)
+		} else {
+			err = db.DB.QueryRowContext(ctx, tc.query).Scan(&jobID, &unused, &unused, &unused)
 		}
 		if err != nil {
 			t.Errorf("unexpected error executing query `%s`: %v", tc.query, err)
 		}
-		waitForJobResult(t, testCluster, jobspb.JobID(jobID), jobs.StatusSucceeded)
+		waitForJobResult(t, testCluster, jobspb.JobID(jobID), jobs.StateSucceeded)
 		t.Logf("finished:%q\n", tc.query)
 
 		execTimestamp++
@@ -410,7 +415,7 @@ func TestBulkJobTelemetryLogging(t *testing.T) {
 }
 
 func waitForJobResult(
-	t *testing.T, tc serverutils.TestClusterInterface, id jobspb.JobID, expected jobs.Status,
+	t *testing.T, tc serverutils.TestClusterInterface, id jobspb.JobID, expected jobs.State,
 ) {
 	// Force newly created job to be adopted and verify its result.
 	tc.Server(0).JobRegistry().(*jobs.Registry).TestingNudgeAdoptionQueue()
@@ -430,7 +435,7 @@ func cleanUpObjectsBeforeRestore(
 	if len(dbMatch) > 0 {
 		dbName := dbMatch[1]
 		if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %s CASCADE", dbName)); err != nil {
-			t.Errorf(errors.Wrapf(err, "failed to drop database %q before restore", dbName).Error())
+			t.Error(errors.Wrapf(err, "failed to drop database %q before restore", dbName).Error())
 		}
 	}
 
@@ -439,7 +444,7 @@ func cleanUpObjectsBeforeRestore(
 	if len(tableMatch) > 0 {
 		tableName := tableMatch[1]
 		if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tableName)); err != nil {
-			t.Errorf(errors.Wrapf(err, "failed to drop table %q before restore", tableName).Error())
+			t.Error(errors.Wrapf(err, "failed to drop table %q before restore", tableName).Error())
 		}
 	}
 }

@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexecwindow
 
@@ -68,6 +63,8 @@ func TestWindowFunctions(t *testing.T) {
 	defer cleanup()
 	var monitorRegistry colexecargs.MonitorRegistry
 	defer monitorRegistry.Close(ctx)
+	var closerRegistry colexecargs.CloserRegistry
+	defer closerRegistry.Close(ctx)
 
 	dec := func(val string) apd.Decimal {
 		res, _, err := apd.NewFromString(val)
@@ -1038,7 +1035,6 @@ func TestWindowFunctions(t *testing.T) {
 			},
 		} {
 			log.Infof(ctx, "spillForced=%t/%s", spillForced, tc.windowerSpec.WindowFns[0].Func.String())
-			var toClose []colexecop.Closers
 			var semsToCheck []semaphore.Semaphore
 			colexectestutils.RunTests(t, testAllocator, []colexectestutils.Tuples{tc.tuples}, tc.expected, colexectestutils.UnorderedVerifier, func(sources []colexecop.Operator) (colexecop.Operator, error) {
 				tc.init()
@@ -1074,23 +1070,21 @@ func TestWindowFunctions(t *testing.T) {
 				// FDs.
 				sem := colexecop.NewTestingSemaphore(relativeRankNumRequiredFDs)
 				args := &colexecargs.NewColOperatorArgs{
-					Spec:                spec,
-					Inputs:              colexectestutils.MakeInputs(sources),
-					StreamingMemAccount: testMemAcc,
-					DiskQueueCfg:        queueCfg,
-					FDSemaphore:         sem,
-					MonitorRegistry:     &monitorRegistry,
+					Spec:            spec,
+					Inputs:          colexectestutils.MakeInputs(sources),
+					DiskQueueCfg:    queueCfg,
+					FDSemaphore:     sem,
+					MonitorRegistry: &monitorRegistry,
+					CloserRegistry:  &closerRegistry,
 				}
 				semsToCheck = append(semsToCheck, sem)
 				result, err := colexecargs.TestNewColOperator(ctx, flowCtx, args)
-				toClose = append(toClose, result.ToClose)
 				return result.Root, err
 			})
 			// Close all closers manually (in production this is done on the
 			// flow cleanup).
-			for _, c := range toClose {
-				require.NoError(t, c.Close(ctx))
-			}
+			closerRegistry.Close(ctx)
+			closerRegistry.Reset()
 			for i, sem := range semsToCheck {
 				require.Equal(t, 0, sem.GetCount(), "sem still reports open FDs at index %d", i)
 			}

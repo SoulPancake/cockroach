@@ -1,19 +1,13 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexecargs
 
 import (
 	"context"
 	"sync"
-	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
@@ -27,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/marusama/semaphore"
-	"github.com/stretchr/testify/require"
 )
 
 // TestNewColOperator is a test helper that's always aliased to
@@ -76,10 +69,15 @@ type NewColOperatorArgs struct {
 	SemaCtx            *tree.SemaContext
 	Factory            coldata.ColumnFactory
 	MonitorRegistry    *MonitorRegistry
+	CloserRegistry     *CloserRegistry
 	TypeResolver       *descs.DistSQLTypeResolver
 	TestingKnobs       struct {
 		// SpillingCallbackFn will be called when the spilling from an in-memory
 		// to disk-backed operator occurs. It should only be set in tests.
+		// TODO(yuzefovich): this knob is a bit confusing because it is
+		// currently inherited by "child" disk-backed operators. It is also
+		// called every time when the disk-backed operator spills to disk,
+		// including after it has been reset for reuse.
 		SpillingCallbackFn func()
 		// NumForcedRepartitions specifies a number of "repartitions" that a
 		// disk-backed operator should be forced to perform. "Repartition" can
@@ -117,17 +115,10 @@ type NewColOperatorResult struct {
 	// contract right now of whether or not a particular operator has to make a
 	// copy of the type schema if it needs to use it later.
 	ColumnTypes []*types.T
-	ToClose     colexecop.Closers
 	Releasables []execreleasable.Releasable
 }
 
 var _ execreleasable.Releasable = &NewColOperatorResult{}
-
-// TestCleanupNoError releases the resources associated with this result and
-// asserts that no error is returned. It should only be used in tests.
-func (r *NewColOperatorResult) TestCleanupNoError(t testing.TB) {
-	require.NoError(t, r.ToClose.Close(context.Background()))
-}
 
 var newColOperatorResultPool = sync.Pool{
 	New: func() interface{} {
@@ -157,9 +148,6 @@ func (r *NewColOperatorResult) Release() {
 	for i := range r.MetadataSources {
 		r.MetadataSources[i] = nil
 	}
-	for i := range r.ToClose {
-		r.ToClose[i] = nil
-	}
 	for i := range r.Releasables {
 		r.Releasables[i] = nil
 	}
@@ -168,7 +156,6 @@ func (r *NewColOperatorResult) Release() {
 			StatsCollectors: r.StatsCollectors[:0],
 			MetadataSources: r.MetadataSources[:0],
 		},
-		ToClose:     r.ToClose[:0],
 		Releasables: r.Releasables[:0],
 	}
 	newColOperatorResultPool.Put(r)

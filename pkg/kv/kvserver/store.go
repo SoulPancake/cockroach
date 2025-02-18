@@ -1,19 +1,13 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -45,6 +39,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvadmission"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/kvflowhandle"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/node_rac2"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/rac2"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/replica_rac2"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvstorage"
@@ -55,14 +52,17 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rangefeed"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rditer"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/storeliveness"
+	slpb "github.com/cockroachdb/cockroach/pkg/kv/kvserver/storeliveness/storelivenesspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/tenantrate"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/tscache"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/txnrecovery"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/txnwait"
 	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilities/tenantcapabilitiesauthorizer"
 	"github.com/cockroachdb/cockroach/pkg/raft"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftlogger"
 	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/raft/raftstoreliveness"
+	"github.com/cockroachdb/cockroach/pkg/raft/tracker"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
@@ -75,16 +75,16 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/disk"
 	"github.com/cockroachdb/cockroach/pkg/util/admission"
 	"github.com/cockroachdb/cockroach/pkg/util/admission/admissionpb"
+	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
-	"github.com/cockroachdb/cockroach/pkg/util/future"
 	"github.com/cockroachdb/cockroach/pkg/util/grunning"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/cockroach/pkg/util/limit"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
-	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
+	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
@@ -247,13 +247,21 @@ var addSSTableAsWritesRequestLimit = settings.RegisterIntSetting(
 	settings.PositiveInt,
 )
 
-// concurrentRangefeedItersLimit limits concurrent rangefeed catchup iterators.
-var concurrentRangefeedItersLimit = settings.RegisterIntSetting(
+// ConcurrentRangefeedItersLimit limits concurrent rangefeed catchup iterators.
+var ConcurrentRangefeedItersLimit = settings.RegisterIntSetting(
 	settings.SystemOnly,
 	"kv.rangefeed.concurrent_catchup_iterators",
 	"number of rangefeeds catchup iterators a store will allow concurrently before queueing",
 	16,
 	settings.PositiveInt,
+)
+
+var PerConsumerCatchupLimit = settings.RegisterIntSetting(
+	settings.SystemOnly,
+	"kv.rangefeed.per_consumer_catchup_scan_limit",
+	"the number of catchup scan iterators a node will allow on a per-consumer basis, 0 to disable",
+	0,
+	settings.NonNegativeInt,
 )
 
 // Minimum time interval between system config updates which will lead to
@@ -331,12 +339,6 @@ var SnapshotSendLimit = settings.RegisterIntSetting(
 	settings.NonNegativeInt,
 )
 
-// raftStepDownOnRemoval is a metamorphic test parameter that makes Raft leaders
-// step down on demotion or removal. Following an upgrade, clusters may have
-// replicas with mixed settings, because it's only changed when initializing
-// replicas. Varying it makes sure we handle this state.
-var raftStepDownOnRemoval = metamorphic.ConstantWithTestBool("raft-step-down-on-removal", true)
-
 // TestStoreConfig has some fields initialized with values relevant in tests.
 func TestStoreConfig(clock *hlc.Clock) StoreConfig {
 	return testStoreConfig(clock, clusterversion.Latest.Version())
@@ -369,6 +371,11 @@ func testStoreConfig(clock *hlc.Clock, version roachpb.Version) StoreConfig {
 		SystemConfigProvider: config.NewConstantSystemConfigProvider(
 			config.NewSystemConfig(zonepb.DefaultZoneConfigRef()),
 		),
+		KVFlowAdmittedPiggybacker:    node_rac2.NewAdmittedPiggybacker(),
+		KVFlowStreamTokenProvider:    rac2.NewStreamTokenCounterProvider(st, clock),
+		KVFlowWaitForEvalConfig:      rac2.NewWaitForEvalConfig(st),
+		KVFlowEvalWaitMetrics:        rac2.NewEvalWaitMetrics(),
+		KVFlowRangeControllerMetrics: rac2.NewRangeControllerMetrics(),
 	}
 	sc.TestingKnobs.TenantRateKnobs.Authorizer = tenantcapabilitiesauthorizer.NewAllowEverythingAuthorizer()
 
@@ -388,8 +395,11 @@ func newRaftConfig(
 	id raftpb.PeerID,
 	appliedIndex kvpb.RaftIndex,
 	storeCfg StoreConfig,
-	logger raft.Logger,
+	lazyReplication bool,
+	logger raftlogger.Logger,
 	storeLiveness raftstoreliveness.StoreLiveness,
+	metrics *raft.Metrics,
+	testingKnobs *raft.TestingKnobs,
 ) *raft.Config {
 	return &raft.Config{
 		ID:                          id,
@@ -400,21 +410,18 @@ func newRaftConfig(
 		MaxUncommittedEntriesSize:   storeCfg.RaftMaxUncommittedEntriesSize,
 		MaxCommittedSizePerReady:    storeCfg.RaftMaxCommittedSizePerReady,
 		DisableConfChangeValidation: true, // see https://github.com/cockroachdb/cockroach/issues/105797
+		LazyReplication:             lazyReplication,
 		MaxSizePerMsg:               storeCfg.RaftMaxSizePerMsg,
 		MaxInflightMsgs:             storeCfg.RaftMaxInflightMsgs,
 		MaxInflightBytes:            storeCfg.RaftMaxInflightBytes,
 		Storage:                     strg,
 		Logger:                      logger,
 		StoreLiveness:               storeLiveness,
-
-		// We only set this on replica initialization, so replicas without
-		// StepDownOnRemoval may remain on 23.2 nodes until they restart. That's
-		// totally fine, we just can't rely on this behavior until 24.1, but
-		// we currently don't either.
-		StepDownOnRemoval: raftStepDownOnRemoval,
-
-		PreVote:     true,
-		CheckQuorum: storeCfg.RaftEnableCheckQuorum,
+		PreVote:                     true,
+		CheckQuorum:                 storeCfg.RaftEnableCheckQuorum,
+		CRDBVersion:                 storeCfg.Settings.Version,
+		Metrics:                     metrics,
+		TestingKnobs:                testingKnobs,
 	}
 }
 
@@ -523,8 +530,9 @@ func (rs *storeReplicaVisitor) Visit(visitor func(*Replica) bool) {
 	// stale) view of all Replicas without holding the Store lock. In particular,
 	// no locks are acquired during the copy process.
 	rs.repls = nil
-	rs.store.mu.replicasByRangeID.Range(func(repl *Replica) {
+	rs.store.mu.replicasByRangeID.Range(func(_ roachpb.RangeID, repl *Replica) bool {
 		rs.repls = append(rs.repls, repl)
+		return true
 	})
 
 	switch rs.order {
@@ -702,7 +710,7 @@ A first phenomenon to understand is that of uninitialized Replicas, which is the
 State Machine at applied index zero, i.e. has an empty state. In CockroachDB, an
 uninitialized Replica can only advance to a nonzero log position ("become
 initialized") via a Raft snapshot (this is because we initialize all Ranges in
-the system at log index raftInitialLogIndex which allows us to write arbitrary
+the system at log index RaftInitialLogIndex which allows us to write arbitrary
 amounts of data into the initial state without having to worry about the size
 of individual log entries; see WriteInitialReplicaState).
 
@@ -898,10 +906,11 @@ type Store struct {
 	intentResolver      *intentresolver.IntentResolver
 	recoveryMgr         txnrecovery.Manager
 	storeLiveness       storeliveness.Fabric
-	syncWaiter          *logstore.SyncWaiterLoop
+	syncWaiters         []*logstore.SyncWaiterLoop
 	raftEntryCache      *raftentry.Cache
 	limiters            batcheval.Limiters
 	txnWaitMetrics      *txnwait.Metrics
+	raftMetrics         *raft.Metrics
 	sstSnapshotStorage  SSTSnapshotStorage
 	protectedtsReader   spanconfig.ProtectedTSReader
 	ctSender            *sidetransport.Sender
@@ -911,6 +920,14 @@ type Store struct {
 	// transport is connected to, and is used by the canonical
 	// replicaFlowControlIntegration implementation.
 	raftTransportForFlowControl raftTransportForFlowControl
+
+	// kvflowRangeControllerFactory is used for replication AC (flow control) V2
+	// to create new range controllers which mediate the flow of requests to
+	// replicas.
+	kvflowRangeControllerFactory replica_rac2.RangeControllerFactory
+
+	// metricsMu protects the collection and update of engine metrics.
+	metricsMu syncutil.Mutex
 
 	coalescedMu struct {
 		syncutil.Mutex
@@ -939,6 +956,11 @@ type Store struct {
 	// the time of its creation was riddled with deadlock (but that situation
 	// has likely improved).
 	draining atomic.Bool
+
+	// concurrentRaftTraces is the number of concurrent raft trace requests that
+	// are currently registered. This limit is used to prevent extensive raft
+	// tracing from inadvertently impacting performance.
+	concurrentRaftTraces atomic.Int64
 
 	// Locking notes: To avoid deadlocks, the following lock order must be
 	// obeyed: baseQueue.mu < Replica.raftMu < Replica.readOnlyCmdMu < Store.mu
@@ -1037,7 +1059,7 @@ type Store struct {
 		syncutil.RWMutex
 		// Map of replicas by Range ID (map[roachpb.RangeID]*Replica).
 		// May be read without holding Store.mu.
-		replicasByRangeID rangeIDReplicaMap
+		replicasByRangeID syncutil.Map[roachpb.RangeID, Replica]
 		// A btree key containing objects of type *Replica or *ReplicaPlaceholder.
 		// Both types have an associated key range; the btree is keyed on their
 		// start keys.
@@ -1060,8 +1082,8 @@ type Store struct {
 		replicaPlaceholders map[roachpb.RangeID]*ReplicaPlaceholder
 	}
 
-	// The unquiesced subset of replicas.
-	unquiescedReplicas struct {
+	// The unquiesced or awake subset of replicas.
+	unquiescedOrAwakeReplicas struct {
 		syncutil.Mutex
 		m map[roachpb.RangeID]struct{}
 	}
@@ -1129,7 +1151,6 @@ type Store struct {
 
 	computeInitialMetrics              sync.Once
 	systemConfigUpdateQueueRateLimiter *quotapool.RateLimiter
-	spanConfigUpdateQueueRateLimiter   *quotapool.RateLimiter
 
 	rangeFeedSlowClosedTimestampNudge *singleflight.Group
 
@@ -1150,17 +1171,18 @@ type StoreConfig struct {
 	AmbientCtx log.AmbientContext
 	base.RaftConfig
 
-	DefaultSpanConfig    roachpb.SpanConfig
-	Settings             *cluster.Settings
-	Clock                *hlc.Clock
-	Gossip               *gossip.Gossip
-	DB                   *kv.DB
-	NodeLiveness         *liveness.NodeLiveness
-	StorePool            *storepool.StorePool
-	Transport            *RaftTransport
-	NodeDialer           *nodedialer.Dialer
-	RPCContext           *rpc.Context
-	RangeDescriptorCache *rangecache.RangeCache
+	DefaultSpanConfig      roachpb.SpanConfig
+	Settings               *cluster.Settings
+	Clock                  *hlc.Clock
+	Gossip                 *gossip.Gossip
+	DB                     *kv.DB
+	NodeLiveness           *liveness.NodeLiveness
+	StorePool              *storepool.StorePool
+	Transport              *RaftTransport
+	StoreLivenessTransport *storeliveness.Transport
+	NodeDialer             *nodedialer.Dialer
+	RPCContext             *rpc.Context
+	RangeDescriptorCache   *rangecache.RangeCache
 
 	ClosedTimestampSender   *sidetransport.Sender
 	ClosedTimestampReceiver sidetransportReceiver
@@ -1272,6 +1294,23 @@ type StoreConfig struct {
 	// KVFlowHandleMetrics is a shared metrics struct for all
 	// kvflowcontrol.Handles.
 	KVFlowHandleMetrics *kvflowhandle.Metrics
+	// KVFlowAdmittedPiggybacker is used for replication AC (flow control) v2.
+	KVFlowAdmittedPiggybacker replica_rac2.AdmittedPiggybacker
+	// KVFlowStreamTokenProvider is used for replication AC (flow control) v2 to
+	// provide token counters for replication streams.
+	KVFlowStreamTokenProvider *rac2.StreamTokenCounterProvider
+	// KVFlowSendTokenWatcher is used for replication AC (flow control) v2 to
+	// watch for elastic send tokens.
+	KVFlowSendTokenWatcher *rac2.SendTokenWatcher
+	// KVFlowWaitForEvalConfig is used for configuring WaitForEval for
+	// replication AC (flow control) v2.
+	KVFlowWaitForEvalConfig *rac2.WaitForEvalConfig
+	// KVFlowEvalWaitMetrics is used for replication AC (flow control) v2 to
+	// track requests waiting for evaluation.
+	KVFlowEvalWaitMetrics *rac2.EvalWaitMetrics
+	// KVFlowRangeControllerMetrics is used for replication AC (flow control) v2
+	// to track various range controller metrics.
+	KVFlowRangeControllerMetrics *rac2.RangeControllerMetrics
 
 	// SchedulerLatencyListener listens in on scheduling latencies, information
 	// that's then used to adjust various admission control components (like how
@@ -1510,9 +1549,20 @@ func NewStore(
 	s.replRankingsByTenant = NewReplicaRankingsMap()
 
 	s.raftRecvQueues.mon = mon.NewUnlimitedMonitor(ctx, mon.Options{
-		Name:     "raft-receive-queue",
+		Name:     mon.MakeMonitorName("raft-receive-queue"),
 		CurCount: s.metrics.RaftRcvdQueuedBytes,
 		Settings: cfg.Settings,
+	})
+	s.cfg.KVFlowWaitForEvalConfig.RegisterWatcher(func(wc rac2.WaitForEvalCategory) {
+		// When the system is configured with rac2.AllWorkWaitsForEval, RACv2 is
+		// running in a mode where all senders are using send token pools for all
+		// messages to pace sending to a receiving store. These send token pools
+		// are stricter than per range limits. Additionally, these are byte sized
+		// pools, which is a better way to protect the receiver than a count
+		// limit. Hence, we turn off maxLen enforcement in that case, since it is
+		// unnecessary extra protection, and to respect this on the sender side
+		// (in RACv2 code) would result in unnecessary code complexity.
+		s.raftRecvQueues.SetEnforceMaxLen(wc != rac2.AllWorkWaitsForEval)
 	})
 
 	s.cfg.RangeLogWriter = newWrappedRangeLogWriter(
@@ -1530,7 +1580,16 @@ func NewStore(
 		cfg.RaftSchedulerConcurrency, cfg.RaftSchedulerShardSize, cfg.RaftSchedulerConcurrencyPriority,
 		cfg.RaftElectionTimeoutTicks)
 
-	s.syncWaiter = logstore.NewSyncWaiterLoop()
+	// Run a log SyncWaiter loop for every 32 raft scheduler goroutines.
+	// Experiments on c5d.12xlarge instances (48 vCPUs, the largest single-socket
+	// instance AWS offers) show that with fewer SyncWaiters, raft log callback
+	// processing can become a bottleneck for write heavy workloads, which can
+	// drive about 100k raft log appends per second, per store.
+	numSyncWaiters := (cfg.RaftSchedulerConcurrency-1)/32 + 1 // ceil division
+	s.syncWaiters = make([]*logstore.SyncWaiterLoop, numSyncWaiters)
+	for i := range s.syncWaiters {
+		s.syncWaiters[i] = logstore.NewSyncWaiterLoop()
+	}
 
 	s.raftEntryCache = raftentry.NewCache(cfg.RaftEntryCacheSize)
 	s.metrics.registry.AddMetricStruct(s.raftEntryCache.Metrics())
@@ -1547,9 +1606,9 @@ func NewStore(
 	s.mu.uninitReplicas = map[roachpb.RangeID]*Replica{}
 	s.mu.Unlock()
 
-	s.unquiescedReplicas.Lock()
-	s.unquiescedReplicas.m = map[roachpb.RangeID]struct{}{}
-	s.unquiescedReplicas.Unlock()
+	s.unquiescedOrAwakeReplicas.Lock()
+	s.unquiescedOrAwakeReplicas.m = map[roachpb.RangeID]struct{}{}
+	s.unquiescedOrAwakeReplicas.Unlock()
 
 	s.rangefeedReplicas.Lock()
 	s.rangefeedReplicas.m = map[roachpb.RangeID]int64{}
@@ -1560,6 +1619,10 @@ func NewStore(
 
 	s.txnWaitMetrics = txnwait.NewMetrics(cfg.HistogramWindowInterval)
 	s.metrics.registry.AddMetricStruct(s.txnWaitMetrics)
+
+	s.raftMetrics = raft.NewMetrics()
+	s.metrics.registry.AddMetricStruct(s.raftMetrics)
+
 	s.snapshotApplyQueue = multiqueue.NewMultiQueue(int(snapshotApplyLimit.Get(&cfg.Settings.SV)))
 	snapshotApplyLimit.SetOnChange(&cfg.Settings.SV, func(ctx context.Context) {
 		s.snapshotApplyQueue.UpdateConcurrencyLimit(int(snapshotApplyLimit.Get(&cfg.Settings.SV)))
@@ -1634,11 +1697,11 @@ func NewStore(
 			int(addSSTableAsWritesRequestLimit.Get(&cfg.Settings.SV)))
 	})
 	s.limiters.ConcurrentRangefeedIters = limit.MakeConcurrentRequestLimiter(
-		"rangefeedIterLimiter", int(concurrentRangefeedItersLimit.Get(&cfg.Settings.SV)),
+		"rangefeedIterLimiter", int(ConcurrentRangefeedItersLimit.Get(&cfg.Settings.SV)),
 	)
-	concurrentRangefeedItersLimit.SetOnChange(&cfg.Settings.SV, func(ctx context.Context) {
+	ConcurrentRangefeedItersLimit.SetOnChange(&cfg.Settings.SV, func(ctx context.Context) {
 		s.limiters.ConcurrentRangefeedIters.SetLimit(
-			int(concurrentRangefeedItersLimit.Get(&cfg.Settings.SV)))
+			int(ConcurrentRangefeedItersLimit.Get(&cfg.Settings.SV)))
 	})
 
 	authorizer := cfg.TestingKnobs.TenantRateKnobs.Authorizer
@@ -2159,10 +2222,64 @@ func (s *Store) Start(ctx context.Context, stopper *stop.Stopper) error {
 	)
 	s.metrics.registry.AddMetricStruct(s.recoveryMgr.Metrics())
 
-	// TODO(mira): create the store liveness support manager here.
-	// s.storeLiveness = ...
+	// Create the Store Liveness SupportManager.
+	livenessInterval, heartbeatInterval := s.cfg.StoreLivenessDurations()
+	supportGracePeriod := s.cfg.RPCContext.StoreLivenessWithdrawalGracePeriod()
+	options := storeliveness.NewOptions(livenessInterval, heartbeatInterval, supportGracePeriod)
+	var knobs *storeliveness.SupportManagerKnobs
+	if s.cfg.TestingKnobs.StoreLivenessKnobs != nil {
+		knobs = &s.cfg.TestingKnobs.StoreLivenessKnobs.SupportManagerKnobs
+	}
+	sm := storeliveness.NewSupportManager(
+		slpb.StoreIdent{NodeID: s.nodeDesc.NodeID, StoreID: s.StoreID()}, s.StateEngine(), options,
+		s.cfg.Settings, s.stopper, s.cfg.Clock, s.cfg.StoreLivenessTransport, knobs,
+	)
+	s.cfg.StoreLivenessTransport.ListenMessages(s.StoreID(), sm)
+	s.storeLiveness = sm
+	s.storeLiveness.RegisterSupportWithdrawalCallback(s.supportWithdrawnCallback)
+	s.metrics.registry.AddMetricStruct(sm.Metrics())
+	if err = sm.Start(ctx); err != nil {
+		return errors.Wrap(err, "starting store liveness")
+	}
 
 	s.rangeIDAlloc = idAlloc
+
+	if s.cfg.KVFlowStreamTokenProvider == nil {
+		// Some tests don't setup a server, just a store or similar. In these
+		// cases, the KVFlow.* fields in the store config, which are references
+		// to a shared object between stores on the same server, will not be set.
+		// We set them here to avoid handling nil values in such tests within the
+		// rac2 code.
+		if buildutil.CrdbTestBuild {
+			// Ensure that this is actually test build. If it is not, we should not
+			// be compensating for an underlying bug.
+			s.cfg.KVFlowSendTokenWatcher = rac2.NewSendTokenWatcher(s.stopper, timeutil.DefaultTimeSource{})
+		} else {
+			return errors.New("missing KVFlowSendTokenWatcher")
+		}
+	}
+
+	scs := replica_rac2.NewStreamCloseScheduler(timeutil.DefaultTimeSource{}, s.scheduler)
+	if err := scs.Start(ctx, stopper); err != nil {
+		return err
+	}
+	// kvflowRangeControllerFactory depends on the raft scheduler, so it must be
+	// created per-store rather than per-node like other replication admission
+	// control (flow control) v2 components.
+	// NB: this factory is used in the Replica initialization flow (below), so we
+	// must create it no later than here.
+	s.kvflowRangeControllerFactory = replica_rac2.NewRangeControllerFactoryImpl(
+		s.Clock(),
+		s.cfg.KVFlowEvalWaitMetrics,
+		s.cfg.KVFlowRangeControllerMetrics,
+		s.cfg.KVFlowStreamTokenProvider,
+		scs,
+		(*racV2Scheduler)(s.scheduler),
+		s.cfg.KVFlowSendTokenWatcher,
+		s.cfg.KVFlowWaitForEvalConfig,
+		s.cfg.RaftMaxInflightBytes,
+		s.TestingKnobs().FlowControlTestingKnobs,
+	)
 
 	now := s.cfg.Clock.Now()
 	s.startedAt = now.WallTime
@@ -2229,15 +2346,19 @@ func (s *Store) Start(ctx context.Context, stopper *stop.Stopper) error {
 			return errors.AssertionFailedf("no tenantID for initialized replica %s", rep)
 		}
 
-		// Eagerly unquiesce replicas that use expiration-based leases. We don't
-		// quiesce ranges with expiration leases, and we want to eagerly acquire
-		// leases for them, which happens during Raft ticks. We rely on Raft
-		// pre-vote to avoid disturbing established Raft leaders.
+		// Eagerly unquiece replicas that are using a lease that doesn't support quiescnce.
+		// In practice, this means we'll unquiesce ranges that are using leader leases
+		// or expiration leases. We want to eagerly establish raft leaders for such
+		// ranges and acquire leases on top of this. This happens during Raft ticks.
+		// We rely on Raft pre-vote to avoid disturbance to Raft leaders.
+		//
+		// For followers that are asleep, the leader will send a message as part of
+		// acquiring the new lease, which will wake them up.
 		//
 		// NB: cluster settings haven't propagated yet, so we have to check the last
-		// known lease instead of relying on shouldUseExpirationLeaseRLocked(). We
-		// also check Sequence > 0 to omit ranges that haven't seen a lease yet.
-		if l, _ := rep.GetLease(); l.Type() == roachpb.LeaseExpiration && l.Sequence > 0 {
+		// known lease instead of desiredLeaseTypeRLocked. We also check Sequence >
+		// 0 to omit ranges that haven't seen a lease yet.
+		if l, _ := rep.GetLease(); !l.SupportsQuiescence() && l.Sequence > 0 {
 			rep.maybeUnquiesce(ctx, true /* wakeLeader */, true /* mayCampaign */)
 		}
 	}
@@ -2455,6 +2576,15 @@ func (s *Store) startRangefeedUpdater(ctx context.Context) {
 			now := timeutil.Now()
 			deadline := now.Add(refresh)
 			var waitErr error
+			// We're about to perform one work cycle, where we go through all replicas
+			// that have an active rangefeed on them and update them with the current
+			// closed timestamp for their range. While doing so, we'll keep track of
+			// the earliest closed timestamp we've seen and the number of ranges whose
+			// closed timestamp is lagging excessively; we'll then use these to update
+			// some metrics when the work cycle completes.
+			var earliestClosedTS hlc.Timestamp
+			var numExcessivelyLaggingClosedTS int64
+
 			for work, startAt := updateRangeIDs(), now; len(work) != 0; {
 				if waitErr = wait(ctx, startAt, conf.changed); waitErr != nil {
 					// NB: a configuration change abandons the update loop
@@ -2463,7 +2593,13 @@ func (s *Store) startRangefeedUpdater(ctx context.Context) {
 				todo, by := rangeFeedUpdaterPace(timeutil.Now(), deadline, smear, len(work))
 				for _, id := range work[:todo] {
 					if r := s.GetReplicaIfExists(id); r != nil {
-						r.handleClosedTimestampUpdate(ctx, r.GetCurrentClosedTimestamp(ctx))
+						cts := r.GetCurrentClosedTimestamp(ctx)
+						if earliestClosedTS.IsEmpty() || cts.Less(earliestClosedTS) {
+							earliestClosedTS = cts
+						}
+						if exceedsSlowLagThresh := r.handleClosedTimestampUpdate(ctx, cts); exceedsSlowLagThresh {
+							numExcessivelyLaggingClosedTS++
+						}
 					}
 				}
 				work = work[todo:]
@@ -2481,6 +2617,13 @@ func (s *Store) startRangefeedUpdater(ctx context.Context) {
 			if waitErr != nil && !errors.Is(waitErr, errInterrupted) {
 				return // context canceled
 			}
+			// We've successfully finished one work cycle where we went through all
+			// replicas that had an active rangefeed on them; update metrics.
+			if !earliestClosedTS.IsEmpty() {
+				nanos := timeutil.Since(earliestClosedTS.GoTime()).Nanoseconds()
+				s.metrics.RangeFeedMetrics.RangeFeedClosedTimestampMaxBehindNanos.Update(nanos)
+			}
+			s.metrics.RangeFeedMetrics.RangeFeedSlowClosedTimestampRanges.Update(numExcessivelyLaggingClosedTS)
 		}
 	})
 }
@@ -3099,8 +3242,9 @@ func (s *Store) Capacity(ctx context.Context, useCached bool) (roachpb.StoreCapa
 // performance critical code.
 func (s *Store) ReplicaCount() int {
 	var count int
-	s.mu.replicasByRangeID.Range(func(*Replica) {
+	s.mu.replicasByRangeID.Range(func(_ roachpb.RangeID, _ *Replica) bool {
 		count++
+		return true
 	})
 	return count
 }
@@ -3142,22 +3286,25 @@ func (s *Store) Descriptor(ctx context.Context, useCached bool) (*roachpb.StoreD
 // the provided stream and returns a future with an optional error when the rangefeed is
 // complete.
 func (s *Store) RangeFeed(
-	args *kvpb.RangeFeedRequest, stream kvpb.RangeFeedEventSink,
-) *future.ErrorFuture {
+	streamCtx context.Context,
+	args *kvpb.RangeFeedRequest,
+	stream rangefeed.Stream,
+	perConsumerCatchupLimiter *limit.ConcurrentRequestLimiter,
+) (rangefeed.Disconnector, error) {
 	if filter := s.TestingKnobs().TestingRangefeedFilter; filter != nil {
 		if pErr := filter(args, stream); pErr != nil {
-			return future.MakeCompletedErrorFuture(pErr.GoError())
+			return nil, pErr.GoError()
 		}
 	}
 
 	if err := verifyKeys(args.Span.Key, args.Span.EndKey, true); err != nil {
-		return future.MakeCompletedErrorFuture(err)
+		return nil, err
 	}
 
 	// Get range and add command to the range for execution.
 	repl, err := s.GetReplica(args.RangeID)
 	if err != nil {
-		return future.MakeCompletedErrorFuture(err)
+		return nil, err
 	}
 	if !repl.IsInitialized() {
 		// (*Store).Send has an optimization for uninitialized replicas to send back
@@ -3165,12 +3312,12 @@ func (s *Store) RangeFeed(
 		// be found. RangeFeeds can always be served from followers and so don't
 		// otherwise return NotLeaseHolderError. For simplicity we also don't return
 		// one here.
-		return future.MakeCompletedErrorFuture(kvpb.NewRangeNotFoundError(args.RangeID, s.StoreID()))
+		return nil, kvpb.NewRangeNotFoundError(args.RangeID, s.StoreID())
 	}
 
 	tenID, _ := repl.TenantID()
 	pacer := s.cfg.KVAdmissionController.AdmitRangefeedRequest(tenID, args)
-	return repl.RangeFeed(args, stream, pacer)
+	return repl.RangeFeed(streamCtx, args, stream, pacer, perConsumerCatchupLimiter)
 }
 
 // updateReplicationGauges counts a number of simple replication statistics for
@@ -3184,12 +3331,15 @@ func (s *Store) updateReplicationGauges(ctx context.Context) error {
 		leaseHolderCount               int64
 		leaseExpirationCount           int64
 		leaseEpochCount                int64
+		leaseLeaderCount               int64
 		leaseLivenessCount             int64
 		leaseViolatingPreferencesCount int64
 		leaseLessPreferredCount        int64
 		raftLeaderNotLeaseHolderCount  int64
+		raftLeaderNotFortifiedCount    int64
 		raftLeaderInvalidLeaseCount    int64
 		quiescentCount                 int64
+		asleepCount                    int64
 		uninitializedCount             int64
 		averageQueriesPerSecond        float64
 		averageRequestsPerSecond       float64
@@ -3203,11 +3353,13 @@ func (s *Store) updateReplicationGauges(ctx context.Context) error {
 		unavailableRangeCount     int64
 		underreplicatedRangeCount int64
 		overreplicatedRangeCount  int64
+		decommissioningRangeCount int64
 		behindCount               int64
 		pausedFollowerCount       int64
 		ioOverload                float64
 		pendingRaftProposalCount  int64
 		slowRaftProposalCount     int64
+		raftFlowStateCounts       [tracker.StateCount]int64
 
 		locks                          int64
 		totalLockHoldDurationNanos     int64
@@ -3218,10 +3370,14 @@ func (s *Store) updateReplicationGauges(ctx context.Context) error {
 		maxLockWaitDurationNanos       int64
 		maxLockWaitQueueWaitersForLock int64
 
+		kvflowSendQueueSizeCount int64
+		kvflowSendQueueSizeBytes int64
+
 		minMaxClosedTS hlc.Timestamp
 	)
 
 	now := s.cfg.Clock.NowAsClockTimestamp()
+	goNow := now.ToTimestamp().GoTime()
 	clusterNodes := s.ClusterNodeCount()
 
 	s.mu.RLock()
@@ -3237,6 +3393,7 @@ func (s *Store) updateReplicationGauges(ctx context.Context) error {
 	// We want to avoid having to read this multiple times during the replica
 	// visiting, so load it once up front for all nodes.
 	livenessMap := s.cfg.NodeLiveness.ScanNodeVitalityFromCache()
+	kvflowSendStats := rac2.RangeSendStreamStats{}
 	newStoreReplicaVisitor(s).Visit(func(rep *Replica) bool {
 		metrics := rep.Metrics(ctx, now, livenessMap, clusterNodes)
 		if metrics.Leader {
@@ -3247,6 +3404,17 @@ func (s *Store) updateReplicationGauges(ctx context.Context) error {
 			if !metrics.LeaseValid {
 				raftLeaderInvalidLeaseCount++
 			}
+			if metrics.LeaderNotFortified {
+				raftLeaderNotFortifiedCount++
+			}
+			for state, cnt := range metrics.RaftFlowStateCounts {
+				raftFlowStateCounts[state] += cnt
+			}
+			kvflowSendStats.Clear()
+			rep.SendStreamStats(&kvflowSendStats)
+			sizeCount, sizeBytes := kvflowSendStats.SumSendQueues()
+			kvflowSendQueueSizeCount += sizeCount
+			kvflowSendQueueSizeBytes += sizeBytes
 		}
 		if metrics.Leaseholder {
 			s.metrics.RaftQuotaPoolPercentUsed.RecordValue(metrics.QuotaPoolPercentUsed)
@@ -3257,6 +3425,8 @@ func (s *Store) updateReplicationGauges(ctx context.Context) error {
 				leaseExpirationCount++
 			case roachpb.LeaseEpoch:
 				leaseEpochCount++
+			case roachpb.LeaseLeader:
+				leaseLeaderCount++
 			}
 			if metrics.LivenessLease {
 				leaseLivenessCount++
@@ -3272,6 +3442,9 @@ func (s *Store) updateReplicationGauges(ctx context.Context) error {
 		if metrics.Quiescent {
 			quiescentCount++
 		}
+		if metrics.Asleep {
+			asleepCount++
+		}
 		if metrics.RangeCounter {
 			rangeCount++
 			if metrics.Unavailable {
@@ -3282,6 +3455,12 @@ func (s *Store) updateReplicationGauges(ctx context.Context) error {
 			}
 			if metrics.Overreplicated {
 				overreplicatedRangeCount++
+			}
+			if metrics.Decommissioning {
+				// NB: Enqueue is disabled by default from here and throttled async if
+				// enabled.
+				rep.maybeEnqueueProblemRange(ctx, goNow, metrics.LeaseValid, metrics.Leaseholder)
+				decommissioningRangeCount++
 			}
 		}
 		pausedFollowerCount += metrics.PausedFollowerCount
@@ -3324,14 +3503,20 @@ func (s *Store) updateReplicationGauges(ctx context.Context) error {
 	s.metrics.RaftLeaderCount.Update(raftLeaderCount)
 	s.metrics.RaftLeaderNotLeaseHolderCount.Update(raftLeaderNotLeaseHolderCount)
 	s.metrics.RaftLeaderInvalidLeaseCount.Update(raftLeaderInvalidLeaseCount)
+	s.metrics.RaftLeaderNotFortifiedCount.Update(raftLeaderNotFortifiedCount)
 	s.metrics.LeaseHolderCount.Update(leaseHolderCount)
 	s.metrics.LeaseExpirationCount.Update(leaseExpirationCount)
 	s.metrics.LeaseEpochCount.Update(leaseEpochCount)
+	s.metrics.LeaseLeaderCount.Update(leaseLeaderCount)
 	s.metrics.LeaseViolatingPreferencesCount.Update(leaseViolatingPreferencesCount)
 	s.metrics.LeaseLessPreferredCount.Update(leaseLessPreferredCount)
 	s.metrics.LeaseLivenessCount.Update(leaseLivenessCount)
 	s.metrics.QuiescentCount.Update(quiescentCount)
+	s.metrics.AsleepCount.Update(asleepCount)
 	s.metrics.UninitializedCount.Update(uninitializedCount)
+	for state, cnt := range raftFlowStateCounts {
+		s.metrics.RaftFlowStateCounts[state].Update(cnt)
+	}
 	s.metrics.AverageQueriesPerSecond.Update(averageQueriesPerSecond)
 	s.metrics.AverageRequestsPerSecond.Update(averageRequestsPerSecond)
 	s.metrics.AverageWritesPerSecond.Update(averageWritesPerSecond)
@@ -3345,6 +3530,7 @@ func (s *Store) updateReplicationGauges(ctx context.Context) error {
 	s.metrics.UnavailableRangeCount.Update(unavailableRangeCount)
 	s.metrics.UnderReplicatedRangeCount.Update(underreplicatedRangeCount)
 	s.metrics.OverReplicatedRangeCount.Update(overreplicatedRangeCount)
+	s.metrics.DecommissioningRangeCount.Update(decommissioningRangeCount)
 	s.metrics.RaftLogFollowerBehindCount.Update(behindCount)
 	s.metrics.RaftPausedFollowerCount.Update(pausedFollowerCount)
 	s.metrics.IOOverload.Update(ioOverload)
@@ -3373,6 +3559,8 @@ func (s *Store) updateReplicationGauges(ctx context.Context) error {
 		nanos := timeutil.Since(minMaxClosedTS.GoTime()).Nanoseconds()
 		s.metrics.ClosedTimestampMaxBehindNanos.Update(nanos)
 	}
+	s.cfg.KVFlowRangeControllerMetrics.SendQueue.SizeCount.Update(kvflowSendQueueSizeCount)
+	s.cfg.KVFlowRangeControllerMetrics.SendQueue.SizeBytes.Update(kvflowSendQueueSizeBytes)
 
 	if err := s.metrics.RecentReplicaCPUNanosPerSecond.Rotate(); err != nil {
 		return err
@@ -3397,12 +3585,13 @@ func (s *Store) checkpointSpans(desc *roachpb.RangeDescriptor) []roachpb.Span {
 	_ = s.TODOEngine() // this method needs to return two sets of spans, one for each engine
 	// Find immediate left and right neighbours by range ID.
 	var prevID, nextID roachpb.RangeID
-	s.mu.replicasByRangeID.Range(func(r *Replica) {
-		if id, our := r.RangeID, desc.RangeID; id < our && id > prevID {
+	s.mu.replicasByRangeID.Range(func(rangeID roachpb.RangeID, _ *Replica) bool {
+		if id, our := rangeID, desc.RangeID; id < our && id > prevID {
 			prevID = id
 		} else if id > our && (nextID == 0 || id < nextID) {
 			nextID = id
 		}
+		return true
 	})
 	if prevID == 0 {
 		prevID = desc.RangeID
@@ -3473,6 +3662,13 @@ func (s *Store) checkpoint(tag string, spans []roachpb.Span) (string, error) {
 // computeMetrics is a common metric computation that is used by
 // ComputeMetricsPeriodically and ComputeMetrics to compute metrics.
 func (s *Store) computeMetrics(ctx context.Context) (m storage.Metrics, err error) {
+	s.metricsMu.Lock()
+	defer s.metricsMu.Unlock()
+	return s.computeMetricsLocked(ctx)
+}
+
+// computeMetricsLocked should only be used while holding store.metricsMu.
+func (s *Store) computeMetricsLocked(ctx context.Context) (m storage.Metrics, err error) {
 	ctx = s.AnnotateCtx(ctx)
 	if err = s.updateCapacityGauges(ctx); err != nil {
 		return m, err
@@ -3516,8 +3712,18 @@ func (s *Store) ComputeMetricsPeriodically(
 
 	// Get disk stats for the disk associated with this store.
 	if s.diskMonitor != nil {
+		// IncrementalStats returns the stats captured in the tracer since the
+		// last call to incremental stats. These are useful for computing
+		// functions like max over an interval. We could use rollingStats.Latest()
+		// for cumulative stats, but there is no guarantee that slowness in
+		// capturing traces or other timing issues will not cause rollingStats to
+		// be empty, in which case rollingStats.Latest() will be empty. For the
+		// real cumulative stats we use Monitor.CumulativeStats which is robust to
+		// such slowness (since it will return the latest value even if it is the
+		// same as the last call).
 		rollingStats := s.diskMonitor.IncrementalStats()
-		s.metrics.updateDiskStats(rollingStats)
+		cumulativeStats, cumulativeStatsErr := s.diskMonitor.CumulativeStats()
+		s.metrics.updateDiskStats(ctx, rollingStats, cumulativeStats, cumulativeStatsErr)
 	}
 
 	wt := m.Flush.WriteThroughput
@@ -3587,7 +3793,7 @@ func (s *Store) ComputeMetricsPeriodically(
 		e := m.AsStoreStatsEvent()
 		e.NodeId = int32(s.NodeID())
 		e.StoreId = int32(s.StoreID())
-		log.StructuredEvent(ctx, &e)
+		log.StructuredEvent(ctx, severity.INFO, &e)
 	}
 	return m, nil
 }
@@ -3782,7 +3988,7 @@ func (s *Store) AllocatorCheckRange(
 // server.decommissionMonitor and an admin debug endpoint.
 func (s *Store) Enqueue(
 	ctx context.Context, queueName string, repl *Replica, skipShouldQueue bool, async bool,
-) (recording tracingpb.Recording, processError error, enqueueError error) {
+) (processError error, enqueueError error) {
 	ctx = repl.AnnotateCtx(ctx)
 
 	if fn := s.TestingKnobs().EnqueueReplicaInterceptor; fn != nil {
@@ -3793,7 +3999,7 @@ func (s *Store) Enqueue(
 	// normal queue scheduling, but we error here to signal to the user that the
 	// operation was unsuccessful.
 	if !repl.IsInitialized() {
-		return nil, nil, errors.Errorf("not enqueueing uninitialized replica %s", repl)
+		return nil, errors.Errorf("not enqueueing uninitialized replica %s", repl)
 	}
 
 	var queue replicaQueue
@@ -3807,12 +4013,12 @@ func (s *Store) Enqueue(
 		}
 	}
 	if queue == nil {
-		return nil, nil, errors.Errorf("unknown queue type %q", queueName)
+		return nil, errors.Errorf("unknown queue type %q", queueName)
 	}
 
 	confReader, err := s.GetConfReader(ctx)
 	if err != nil {
-		return nil, nil, errors.Wrap(err,
+		return nil, errors.Wrap(err,
 			"unable to retrieve conf reader, cannot run queue; make sure "+
 				"the cluster has been initialized and all nodes connected to it")
 	}
@@ -3821,7 +4027,7 @@ func (s *Store) Enqueue(
 	// take the lease here or bail out early if a different replica has it.
 	if needsLease {
 		if _, pErr := repl.redirectOnOrAcquireLease(ctx); pErr != nil {
-			return nil, nil, errors.Wrapf(pErr.GoError(), "replica %v does not have the range lease", repl)
+			return nil, errors.Wrapf(pErr.GoError(), "replica %v does not have the range lease", repl)
 		}
 	}
 
@@ -3840,26 +4046,22 @@ func (s *Store) Enqueue(
 		} else {
 			queue.MaybeAddAsync(ctx, repl, repl.Clock().NowAsClockTimestamp())
 		}
-		return nil, nil, nil
+		return nil, nil
 	}
-
-	ctx, collectAndFinish := tracing.ContextWithRecordingSpan(
-		ctx, s.cfg.AmbientCtx.Tracer, fmt.Sprintf("manual %s queue run", queueName))
-	defer collectAndFinish()
 
 	if !skipShouldQueue {
 		log.Eventf(ctx, "running %s.shouldQueue", queueName)
 		shouldQueue, priority := qImpl.shouldQueue(ctx, s.cfg.Clock.NowAsClockTimestamp(), repl, confReader)
 		log.Eventf(ctx, "shouldQueue=%v, priority=%f", shouldQueue, priority)
 		if !shouldQueue {
-			return collectAndFinish(), nil, nil
+			return nil, nil
 		}
 	}
 
 	log.Eventf(ctx, "running %s.process", queueName)
 	processed, processErr := qImpl.process(ctx, repl, confReader)
 	log.Eventf(ctx, "processed: %t (err: %v)", processed, processErr)
-	return collectAndFinish(), processErr, nil
+	return processErr, nil
 }
 
 // PurgeOutdatedReplicas purges all replicas with a version less than the one
@@ -3959,6 +4161,12 @@ func (s *Store) unregisterLeaseholderByID(ctx context.Context, rangeID roachpb.R
 	if s.ctSender != nil {
 		s.ctSender.UnregisterLeaseholder(ctx, s.StoreID(), rangeID)
 	}
+}
+
+// TestingStoreLivenessSupportManager returns the store's store liveness
+// support manager for testing purposes.
+func (s *Store) TestingStoreLivenessSupportManager() *storeliveness.SupportManager {
+	return s.storeLiveness.(*storeliveness.SupportManager)
 }
 
 // getRootMemoryMonitorForKV returns a BytesMonitor to use for KV memory

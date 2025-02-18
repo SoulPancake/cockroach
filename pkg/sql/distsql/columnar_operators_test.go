@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package distsql
 
@@ -260,7 +255,7 @@ func TestAggregatorAgainstProcessor(t *testing.T) {
 								// There is a special case for some functions when at
 								// least one argument is a tuple or an array of
 								// tuples.
-								// Such cases pass GetAggregateInfo check below,
+								// Such cases pass GetAggregateOutputType check below,
 								// but they are actually invalid, and during normal
 								// execution it is caught during type-checking.
 								// However, we don't want to do fully-fledged type
@@ -288,7 +283,7 @@ func TestAggregatorAgainstProcessor(t *testing.T) {
 								for _, typ := range aggFnInputTypes {
 									hasJSONColumn = hasJSONColumn || typ.Family() == types.JsonFamily
 								}
-								if _, outputType, err := execagg.GetAggregateInfo(aggFn, aggFnInputTypes...); err == nil {
+								if outputType, err := execagg.GetAggregateOutputType(aggFn, aggFnInputTypes); err == nil {
 									outputTypes[i] = outputType
 									break
 								}
@@ -334,7 +329,7 @@ func TestAggregatorAgainstProcessor(t *testing.T) {
 						}
 						if hashAgg {
 							// Let's shuffle the rows for the hash aggregator.
-							rand.Shuffle(nRows, func(i, j int) {
+							rng.Shuffle(nRows, func(i, j int) {
 								rows[i], rows[j] = rows[j], rows[i]
 							})
 						} else {

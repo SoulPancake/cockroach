@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package mixedversion
 
@@ -21,8 +16,10 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/clusterupgrade"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/task"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
+	"github.com/cockroachdb/cockroach/pkg/testutils/release"
 	"github.com/cockroachdb/errors"
 )
 
@@ -62,19 +59,25 @@ type (
 		testContext Context
 
 		ctx context.Context
-		// bgCount keeps track of the number of background tasks started
-		// with `helper.Background()`. The counter is used to generate
-		// unique log file names.
-		bgCount    int64
+		// taskCount keeps track of the number of tasks started with `helper.Go()`.
+		// The counter is used to generate unique log file names.
+		taskCount  int64
 		runner     *testRunner
 		stepLogger *logger.Logger
 	}
 )
 
+// Connect returns a connection pool to the given node. Note that
+// these connection pools are managed by the framework and therefore
+// *must not* be closed. They are closed automatically when the test
+// finishes.
 func (s *Service) Connect(node int) *gosql.DB {
 	return s.connFunc(node)
 }
 
+// RandomDB returns a connection pool to a random node in the
+// cluster. Do *not* call `Close` on the pool returned (see comment on
+// `Connect` function).
 func (s *Service) RandomDB(rng *rand.Rand) (int, *gosql.DB) {
 	node := s.Descriptor.Nodes.SeededRandNode(rng)[0]
 	return node, s.Connect(node)
@@ -157,6 +160,14 @@ func (s *Service) ClusterVersionAtLeast(rng *rand.Rand, v string) (bool, error) 
 	return currentVersion.AtLeast(minVersion), nil
 }
 
+func (h *Helper) IsMultitenant() bool {
+	return h.Tenant != nil
+}
+
+func (h *Helper) DeploymentMode() DeploymentMode {
+	return h.runner.plan.deploymentMode
+}
+
 func (h *Helper) DefaultService() *Service {
 	if h.Tenant != nil {
 		return h.Tenant
@@ -213,40 +224,63 @@ func (h *Helper) ExecWithGateway(
 	return h.DefaultService().ExecWithGateway(rng, nodes, query, args...)
 }
 
-// Background allows test authors to create functions that run in the
-// background in mixed-version hooks.
-func (h *Helper) Background(
-	name string, fn func(context.Context, *logger.Logger) error,
-) context.CancelFunc {
-	return h.runner.background.Start(name, func(ctx context.Context) error {
+// defaultTaskOptions returns the default options that are passed to all tasks
+// started by the helper.
+func (h *Helper) defaultTaskOptions() []task.Option {
+	loggerFuncOpt := task.LoggerFunc(func(name string) (*logger.Logger, error) {
 		bgLogger, err := h.loggerFor(name)
 		if err != nil {
-			return fmt.Errorf("failed to create logger for background function %q: %w", name, err)
+			return nil, fmt.Errorf("failed to create logger for task function %q: %w", name, err)
 		}
-
-		err = panicAsError(bgLogger, func() error { return fn(ctx, bgLogger) })
+		return bgLogger, nil
+	})
+	panicOpt := task.PanicHandler(func(_ context.Context, name string, l *logger.Logger, r interface{}) error {
+		return logPanicToErr(l, r)
+	})
+	errHandlerOpt := task.ErrorHandler(func(ctx context.Context, name string, l *logger.Logger, err error) error {
 		if err != nil {
-			if isContextCanceled(ctx) {
+			if task.IsContextCanceled(ctx) {
 				return err
 			}
-
-			err := errors.Wrapf(err, "error in background function %s", name)
-			return h.runner.testFailure(err, bgLogger, nil)
+			errWrapped := errors.Wrapf(err, "error in task function %s", name)
+			return h.runner.testFailure(ctx, errWrapped, l, nil)
 		}
-
 		return nil
 	})
+	return []task.Option{loggerFuncOpt, panicOpt, errHandlerOpt}
 }
 
-// BackgroundCommand has the same semantics of `Background()`; the
-// command passed will run and the test will fail if the command is
-// not successful.
-func (h *Helper) BackgroundCommand(cmd string, nodes option.NodeListOption) context.CancelFunc {
+// GoWithCancel implements the Tasker interface.
+func (h *Helper) GoWithCancel(fn task.Func, opts ...task.Option) context.CancelFunc {
+	return h.runner.background.GoWithCancel(
+		fn, task.OptionList(h.defaultTaskOptions()...), task.OptionList(opts...),
+	)
+}
+
+// Go implements the Tasker interface.
+func (h *Helper) Go(fn task.Func, opts ...task.Option) {
+	h.GoWithCancel(fn, opts...)
+}
+
+// NewGroup implements the Group interface.
+func (h *Helper) NewGroup(opts ...task.Option) task.Group {
+	return h.runner.background.NewGroup(task.OptionList(h.defaultTaskOptions()...), task.OptionList(opts...))
+}
+
+// NewErrorGroup implements the Group interface.
+func (h *Helper) NewErrorGroup(opts ...task.Option) task.ErrorGroup {
+	return h.runner.background.NewErrorGroup(task.OptionList(h.defaultTaskOptions()...), task.OptionList(opts...))
+}
+
+// GoCommand has the same semantics of `GoWithCancel()`; the command passed will
+// run and the test will fail if the command is not successful. The task name is
+// derived from the command passed.
+func (h *Helper) GoCommand(cmd string, nodes option.NodeListOption) context.CancelFunc {
 	desc := fmt.Sprintf("run command: %q", cmd)
-	return h.Background(desc, func(ctx context.Context, l *logger.Logger) error {
-		l.Printf("running command `%s` on nodes %v in the background", cmd, nodes)
+	return h.GoWithCancel(func(ctx context.Context, l *logger.Logger) error {
+		l.Printf("running command `%s` on nodes %v in a task", cmd, nodes)
 		return h.runner.cluster.RunE(ctx, option.WithNodes(nodes), cmd)
-	})
+	}, task.Name(desc))
 }
 
 // ExpectDeath alerts the testing infrastructure that a node is
@@ -283,18 +317,31 @@ func (h *Helper) ClusterVersionAtLeast(rng *rand.Rand, v string) (bool, error) {
 	return h.DefaultService().ClusterVersionAtLeast(rng, v)
 }
 
-// loggerFor creates a logger instance to be used by background
-// functions (created by calling `Background` on the helper
-// instance). It is similar to the logger instances created for
-// mixed-version steps, but with the `background_` prefix.
+// loggerFor creates a logger instance to be used by task functions (created by
+// calling `Go` on the helper instance). It is similar to the logger instances
+// created for mixed-version steps, but with the `task_` prefix.
 func (h *Helper) loggerFor(name string) (*logger.Logger, error) {
-	atomic.AddInt64(&h.bgCount, 1)
+	atomic.AddInt64(&h.taskCount, 1)
 
 	fileName := invalidChars.ReplaceAllString(strings.ToLower(name), "")
-	fileName = fmt.Sprintf("background_%s_%d", fileName, h.bgCount)
+	fileName = fmt.Sprintf("task_%s_%d", fileName, h.taskCount)
 	fileName = path.Join(logPrefix, fileName)
 
 	return prefixedLogger(h.runner.logger, fileName)
+}
+
+// IsSkipVersionUpgrade returns if the current upgrade is a skip
+// version upgrade. This can be used to gate steps that are
+// incompatible with version skipping, i.e. the schema change workload.
+//
+// N.B. Calling this in a startup step may lead to unexpected results,
+// as there is no upgrade going on.
+func (h *Helper) IsSkipVersionUpgrade() bool {
+	// N.B.: it is safe to ignore the error here as we should always be
+	// able to determine the number of releases between two binaries
+	// used when upgrading: we keep release data starting from 21.2.
+	numReleases, _ := release.MajorReleasesBetween(&h.testContext.FromVersion().Version, &h.testContext.ToVersion().Version)
+	return numReleases > 1
 }
 
 // logSQL standardizes the logging when a SQL statement or query is

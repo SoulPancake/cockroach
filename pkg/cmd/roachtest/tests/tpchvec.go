@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -27,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachprod"
@@ -519,14 +515,12 @@ func getTPCHVecWorkloadCmd(numRunsPerQuery, queryNum int, sharedProcessMT bool) 
 	// Note that we use --default-vectorize flag which tells tpch workload to
 	// use the current cluster setting sql.defaults.vectorize which must have
 	// been set correctly in preQueryRunHook.
-	return fmt.Sprintf("./workload run tpch --concurrency=1 --db=tpch "+
+	return fmt.Sprintf("./cockroach workload run tpch --concurrency=1 --db=tpch "+
 		"--default-vectorize --max-ops=%d --queries=%d %s --enable-checks=true",
 		numRunsPerQuery, queryNum, url)
 }
 
 func runTPCHVec(ctx context.Context, t test.Test, c cluster.Cluster, testCase tpchVecTestCase) {
-	firstNode := c.Node(1)
-	c.Put(ctx, t.DeprecatedWorkload(), "./workload", firstNode)
 	c.Start(ctx, t.L(), option.NewStartOpts(option.NoBackupSchedule), install.MakeClusterSettings())
 
 	var conn *gosql.DB
@@ -557,7 +551,7 @@ func runTPCHVec(ctx context.Context, t test.Test, c cluster.Cluster, testCase tp
 	}
 	scatterTables(t, conn, tpchTables)
 	t.Status("waiting for full replication")
-	err := WaitFor3XReplication(ctx, t, t.L(), conn)
+	err := roachtestutil.WaitFor3XReplication(ctx, t.L(), conn)
 	require.NoError(t, err)
 
 	runConfig := testCase.getRunConfig()

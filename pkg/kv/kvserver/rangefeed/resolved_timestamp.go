@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rangefeed
 
@@ -15,7 +10,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/isolation"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -170,14 +164,10 @@ func (rts *resolvedTimestamp) consumeLogicalOp(
 		return rts.intentQ.UpdateTS(t.TxnID, t.Timestamp)
 
 	case *enginepb.MVCCCommitIntentOp:
-		// This assertion can be violated in mixed-version clusters, so make it
-		// fatal only in 24.1, gated by an envvar just in case. See:
-		// https://github.com/cockroachdb/cockroach/issues/104309
-		//
 		// TODO(erikgrinaker): make this unconditionally fatal.
-		fatal := rts.settings.Version.IsActive(ctx, clusterversion.V24_1Start) &&
-			!DisableCommitIntentTimestampAssertion
+		fatal := !DisableCommitIntentTimestampAssertion
 		rts.assertOpAboveRTS(ctx, op, t.Timestamp, fatal)
+
 		return rts.intentQ.DecrRef(t.TxnID, t.Timestamp)
 
 	case *enginepb.MVCCAbortIntentOp:
@@ -280,7 +270,7 @@ func (rts *resolvedTimestamp) recompute(ctx context.Context) bool {
 func (rts *resolvedTimestamp) assertNoChange(ctx context.Context) {
 	before := rts.resolvedTS
 	changed := rts.recompute(ctx)
-	if changed || !before.EqOrdering(rts.resolvedTS) {
+	if changed || before != rts.resolvedTS {
 		log.Fatalf(ctx, "unexpected resolved timestamp change on recomputation, "+
 			"was %s, recomputed as %s", before, rts.resolvedTS)
 	}
@@ -374,7 +364,7 @@ func (h unresolvedTxnHeap) Less(i, j int) bool {
 	// container/heap constructs a min-heap by default, so prioritize the txn
 	// with the smaller timestamp. Break ties by comparing IDs to establish a
 	// total order.
-	if h[i].timestamp.EqOrdering(h[j].timestamp) {
+	if h[i].timestamp == h[j].timestamp {
 		return bytes.Compare(h[i].txnID.GetBytes(), h[j].txnID.GetBytes()) < 0
 	}
 	return h[i].timestamp.Less(h[j].timestamp)

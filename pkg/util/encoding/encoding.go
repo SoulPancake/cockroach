@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package encoding exposes some utilities for encoding data as bytes.
 package encoding
@@ -898,6 +893,16 @@ func prettyPrintInvertedIndexKey(b []byte) (string, []byte, error) {
 			outBytes = outBytes + strconv.Quote(UnsafeConvertBytesToString(tempB[:i])) + "/"
 		case escapedJSONArray:
 			outBytes = outBytes + "Arr/"
+			if i+2 >= len(tempB) {
+				// The key ends in an escaped JSON array byte, which is used in
+				// spans to scan over non-empty arrays.
+				return outBytes, nil, nil
+			}
+		case escaped00:
+			if i+2 >= len(tempB) {
+				// The key ends in an escaped NULL byte.
+				return outBytes, nil, nil
+			}
 		default:
 			return "", nil, errors.Errorf("malformed escape in buffer %#x", b)
 
@@ -3157,6 +3162,9 @@ func DecodeUUIDValue(b []byte) (remaining []byte, u uuid.UUID, err error) {
 
 // DecodeUntaggedUUIDValue decodes a value encoded by EncodeUntaggedUUIDValue.
 func DecodeUntaggedUUIDValue(b []byte) (remaining []byte, u uuid.UUID, err error) {
+	if len(b) < uuidValueEncodedLength {
+		return b, uuid.UUID{}, errors.Errorf("invalid uuid length of %d", len(b))
+	}
 	u, err = uuid.FromBytes(b[:uuidValueEncodedLength])
 	if err != nil {
 		return b, uuid.UUID{}, err
@@ -3297,6 +3305,26 @@ func isValidAndPrintableRune(r rune) bool {
 	return r != utf8.RuneError && unicode.IsPrint(r)
 }
 
+// PrettyPrintJSONValueEncoded returns a string representation of the encoded
+// JSON object. It is injected from util/json to avoid an import cycle.
+var PrettyPrintJSONValueEncoded func([]byte) (string, error)
+
+var prettyPrintJSONValueEncodedNilErr = errors.New("PrettyPrintJSONValueEncoded is not injected")
+
+// PrettyPrintArrayValueEncoded returns a string representation of the encoded
+// array object if possible. It is injected from rowenc/valueside to avoid an
+// import cycle.
+var PrettyPrintArrayValueEncoded func([]byte) (string, error)
+
+var prettyPrintArrayValueEncodedNilErr = errors.New("PrettyPrintArrayValueEncoded is not injected")
+
+// PrettyPrintTupleValueEncoded returns a string representation of the encoded
+// tuple object if possible. It is injected from rowenc/valueside to avoid an
+// import cycle.
+var PrettyPrintTupleValueEncoded func([]byte) ([]byte, string, error)
+
+var prettyPrintTupleValueEncodedNilErr = errors.New("PrettyPrintTupleValueEncoded is not injected")
+
 // PrettyPrintValueEncoded returns a string representation of the first
 // decodable value in the provided byte slice, along with the remaining byte
 // slice after decoding.
@@ -3392,6 +3420,40 @@ func PrettyPrintValueEncoded(b []byte) ([]byte, string, error) {
 			return b, "", err
 		}
 		return b, ipAddr.String(), nil
+	case JSON:
+		b = b[dataOffset:]
+		var data []byte
+		b, data, err = DecodeUntaggedBytesValue(b)
+		if err != nil {
+			return b, "", err
+		}
+		if PrettyPrintJSONValueEncoded == nil {
+			return b, "", prettyPrintJSONValueEncodedNilErr
+		}
+		var s string
+		s, err = PrettyPrintJSONValueEncoded(data)
+		return b, s, err
+	case Array:
+		b = b[dataOffset:]
+		var data []byte
+		b, data, err = DecodeUntaggedBytesValue(b)
+		if err != nil {
+			return b, "", err
+		}
+		if PrettyPrintArrayValueEncoded == nil {
+			return b, "", prettyPrintArrayValueEncodedNilErr
+		}
+		var s string
+		s, err = PrettyPrintArrayValueEncoded(data)
+		return b, s, err
+	case Tuple:
+		b = b[dataOffset:]
+		if PrettyPrintTupleValueEncoded == nil {
+			return b, "", prettyPrintTupleValueEncodedNilErr
+		}
+		var s string
+		b, s, err = PrettyPrintTupleValueEncoded(b)
+		return b, s, err
 	default:
 		return b, "", errors.Errorf("unknown type %s", typ)
 	}
@@ -3743,4 +3805,20 @@ func BytesPrevish(b []byte, length int) []byte {
 	buf[bLen-1]--
 	copy(buf[bLen:], bytes.Repeat([]byte{0xff}, length-bLen))
 	return buf
+}
+
+// unsafeWrapper is implementation of SafeFormatter. This is used to mark
+// arguments as unsafe for redaction. This would make sure that redact.Unsafe() is implementing SafeFormatter interface
+// without affecting invocations.
+// TODO(aa-joshi): This is a temporary solution to mark arguments as unsafe. We should move/update this into cockroachdb/redact package.
+type unsafeWrapper struct {
+	a any
+}
+
+func (uw unsafeWrapper) SafeFormat(w redact.SafePrinter, _ rune) {
+	w.Print(redact.Unsafe(uw.a))
+}
+
+func Unsafe(args any) any {
+	return unsafeWrapper{a: args}
 }

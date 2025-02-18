@@ -1,20 +1,8 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import map from "lodash/map";
-import take from "lodash/take";
-import moment from "moment-timezone";
-import React, { useContext } from "react";
-import { Helmet } from "react-helmet";
-import { Link, RouteComponentProps, withRouter } from "react-router-dom";
-import { connect } from "react-redux";
 import {
   Loading,
   SortSetting,
@@ -25,6 +13,13 @@ import {
   WithTimezone,
 } from "@cockroachlabs/cluster-ui";
 import { InlineAlert } from "@cockroachlabs/ui-components";
+import map from "lodash/map";
+import take from "lodash/take";
+import moment from "moment-timezone";
+import React, { useContext } from "react";
+import { Helmet } from "react-helmet";
+import { connect } from "react-redux";
+import { Link, RouteComponentProps, withRouter } from "react-router-dom";
 
 import { refreshEvents } from "src/redux/apiReducers";
 import {

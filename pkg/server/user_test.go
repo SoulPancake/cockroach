@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -64,7 +59,11 @@ func TestValidRoles(t *testing.T) {
 			extraInfo = " '3000-01-01'"
 		}
 		_, err = sqlDB.Exec(fmt.Sprintf("ALTER USER %s %s%s", fooUser, name, extraInfo))
-		require.NoError(t, err)
+		if err != nil {
+			// If there is an error, we only allow the 'unimplemented' error
+			require.Contains(t, err.Error(), "unimplemented:")
+			continue
+		}
 
 		hasRole, err = privChecker.HasRoleOption(ctx, fooUser, roleoption.ByName[name])
 		require.NoError(t, err)

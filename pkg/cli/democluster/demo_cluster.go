@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package democluster
 
@@ -109,7 +104,7 @@ const maxNodeInitTime = 60 * time.Second
 
 // secondaryTenantID is the ID of the secondary tenant to use when
 // --multitenant=true.
-const secondaryTenantID = 2
+const secondaryTenantID = 3
 
 // demoOrg is the organization to use to request an evaluation
 // license.
@@ -929,7 +924,8 @@ func (demoCtx *Context) testServerArgsForTransientCluster(
 		EnableDemoLoginEndpoint: true,
 		// Demo clusters by default will create their own tenants, so we
 		// don't need to create them here.
-		DefaultTestTenant: base.TODOTestTenantDisabled,
+		DefaultTestTenant: base.TestControlsTenantsExplicitly,
+		DefaultTenantName: roachpb.TenantName(demoTenantName),
 
 		Knobs: base.TestingKnobs{
 			Server: &server.TestingKnobs{
@@ -1486,6 +1482,7 @@ func (c *transientCluster) generateCerts(ctx context.Context, certsDir string) (
 			true, /* overwrite */
 			username.RootUserName(),
 			nil,  /* tenantIDs - this makes it valid for all tenants */
+			nil,  /* tenantNames - this makes it valid for all tenants */
 			true, /* generatePKCS8Key */
 		); err != nil {
 			return err
@@ -1502,6 +1499,7 @@ func (c *transientCluster) generateCerts(ctx context.Context, certsDir string) (
 			true, /* overwrite */
 			demoUser,
 			nil,  /* tenantIDs - this makes it valid for all tenants */
+			nil,  /* tenantNames - this makes it valid for all tenants */
 			true, /* generatePKCS8Key */
 		); err != nil {
 			return err

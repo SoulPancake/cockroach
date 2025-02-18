@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import Long from "long";
 import moment from "moment-timezone";
@@ -128,19 +123,11 @@ export function getSchedule(id: Long): Promise<Schedule> {
     const txnResults = result.execution.txn_results;
     if (txnResults.length === 0 || !txnResults[0].rows) {
       // No data.
-      throw new RequestError(
-        "Bad Request",
-        400,
-        "No schedule found with this ID.",
-      );
+      throw new RequestError(400, "No schedule found with this ID.");
     }
 
     if (txnResults[0].rows.length > 1) {
-      throw new RequestError(
-        "Internal Server Error",
-        500,
-        "Multiple schedules found for ID.",
-      );
+      throw new RequestError(500, "Multiple schedules found for ID.");
     }
     const row = txnResults[0].rows[0];
     return {

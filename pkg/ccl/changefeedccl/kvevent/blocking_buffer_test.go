@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvevent_test
 
@@ -71,7 +68,7 @@ func makeRangeFeedEvent(rnd *rand.Rand, valSize int, prevValSize int) *kvpb.Rang
 
 func getBoundAccountWithBudget(budget int64) (account mon.BoundAccount, cleanup func()) {
 	mm := mon.NewMonitor(mon.Options{
-		Name:      "test-mm",
+		Name:      mon.MakeMonitorName("test-mm"),
 		Limit:     budget,
 		Increment: 128, /* small allocation increment */
 		Settings:  cluster.MakeTestingClusterSettings(),
@@ -84,7 +81,7 @@ func TestBlockingBuffer(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	metrics := kvevent.MakeMetrics(time.Minute)
+	metrics := kvevent.MakeMetrics(time.Minute).AggregatorBufferMetricsWithCompat
 	ba, release := getBoundAccountWithBudget(4096)
 	defer release()
 
@@ -185,7 +182,7 @@ func TestBlockingBufferNotifiesConsumerWhenOutOfMemory(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	metrics := kvevent.MakeMetrics(time.Minute)
+	metrics := kvevent.MakeMetrics(time.Minute).AggregatorBufferMetricsWithCompat
 	ba, release := getBoundAccountWithBudget(4096)
 	defer release()
 

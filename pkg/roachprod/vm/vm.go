@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package vm
 
@@ -47,20 +42,13 @@ const (
 	ArchAMD64   = CPUArch("amd64")
 	ArchFIPS    = CPUArch("fips")
 	ArchUnknown = CPUArch("unknown")
-
-	// InitializedFile is the base name of the initialization paths defined below.
-	InitializedFile = ".roachprod-initialized"
-	// OSInitializedFile is a marker file that is created on a VM to indicate
-	// that it has been initialized at least once by the VM start-up script. This
-	// is used to avoid re-initializing a VM that has been stopped and restarted.
-	OSInitializedFile = "/" + InitializedFile
-	// DisksInitializedFile is a marker file that is created on a VM to indicate
-	// that the disks have been initialized by the VM start-up script. This is
-	// separate from OSInitializedFile, because the disks may be ephemeral and
-	// need to be re-initialized on every start. The presence of this file
-	// automatically implies the presence of OSInitializedFile.
-	DisksInitializedFile = "/mnt/data1/" + InitializedFile
 )
+
+// UnimplementedError is returned when a method is not implemented by a
+// provider. An error is returned instead of panicking to isolate failures to a
+// single test (in the context of `roachtest`), otherwise the entire test run
+// would fail.
+var UnimplementedError = errors.New("unimplemented")
 
 type CPUArch string
 
@@ -349,13 +337,6 @@ type ProviderOpts interface {
 	// ConfigureCreateFlags configures a FlagSet with any options relevant to the
 	// `create` command.
 	ConfigureCreateFlags(*pflag.FlagSet)
-	// ConfigureClusterFlags configures a FlagSet with any options relevant to
-	// cluster manipulation commands (`create`, `destroy`, `list`, `sync` and
-	// `gc`).
-	ConfigureClusterFlags(*pflag.FlagSet, MultipleProjectsOption)
-	// ConfigureClusterCleanupFlags configures a FlagSet with any options relevant to
-	// commands (`gc`)
-	ConfigureClusterCleanupFlags(*pflag.FlagSet)
 }
 
 // VolumeSnapshot is an abstract representation of a specific volume snapshot.
@@ -435,6 +416,7 @@ type VolumeCreateOpts struct {
 }
 
 type ListOptions struct {
+	Username             string // if set, <username>-.* clusters are detected as 'mine'
 	IncludeVolumes       bool
 	IncludeEmptyClusters bool
 	ComputeEstimatedCost bool
@@ -446,6 +428,15 @@ type PreemptedVM struct {
 	PreemptedAt time.Time
 }
 
+// CreatePreemptedVMs returns a list of PreemptedVM created from given list of vmNames
+func CreatePreemptedVMs(vmNames []string) []PreemptedVM {
+	preemptedVMs := make([]PreemptedVM, len(vmNames))
+	for i, name := range vmNames {
+		preemptedVMs[i] = PreemptedVM{Name: name}
+	}
+	return preemptedVMs
+}
+
 // ServiceAddress stores the IP and port of a service.
 type ServiceAddress struct {
 	IP   string
@@ -454,14 +445,22 @@ type ServiceAddress struct {
 
 // A Provider is a source of virtual machines running on some hosting platform.
 type Provider interface {
+	// ConfigureProviderFlags is used to specify flags that apply to the provider
+	// instance and should be used for all clusters managed by the provider.
+	ConfigureProviderFlags(*pflag.FlagSet, MultipleProjectsOption)
+
+	// ConfigureClusterCleanupFlags configures a FlagSet with any options
+	// relevant to commands (`gc`)
+	ConfigureClusterCleanupFlags(*pflag.FlagSet)
+
 	CreateProviderOpts() ProviderOpts
 	CleanSSH(l *logger.Logger) error
 
 	// ConfigSSH takes a list of zones and configures SSH for machines in those
 	// zones for the given provider.
 	ConfigSSH(l *logger.Logger, zones []string) error
-	Create(l *logger.Logger, names []string, opts CreateOpts, providerOpts ProviderOpts) error
-	Grow(l *logger.Logger, vms List, clusterName string, names []string) error
+	Create(l *logger.Logger, names []string, opts CreateOpts, providerOpts ProviderOpts) (List, error)
+	Grow(l *logger.Logger, vms List, clusterName string, names []string) (List, error)
 	Shrink(l *logger.Logger, vmsToRemove List, clusterName string) error
 	Reset(l *logger.Logger, vms List) error
 	Delete(l *logger.Logger, vms List) error
@@ -469,10 +468,11 @@ type Provider interface {
 	// Return the account name associated with the provider
 	FindActiveAccount(l *logger.Logger) (string, error)
 	List(l *logger.Logger, opts ListOptions) (List, error)
-	// The name of the Provider, which will also surface in the top-level Providers map.
-
+	// AddLabels adds (or updates) the given labels to the given VMs.
+	// N.B. If a VM contains a label with the same key, its value will be updated.
 	AddLabels(l *logger.Logger, vms List, labels map[string]string) error
 	RemoveLabels(l *logger.Logger, vms List, labels []string) error
+	// The name of the Provider, which will also surface in the top-level Providers map.
 	Name() string
 
 	// Active returns true if the provider is properly installed and capable of
@@ -606,7 +606,9 @@ func FindActiveAccounts(l *logger.Logger) (map[string]string, error) {
 		err := ProvidersSequential(AllProviderNames(), func(p Provider) error {
 			account, err := p.FindActiveAccount(l)
 			if err != nil {
-				return err
+				l.Printf("WARN: provider=%q has no active account", p.Name())
+				//nolint:returnerrcheck
+				return nil
 			}
 			if len(account) > 0 {
 				source[p.Name()] = account
@@ -739,7 +741,7 @@ func DNSSafeName(name string) string {
 	return regexp.MustCompile(`-+`).ReplaceAllString(name, "-")
 }
 
-// SanitizeLabel returns a version of the string that can be used as a label.
+// SanitizeLabel returns a version of the string that can be used as a (resource) label.
 // This takes the lowest common denominator of the label requirements;
 // GCE: "The value can only contain lowercase letters, numeric characters, underscores and dashes.
 // The value can be at most 63 characters long"
@@ -756,4 +758,13 @@ func SanitizeLabel(label string) string {
 	// Remove any leading or trailing hyphens
 	label = strings.Trim(label, "-")
 	return label
+}
+
+// SanitizeLabelValues returns the same set of keys with sanitized values.
+func SanitizeLabelValues(labels map[string]string) map[string]string {
+	sanitized := map[string]string{}
+	for k, v := range labels {
+		sanitized[k] = SanitizeLabel(v)
+	}
+	return sanitized
 }

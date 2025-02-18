@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobs
 
@@ -68,7 +63,7 @@ func TestJobSchedulerReschedulesRunning(t *testing.T) {
 			details := j.ScheduleDetails()
 			details.Wait = wait
 			j.SetScheduleDetails(*details)
-			require.NoError(t, j.SetSchedule("@hourly"))
+			require.NoError(t, j.SetScheduleAndNextRun("@hourly"))
 
 			require.NoError(t,
 				h.cfg.DB.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
@@ -77,9 +72,9 @@ func TestJobSchedulerReschedulesRunning(t *testing.T) {
 
 					// Lets add few fake runs for this schedule, including terminal and
 					// non terminal states.
-					for _, status := range []Status{
-						StatusRunning, StatusFailed, StatusCanceled, StatusSucceeded, StatusPaused} {
-						_ = addFakeJob(t, h, j.ScheduleID(), status, txn)
+					for _, state := range []State{
+						StateRunning, StateFailed, StateCanceled, StateSucceeded, StatePaused} {
+						_ = addFakeJob(t, h, j.ScheduleID(), state, txn)
 					}
 					return nil
 				}))
@@ -125,7 +120,7 @@ func TestJobSchedulerExecutesAfterTerminal(t *testing.T) {
 			// Create job that waits for the previous runs to finish.
 			j := h.newScheduledJob(t, "j", "SELECT 42 AS meaning_of_life;")
 			j.SetScheduleDetails(jobstest.AddDummyScheduleDetails(jobspb.ScheduleDetails{Wait: wait}))
-			require.NoError(t, j.SetSchedule("@hourly"))
+			require.NoError(t, j.SetScheduleAndNextRun("@hourly"))
 
 			require.NoError(t,
 				h.cfg.DB.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
@@ -134,8 +129,8 @@ func TestJobSchedulerExecutesAfterTerminal(t *testing.T) {
 
 					// Let's add few fake runs for this schedule which are in every
 					// terminal state.
-					for _, status := range []Status{StatusFailed, StatusCanceled, StatusSucceeded} {
-						_ = addFakeJob(t, h, j.ScheduleID(), status, txn)
+					for _, state := range []State{StateFailed, StateCanceled, StateSucceeded} {
+						_ = addFakeJob(t, h, j.ScheduleID(), state, txn)
 					}
 					return nil
 				}))
@@ -169,7 +164,7 @@ func TestJobSchedulerExecutesAndSchedulesNextRun(t *testing.T) {
 
 	// Create job that waits for the previous runs to finish.
 	j := h.newScheduledJob(t, "j", "SELECT 42 AS meaning_of_life;")
-	require.NoError(t, j.SetSchedule("@hourly"))
+	require.NoError(t, j.SetScheduleAndNextRun("@hourly"))
 
 	require.NoError(t,
 		h.cfg.DB.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
@@ -254,7 +249,7 @@ func (n *recordScheduleExecutor) NotifyJobTermination(
 	ctx context.Context,
 	txn isql.Txn,
 	jobID jobspb.JobID,
-	jobStatus Status,
+	jobState State,
 	details jobspb.Details,
 	env scheduledjobs.JobSchedulerEnv,
 	schedule *ScheduledJob,
@@ -481,7 +476,7 @@ func (e *returnErrorExecutor) NotifyJobTermination(
 	ctx context.Context,
 	txn isql.Txn,
 	jobID jobspb.JobID,
-	jobStatus Status,
+	jobState State,
 	details jobspb.Details,
 	env scheduledjobs.JobSchedulerEnv,
 	schedule *ScheduledJob,
@@ -563,7 +558,7 @@ func TestJobSchedulerRetriesFailed(t *testing.T) {
 		t.Run(tc.onError.String(), func(t *testing.T) {
 			h.env.SetTime(startTime)
 			schedule.SetScheduleDetails(jobstest.AddDummyScheduleDetails(jobspb.ScheduleDetails{OnError: tc.onError}))
-			require.NoError(t, schedule.SetSchedule("@hourly"))
+			require.NoError(t, schedule.SetScheduleAndNextRun("@hourly"))
 			require.NoError(t, schedules.Update(ctx, schedule))
 
 			h.env.SetTime(execTime)
@@ -655,7 +650,7 @@ func (e *txnConflictExecutor) NotifyJobTermination(
 	ctx context.Context,
 	txn isql.Txn,
 	jobID jobspb.JobID,
-	jobStatus Status,
+	jobStatus State,
 	details jobspb.Details,
 	env scheduledjobs.JobSchedulerEnv,
 	schedule *ScheduledJob,
@@ -771,7 +766,7 @@ func (e *blockUntilCancelledExecutor) NotifyJobTermination(
 	ctx context.Context,
 	txn isql.Txn,
 	jobID jobspb.JobID,
-	jobStatus Status,
+	jobState State,
 	details jobspb.Details,
 	env scheduledjobs.JobSchedulerEnv,
 	schedule *ScheduledJob,

@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -58,6 +53,7 @@ import (
 
 // setClusterSettingNode represents a SET CLUSTER SETTING statement.
 type setClusterSettingNode struct {
+	zeroInputPlanNode
 	name    settings.SettingName
 	st      *cluster.Settings
 	setting settings.NonMaskedSetting
@@ -269,7 +265,7 @@ func (p *planner) getAndValidateTypedClusterSetting(
 				requiredType = types.Float
 			case settings.AnyEnumSetting:
 				// EnumSettings can be set with either strings or integers.
-				requiredType = types.Any
+				requiredType = types.AnyElement
 			case *settings.DurationSetting:
 				requiredType = types.Interval
 			case *settings.DurationSettingWithExplicitUnit:
@@ -782,6 +778,9 @@ func toSettingString(
 		return "", errors.Errorf("cannot use %s %T value for string setting", d.ResolvedType(), d)
 	case *settings.BoolSetting:
 		if b, ok := d.(*tree.DBool); ok {
+			if err := setting.Validate(&st.SV, bool(*b)); err != nil {
+				return "", err
+			}
 			return settings.EncodeBool(bool(*b)), nil
 		}
 		return "", errors.Errorf("cannot use %s %T value for bool setting", d.ResolvedType(), d)
@@ -807,14 +806,14 @@ func toSettingString(
 			if ok {
 				return settings.EncodeInt(v), nil
 			}
-			return "", errors.WithHintf(errors.Errorf("invalid integer value '%d' for enum setting", *i), setting.GetAvailableValuesAsHint())
+			return "", errors.WithHint(errors.Errorf("invalid integer value '%d' for enum setting", *i), setting.GetAvailableValuesAsHint())
 		} else if s, ok := d.(*tree.DString); ok {
 			str := string(*s)
 			v, ok := setting.ParseEnum(str)
 			if ok {
 				return settings.EncodeInt(v), nil
 			}
-			return "", errors.WithHintf(errors.Errorf("invalid string value '%s' for enum setting", str), setting.GetAvailableValuesAsHint())
+			return "", errors.WithHint(errors.Errorf("invalid string value '%s' for enum setting", str), setting.GetAvailableValuesAsHint())
 		}
 		return "", errors.Errorf("cannot use %s %T value for enum setting, must be int or string", d.ResolvedType(), d)
 	case *settings.ByteSizeSetting:

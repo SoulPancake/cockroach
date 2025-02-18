@@ -1,12 +1,7 @@
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -15,8 +10,11 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/operation"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
@@ -25,8 +23,10 @@ import (
 var errOperationFatal = errors.New("o.Fatal() was called")
 
 type operationImpl struct {
-	spec      *registry.OperationSpec
-	cockroach string // path to main cockroach binary on the cluster.
+	workerId        int
+	spec            *registry.OperationSpec
+	clusterSettings install.ClusterSettings
+	startOpts       option.StartOpts
 
 	// l is the logger that the operation will use for its output.
 	l *logger.Logger
@@ -47,10 +47,20 @@ type operationImpl struct {
 
 		status string
 	}
+
+	workLoadCluster *clusterImpl
 }
 
 func (o *operationImpl) ClusterCockroach() string {
-	return o.cockroach
+	return o.clusterSettings.Binary
+}
+
+func (o *operationImpl) ClusterSettings() install.ClusterSettings {
+	return o.clusterSettings
+}
+
+func (o *operationImpl) StartOpts() option.StartOpts {
+	return o.startOpts
 }
 
 func (o *operationImpl) Name() string {
@@ -70,7 +80,7 @@ func (o *operationImpl) Status(args ...interface{}) {
 
 	o.mu.status = fmt.Sprint(args...)
 	if !o.L().Closed() {
-		o.L().PrintfCtxDepth(context.TODO(), 3, "operation status: %s", o.mu.status)
+		o.L().PrintfCtxDepth(context.TODO(), 3, "[%d] operation status: %s", o.workerId, o.mu.status)
 	}
 }
 
@@ -125,7 +135,7 @@ func (o *operationImpl) addFailure(depth int, format string, args ...interface{}
 	msg := reportFailure.Error()
 
 	failureNum := len(o.mu.failures)
-	o.L().Printf("operation failure #%d: %s", failureNum, msg)
+	o.L().Printf("[%d] operation failure #%d: %s", o.workerId, failureNum, msg)
 }
 
 func (o *operationImpl) Failed() bool {
@@ -133,6 +143,14 @@ func (o *operationImpl) Failed() bool {
 	defer o.mu.RUnlock()
 
 	return len(o.mu.failures) > 0
+}
+
+// WorkloadCluster can return nil if o.workLoadCluster is not set.
+func (o *operationImpl) WorkloadCluster() cluster.Cluster {
+	if o.workLoadCluster == nil {
+		return nil
+	}
+	return o.workLoadCluster
 }
 
 var _ operation.Operation = &operationImpl{}

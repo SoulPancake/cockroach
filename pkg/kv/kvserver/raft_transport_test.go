@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver_test
 
@@ -23,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/kvflowdispatch"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/node_rac2"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -164,7 +160,8 @@ func (rttc *raftTransportTestContext) AddNode(nodeID roachpb.NodeID) *kvserver.R
 		nodeID, util.TestAddr, rttc.stopper,
 		kvflowdispatch.NewDummyDispatch(), kvserver.NoopStoresFlowControlIntegration{},
 		kvserver.NoopRaftTransportDisconnectListener{},
-		nil,
+		(*node_rac2.AdmittedPiggybacker)(nil),
+		nil, nil,
 	)
 	rttc.GossipNode(nodeID, addr)
 	return transport
@@ -181,6 +178,8 @@ func (rttc *raftTransportTestContext) AddNodeWithoutGossip(
 	kvflowTokenDispatch kvflowcontrol.DispatchReader,
 	kvflowHandles kvflowcontrol.Handles,
 	disconnectListener kvserver.RaftTransportDisconnectListener,
+	piggybacker node_rac2.PiggybackMsgReader,
+	piggybackedResponseScheduler kvserver.PiggybackedAdmittedResponseScheduler,
 	knobs *kvserver.RaftTransportTestingKnobs,
 ) (*kvserver.RaftTransport, net.Addr) {
 	manual := hlc.NewHybridManualClock()
@@ -198,6 +197,8 @@ func (rttc *raftTransportTestContext) AddNodeWithoutGossip(
 		kvflowTokenDispatch,
 		kvflowHandles,
 		disconnectListener,
+		piggybacker,
+		piggybackedResponseScheduler,
 		knobs,
 	)
 	rttc.transports[nodeID] = transport
@@ -469,7 +470,8 @@ func TestRaftTransportCircuitBreaker(t *testing.T) {
 		kvflowdispatch.NewDummyDispatch(),
 		kvserver.NoopStoresFlowControlIntegration{},
 		kvserver.NoopRaftTransportDisconnectListener{},
-		nil,
+		(*node_rac2.AdmittedPiggybacker)(nil),
+		nil, nil,
 	)
 	serverChannel := rttc.ListenStore(serverReplica.NodeID, serverReplica.StoreID)
 
@@ -583,7 +585,8 @@ func TestReopenConnection(t *testing.T) {
 			kvflowdispatch.NewDummyDispatch(),
 			kvserver.NoopStoresFlowControlIntegration{},
 			kvserver.NoopRaftTransportDisconnectListener{},
-			nil,
+			(*node_rac2.AdmittedPiggybacker)(nil),
+			nil, nil,
 		)
 	rttc.GossipNode(serverReplica.NodeID, serverAddr)
 	rttc.ListenStore(serverReplica.NodeID, serverReplica.StoreID)
@@ -622,7 +625,8 @@ func TestReopenConnection(t *testing.T) {
 		kvflowdispatch.NewDummyDispatch(),
 		kvserver.NoopStoresFlowControlIntegration{},
 		kvserver.NoopRaftTransportDisconnectListener{},
-		nil,
+		(*node_rac2.AdmittedPiggybacker)(nil),
+		nil, nil,
 	)
 	replacementChannel := rttc.ListenStore(replacementReplica.NodeID, replacementReplica.StoreID)
 

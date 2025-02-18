@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package issues
 
@@ -257,6 +252,12 @@ type TemplateData struct {
 	ArtifactsURL string
 	// URL is the link to the failing build.
 	URL string
+	// SideEyeSnapshotURL is the URL for accessing a Side-Eye snapshot associated
+	// with this test failure. Empty if no such snapshot exists.
+	SideEyeSnapshotURL string
+	// SideEyeSnapshotMsg is a message to prepend to the link to the SideEye
+	// snapshot. Empty if SideEyeSnapshotURL is empty.
+	SideEyeSnapshotMsg string
 	// Issues that match this one, except they're on other branches.
 	RelatedIssues []github.Issue
 	// InternalLog contains information about non-critical issues encountered
@@ -272,16 +273,18 @@ func (p *poster) templateData(
 		artifactsURL = p.teamcityArtifactsURL(req.Artifacts).String()
 	}
 	return TemplateData{
-		PostRequest:      req,
-		Parameters:       p.parameters(req.ExtraParams),
-		CondensedMessage: CondensedMessage(req.Message),
-		Branch:           p.Branch,
-		Commit:           p.SHA,
-		ArtifactsURL:     artifactsURL,
-		URL:              p.buildURL().String(),
-		RelatedIssues:    relatedIssues,
-		PackageNameShort: strings.TrimPrefix(req.PackageName, CockroachPkgPrefix),
-		CommitURL:        fmt.Sprintf("https://github.com/%s/%s/commits/%s", p.Org, p.Repo, p.SHA),
+		PostRequest:        req,
+		PackageNameShort:   strings.TrimPrefix(req.PackageName, CockroachPkgPrefix),
+		Parameters:         p.parameters(req.ExtraParams),
+		CondensedMessage:   CondensedMessage(req.Message),
+		Commit:             p.SHA,
+		CommitURL:          fmt.Sprintf("https://github.com/%s/%s/commits/%s", p.Org, p.Repo, p.SHA),
+		Branch:             p.Branch,
+		ArtifactsURL:       artifactsURL,
+		URL:                p.buildURL().String(),
+		SideEyeSnapshotURL: req.SideEyeSnapshotURL,
+		SideEyeSnapshotMsg: req.SideEyeSnapshotMsg,
+		RelatedIssues:      relatedIssues,
 	}
 }
 
@@ -556,6 +559,12 @@ type PostRequest struct {
 	// A path to the test artifacts relative to the artifacts root. If nonempty,
 	// allows the poster formatter to construct a direct URL to this directory.
 	Artifacts string
+	// SideEyeSnapshotURL is the URL for accessing a Side-Eye snapshot associated
+	// with this test failure. Empty if no such snapshot exists.
+	SideEyeSnapshotURL string
+	// SideEyeSnapshotMsg is a message to prepend to the link to the SideEye
+	// snapshot. Empty if SideEyeSnapshotURL is empty.
+	SideEyeSnapshotMsg string
 	// MentionOnCreate is a slice of GitHub handles (@foo, @cockroachdb/some-team, etc)
 	// that should be mentioned in the message when creating a new issue. These are
 	// *not* mentioned when posting to an existing issue.

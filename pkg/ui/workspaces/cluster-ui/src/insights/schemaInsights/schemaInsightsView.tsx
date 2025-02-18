@@ -1,30 +1,27 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React, { useContext, useEffect, useState } from "react";
-import classNames from "classnames/bind";
-import { useHistory } from "react-router-dom";
 import { InlineAlert } from "@cockroachlabs/ui-components";
+import classNames from "classnames/bind";
+import React, { useContext, useEffect, useState } from "react";
+import { useHistory } from "react-router-dom";
 
+import { Anchor } from "src/anchor";
 import sortableTableStyles from "src/sortedtable/sortedtable.module.scss";
 import styles from "src/statementsPage/statementsPage.module.scss";
 import { insights } from "src/util";
-import { Anchor } from "src/anchor";
 
-import { ISortedTablePagination, SortSetting } from "../../sortedtable";
-import { PageConfig, PageConfigItem } from "../../pageConfig";
-import { Loading } from "../../loading";
+import { CockroachCloudContext } from "../../contexts";
 import {
   InsightsSortedTable,
   makeInsightsColumns,
 } from "../../insightsTable/insightsTable";
+import insightTableStyles from "../../insightsTable/insightsTable.module.scss";
+import { Loading } from "../../loading";
+import { PageConfig, PageConfigItem } from "../../pageConfig";
+import { Pagination } from "../../pagination";
 import {
   calculateActiveFilters,
   defaultFilters,
@@ -32,17 +29,15 @@ import {
   getFullFiltersAsStringRecord,
   SelectedFilters,
 } from "../../queryFilter";
-import { queryByName, syncHistory } from "../../util";
+import { getSchemaInsightEventFiltersFromURL } from "../../queryFilter/utils";
+import { Search } from "../../search";
+import { ISortedTablePagination, SortSetting } from "../../sortedtable";
 import { getTableSortFromURL } from "../../sortedtable/getTableSortFromURL";
 import { TableStatistics } from "../../tableStatistics";
-import { InsightRecommendation, SchemaInsightEventFilters } from "../types";
-import { getSchemaInsightEventFiltersFromURL } from "../../queryFilter/utils";
-import { filterSchemaInsights } from "../utils";
-import { Search } from "../../search";
+import { queryByName, syncHistory } from "../../util";
 import { InsightsError } from "../insightsErrorComponent";
-import { Pagination } from "../../pagination";
-import { CockroachCloudContext } from "../../contexts";
-import insightTableStyles from "../../insightsTable/insightsTable.module.scss";
+import { InsightRecommendation, SchemaInsightEventFilters } from "../types";
+import { filterSchemaInsights } from "../utils";
 
 import { EmptySchemaInsightsTablePlaceholder } from "./emptySchemaInsightsTablePlaceholder";
 

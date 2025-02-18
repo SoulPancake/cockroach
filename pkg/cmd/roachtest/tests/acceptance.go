@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -23,11 +18,7 @@ import (
 )
 
 func registerAcceptance(r registry.Registry) {
-	// TODO(renato): delete once #126775 is merged.
-	allExceptLocal := strings.Split(
-		registry.AllExceptLocal.String(),
-		",",
-	)
+	cloudsWithoutServiceRegistration := registry.AllClouds.Remove(registry.CloudsWithServiceRegistration)
 
 	testCases := map[registry.Owner][]struct {
 		name               string
@@ -38,11 +29,20 @@ func registerAcceptance(r registry.Registry) {
 		timeout            time.Duration
 		encryptionSupport  registry.EncryptionSupport
 		defaultLeases      bool
-		requiresLicense    bool
-		nativeLibs         []string
-		incompatibleClouds []string // Already assumes AWS is incompatible.
+		randomized         bool
+		workloadNode       bool
+		incompatibleClouds registry.CloudSet
+		suites             []string
 	}{
-		registry.OwnerReleaseEng: {},
+		// NOTE: acceptance tests are lightweight tests that run as part
+		// of CI. As such, they must:
+		//
+		// 1. finish quickly
+		// 2. be compatible with roachtest local
+		//
+		// If you are adding a test that does not satisfy either of these
+		// properties, please register it separately (not as an acceptance
+		// test).
 		registry.OwnerKV: {
 			{name: "decommission-self", fn: runDecommissionSelf},
 			{name: "event-log", fn: runEventLog},
@@ -75,7 +75,8 @@ func registerAcceptance(r registry.Registry) {
 				fn:            runVersionUpgrade,
 				timeout:       2 * time.Hour, // actually lower in local runs; see `runVersionUpgrade`
 				defaultLeases: true,
-				nativeLibs:    registry.LibGEOS,
+				randomized:    true,
+				suites:        []string{registry.MixedVersion},
 			},
 		},
 		registry.OwnerDisasterRecovery: {
@@ -83,38 +84,30 @@ func registerAcceptance(r registry.Registry) {
 				name:               "c2c",
 				fn:                 runAcceptanceClusterReplication,
 				numNodes:           3,
-				incompatibleClouds: allExceptLocal,
+				incompatibleClouds: cloudsWithoutServiceRegistration,
+				workloadNode:       true,
 			},
 			{
 				name:               "multitenant",
 				fn:                 runAcceptanceMultitenant,
 				timeout:            time.Minute * 20,
-				incompatibleClouds: []string{spec.Azure}, // Requires service registration.
+				incompatibleClouds: cloudsWithoutServiceRegistration,
 			},
 		},
 		registry.OwnerSQLFoundations: {
 			{
 				name:          "validate-system-schema-after-version-upgrade",
 				fn:            runValidateSystemSchemaAfterVersionUpgrade,
-				timeout:       30 * time.Minute,
+				timeout:       60 * time.Minute,
 				defaultLeases: true,
+				randomized:    true,
 				numNodes:      1,
+				suites:        []string{registry.MixedVersion},
 			},
 			{
 				name:     "mismatched-locality",
 				fn:       runMismatchedLocalityTest,
 				numNodes: 3,
-			},
-			{
-				name:     "multitenant-multiregion",
-				fn:       runAcceptanceMultitenantMultiRegion,
-				timeout:  20 * time.Minute,
-				numNodes: 9,
-				nodeRegions: []string{"us-west1-b", "us-west1-b", "us-west1-b",
-					"us-west1-b", "us-west1-b", "us-west1-b",
-					"us-east1-b", "us-east1-b", "us-east1-b"},
-				requiresLicense:    true,
-				incompatibleClouds: []string{spec.Local, spec.Azure}, // Requires service registration.
 			},
 		},
 	}
@@ -136,6 +129,17 @@ func registerAcceptance(r registry.Registry) {
 				extraOptions = append(extraOptions, spec.GCEZones(strings.Join(tc.nodeRegions, ",")))
 			}
 
+			if tc.workloadNode {
+				extraOptions = append(extraOptions, spec.WorkloadNode())
+			}
+
+			if tc.incompatibleClouds.IsInitialized() && tc.incompatibleClouds.Contains(spec.Local) {
+				panic(errors.AssertionFailedf(
+					"acceptance tests must be able to run on roachtest local, but %q is incompatible",
+					tc.name,
+				))
+			}
+			suites := append([]string{registry.Nightly, registry.Quick, registry.Acceptance}, tc.suites...)
 			testSpec := registry.TestSpec{
 				Name:              "acceptance/" + tc.name,
 				Owner:             owner,
@@ -143,9 +147,9 @@ func registerAcceptance(r registry.Registry) {
 				Skip:              tc.skip,
 				EncryptionSupport: tc.encryptionSupport,
 				Timeout:           10 * time.Minute,
-				CompatibleClouds:  registry.AllExceptAWS.Remove(tc.incompatibleClouds...),
-				Suites:            registry.Suites(registry.Nightly, registry.Quick, registry.Acceptance),
-				RequiresLicense:   tc.requiresLicense,
+				CompatibleClouds:  registry.AllClouds.Remove(tc.incompatibleClouds),
+				Suites:            registry.Suites(suites...),
+				Randomized:        tc.randomized,
 			}
 
 			if tc.timeout != 0 {
@@ -153,9 +157,6 @@ func registerAcceptance(r registry.Registry) {
 			}
 			if !tc.defaultLeases {
 				testSpec.Leases = registry.MetamorphicLeases
-			}
-			if len(tc.nativeLibs) > 0 {
-				testSpec.NativeLibs = tc.nativeLibs
 			}
 			testSpec.Run = func(ctx context.Context, t test.Test, c cluster.Cluster) {
 				tc.fn(ctx, t, c)

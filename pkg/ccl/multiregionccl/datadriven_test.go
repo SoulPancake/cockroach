@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package multiregionccl_test
 
@@ -47,7 +44,31 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
-// TestMultiRegionDataDriven is a data-driven test to test various multi-region
+func TestMultiRegionDataDriven_global_tables(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	testMultiRegionDataDriven(t, "global_tables")
+}
+
+func TestMultiRegionDataDriven_regional_by_row(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	testMultiRegionDataDriven(t, "regional_by_row")
+}
+
+func TestMultiRegionDataDriven_regional_by_table(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	testMultiRegionDataDriven(t, "regional_by_table")
+}
+
+func TestMultiRegionDataDriven_secondary_region(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	testMultiRegionDataDriven(t, "secondary_region")
+}
+
+// testMultiRegionDataDriven is a data-driven test to test various multi-region
 // invariants at a high level. This is accomplished by allowing custom cluster
 // configurations when creating the test cluster and providing directives to
 // assert expectations in query traces.
@@ -112,10 +133,7 @@ import (
 //
 // "cleanup-cluster": destroys the cluster. Must be done before creating a new
 // cluster.
-func TestMultiRegionDataDriven(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
+func testMultiRegionDataDriven(t *testing.T, testPath string) {
 	// This test speeds up replication changes by proactively enqueuing replicas
 	// into various queues. This has the benefit of reducing the time taken after
 	// zone config changes, however the downside of added overhead. Disable the
@@ -124,7 +142,7 @@ func TestMultiRegionDataDriven(t *testing.T) {
 	skip.UnderRace(t, "flaky test")
 	skip.UnderDeadlock(t, "flaky test")
 	ctx := context.Background()
-	datadriven.Walk(t, datapathutils.TestDataPath(t), func(t *testing.T, path string) {
+	datadriven.Walk(t, datapathutils.TestDataPath(t, testPath), func(t *testing.T, path string) {
 		ds := datadrivenTestState{}
 		defer ds.cleanup(ctx)
 		var mu syncutil.Mutex
@@ -325,7 +343,7 @@ SET CLUSTER SETTING kv.allocator.min_lease_transfer_interval = '5m'
 				}
 				cache := ds.tc.Server(idx).DistSenderI().(*kvcoord.DistSender).RangeDescriptorCache()
 				tablePrefix := keys.MustAddr(keys.SystemSQLCodec.TablePrefix(tableID))
-				entry, err := cache.TestingGetCached(ctx, tablePrefix, false /* inverted */)
+				entry, err := cache.TestingGetCached(ctx, tablePrefix, false, roachpb.LAG_BY_CLUSTER_SETTING)
 				if err != nil {
 					return err.Error()
 				}
@@ -367,7 +385,7 @@ SET CLUSTER SETTING kv.allocator.min_lease_transfer_interval = '5m'
 						return errors.New(`could not find replica`)
 					}
 					for _, queueName := range []string{"split", "replicate", "raftsnapshot"} {
-						_, processErr, err := store.Enqueue(
+						processErr, err := store.Enqueue(
 							ctx, queueName, repl, true /* skipShouldQueue */, false, /* async */
 						)
 						if processErr != nil {

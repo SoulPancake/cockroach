@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package memo_test
 
@@ -16,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/isolation"
+	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/norm"
@@ -136,7 +132,11 @@ func TestMemoInit(t *testing.T) {
 
 func TestMemoIsStale(t *testing.T) {
 	catalog := testcat.New()
-	_, err := catalog.ExecuteDDL("CREATE TABLE abc (a INT PRIMARY KEY, b INT, c STRING, INDEX (c))")
+	_, err := catalog.ExecuteDDL("CREATE TABLE xy (x INT PRIMARY KEY, y INT)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = catalog.ExecuteDDL("CREATE TABLE abc (a INT PRIMARY KEY, b INT, c STRING, INDEX (c))")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,6 +145,10 @@ func TestMemoIsStale(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = catalog.ExecuteDDL("CREATE FUNCTION one() RETURNS INT LANGUAGE SQL AS $$ SELECT 1 $$")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = catalog.ExecuteDDL("CREATE TYPE typ AS ENUM ('hello', 'hiya')")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,8 +169,13 @@ func TestMemoIsStale(t *testing.T) {
 	evalCtx.Planner = nil
 	evalCtx.StreamManagerFactory = nil
 
+	// Use a test query that references each schema object (apart table with
+	// restricted access) to help verify that the memo is not invalidated
+	// unnecessarily.
+	const query = "SELECT a, b+one(), 'hiya'::typ FROM abcview v, xy WHERE a = x AND c='foo'"
+
 	var o xform.Optimizer
-	opttestutils.BuildQuery(t, &o, catalog, &evalCtx, "SELECT a, b+one() FROM abcview WHERE c='foo'")
+	opttestutils.BuildQuery(t, &o, catalog, &evalCtx, query)
 	o.Memo().Metadata().AddSchema(catalog.Schema())
 
 	ctx := context.Background()
@@ -182,7 +191,7 @@ func TestMemoIsStale(t *testing.T) {
 		// tests as written still pass if the default value is 0. To detect this, we
 		// create a new memo with the changed setting and verify it's not stale.
 		var o2 xform.Optimizer
-		opttestutils.BuildQuery(t, &o2, catalog, &evalCtx, "SELECT a, b+one() FROM abcview WHERE c='foo'")
+		opttestutils.BuildQuery(t, &o2, catalog, &evalCtx, query)
 
 		if isStale, err := o2.Memo().IsStale(ctx, &evalCtx, catalog); err != nil {
 			t.Fatal(err)
@@ -218,6 +227,12 @@ func TestMemoIsStale(t *testing.T) {
 	evalCtx.SessionData().OptimizerUseForecasts = true
 	stale()
 	evalCtx.SessionData().OptimizerUseForecasts = false
+	notStale()
+
+	// Stale optimizer merged partial statistics usage enable.
+	evalCtx.SessionData().OptimizerUseMergedPartialStatistics = true
+	stale()
+	evalCtx.SessionData().OptimizerUseMergedPartialStatistics = false
 	notStale()
 
 	// Stale optimizer histogram usage enable.
@@ -278,6 +293,12 @@ func TestMemoIsStale(t *testing.T) {
 	evalCtx.SessionData().DisallowFullTableScans = true
 	stale()
 	evalCtx.SessionData().DisallowFullTableScans = false
+	notStale()
+
+	// Stale avoid full table scan.
+	evalCtx.SessionData().AvoidFullTableScansInMutations = true
+	stale()
+	evalCtx.SessionData().AvoidFullTableScansInMutations = false
 	notStale()
 
 	// Stale large full scan rows.
@@ -501,6 +522,43 @@ func TestMemoIsStale(t *testing.T) {
 	evalCtx.SessionData().OptimizerUsePolymorphicParameterFix = false
 	notStale()
 
+	// Stale optimizer_push_limit_into_project_filtered_scan.
+	evalCtx.SessionData().OptimizerPushLimitIntoProjectFilteredScan = true
+	stale()
+	evalCtx.SessionData().OptimizerPushLimitIntoProjectFilteredScan = false
+	notStale()
+
+	// Stale unsafe_allow_triggers_modifying_cascades.
+	evalCtx.SessionData().UnsafeAllowTriggersModifyingCascades = true
+	stale()
+	evalCtx.SessionData().UnsafeAllowTriggersModifyingCascades = false
+	notStale()
+
+	evalCtx.SessionData().LegacyVarcharTyping = true
+	stale()
+	evalCtx.SessionData().LegacyVarcharTyping = false
+	notStale()
+
+	evalCtx.SessionData().OptimizerPreferBoundedCardinality = true
+	stale()
+	evalCtx.SessionData().OptimizerPreferBoundedCardinality = false
+	notStale()
+
+	evalCtx.SessionData().OptimizerMinRowCount = 1.0
+	stale()
+	evalCtx.SessionData().OptimizerMinRowCount = 0
+	notStale()
+
+	evalCtx.SessionData().OptimizerCheckInputMinRowCount = 1.0
+	stale()
+	evalCtx.SessionData().OptimizerCheckInputMinRowCount = 0
+	notStale()
+
+	evalCtx.SessionData().Internal = true
+	stale()
+	evalCtx.SessionData().Internal = false
+	notStale()
+
 	// User no longer has access to view.
 	catalog.View(tree.NewTableNameWithSchema("t", catconstants.PublicSchemaName, "abcview")).Revoked = true
 	_, err = o.Memo().IsStale(ctx, &evalCtx, catalog)
@@ -522,6 +580,10 @@ func TestMemoIsStale(t *testing.T) {
 	// Stale data sources and schema. Create new catalog so that data sources are
 	// recreated and can be modified independently.
 	catalog = testcat.New()
+	_, err = catalog.ExecuteDDL("CREATE TABLE xy (x INT PRIMARY KEY, y INT)")
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, err = catalog.ExecuteDDL("CREATE TABLE abc (a INT PRIMARY KEY, b INT, c STRING, INDEX (c))")
 	if err != nil {
 		t.Fatal(err)
@@ -534,23 +596,45 @@ func TestMemoIsStale(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, err = catalog.ExecuteDDL("CREATE TYPE typ AS ENUM ('hello', 'hiya')")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Table ID changes.
 	catalog.Table(tree.NewTableNameWithSchema("t", catconstants.PublicSchemaName, "abc")).TabID = 1
 	stale()
-	catalog.Table(tree.NewTableNameWithSchema("t", catconstants.PublicSchemaName, "abc")).TabID = 53
+	catalog.Table(tree.NewTableNameWithSchema("t", catconstants.PublicSchemaName, "abc")).TabID = 54
 	notStale()
 
-	// Table Version changes.
+	// Table version changes.
 	catalog.Table(tree.NewTableNameWithSchema("t", catconstants.PublicSchemaName, "abc")).TabVersion = 1
 	stale()
 	catalog.Table(tree.NewTableNameWithSchema("t", catconstants.PublicSchemaName, "abc")).TabVersion = 0
 	notStale()
 
-	// Function Version changes.
+	// Function version changes.
 	catalog.Function("one").Version = 1
 	stale()
 	catalog.Function("one").Version = 0
+	notStale()
+
+	// User changes (without RLS)
+	oldUser := evalCtx.SessionData().UserProto
+	newUser := username.MakeSQLUsernameFromPreNormalizedString("newuser").EncodeProto()
+	evalCtx.SessionData().UserProto = newUser
+	notStale()
+	evalCtx.SessionData().UserProto = oldUser
+	notStale()
+
+	// User changes (with RLS)
+	o.Memo().Metadata().SetRLSEnabled(evalCtx.SessionData().User(), true /* admin */, 1 /* tableID */)
+	notStale()
+	evalCtx.SessionData().UserProto = newUser
+	stale()
+	evalCtx.SessionData().UserProto = oldUser
+	notStale()
+	o.Memo().Metadata().ClearRLSEnabled()
 	notStale()
 }
 

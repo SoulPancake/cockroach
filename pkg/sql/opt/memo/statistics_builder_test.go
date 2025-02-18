@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package memo
 
@@ -106,7 +101,7 @@ func TestGetStatsFromConstraint(t *testing.T) {
 		}
 
 		sb := &statisticsBuilder{}
-		sb.init(context.Background(), &evalCtx, mem.Metadata())
+		sb.init(context.Background(), &evalCtx, &mem)
 
 		// Make the scan.
 		scan := mem.MemoizeScan(&ScanPrivate{Table: tabID, Cols: cols})
@@ -117,7 +112,8 @@ func TestGetStatsFromConstraint(t *testing.T) {
 		relProps := &props.Relational{Cardinality: props.AnyCardinality}
 		relProps.NotNullCols = cs.ExtractNotNullCols(ctx, &evalCtx)
 		s := relProps.Statistics()
-		s.Init(relProps)
+		const minRowCount = 0
+		s.Init(relProps, minRowCount)
 
 		// Calculate distinct counts.
 		sb.applyConstraintSet(cs, true /* tight */, sel, relProps, relProps.Statistics())

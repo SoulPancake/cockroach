@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowcontainer
 
@@ -19,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
@@ -45,6 +41,7 @@ func TestHashDiskBackedRowContainer(t *testing.T) {
 	}
 	defer tempEngine.Close()
 
+	unlimitedMemMonitor := execinfra.NewTestMemMonitor(ctx, st)
 	// These monitors are started and stopped by subtests.
 	memoryMonitor := getMemoryMonitor(st)
 	diskMonitor := getDiskMonitor(st)
@@ -57,7 +54,7 @@ func TestHashDiskBackedRowContainer(t *testing.T) {
 	ordering := colinfo.ColumnOrdering{{ColIdx: 0, Direction: encoding.Ascending}}
 
 	getRowContainer := func() *HashDiskBackedRowContainer {
-		rc := NewHashDiskBackedRowContainer(&evalCtx, memoryMonitor, diskMonitor, tempEngine)
+		rc := NewHashDiskBackedRowContainer(&evalCtx, memoryMonitor, unlimitedMemMonitor, diskMonitor, tempEngine)
 		err = rc.Init(
 			ctx,
 			false, /* shouldMark */
@@ -315,6 +312,7 @@ func TestHashDiskBackedRowContainerPreservesMatchesAndMarks(t *testing.T) {
 	}
 	defer tempEngine.Close()
 
+	unlimitedMemMonitor := execinfra.NewTestMemMonitor(ctx, st)
 	// These monitors are started and stopped by subtests.
 	memoryMonitor := getMemoryMonitor(st)
 	diskMonitor := getDiskMonitor(st)
@@ -328,7 +326,7 @@ func TestHashDiskBackedRowContainerPreservesMatchesAndMarks(t *testing.T) {
 	ordering := colinfo.ColumnOrdering{{ColIdx: 0, Direction: encoding.Ascending}}
 
 	getRowContainer := func() *HashDiskBackedRowContainer {
-		rc := NewHashDiskBackedRowContainer(&evalCtx, memoryMonitor, diskMonitor, tempEngine)
+		rc := NewHashDiskBackedRowContainer(&evalCtx, memoryMonitor, unlimitedMemMonitor, diskMonitor, tempEngine)
 		err = rc.Init(
 			ctx,
 			true, /* shouldMark */

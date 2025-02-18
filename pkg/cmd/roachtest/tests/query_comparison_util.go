@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -20,10 +15,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
@@ -183,12 +179,33 @@ func runOneRoundQueryComparison(
 		fmt.Fprint(failureLog, "\n")
 	}
 
+	connSetup := func(conn *gosql.DB) {
+		setStmtTimeout := fmt.Sprintf("SET statement_timeout='%s';", statementTimeout.String())
+		t.Status("setting statement_timeout")
+		t.L().Printf("statement timeout:\n%s", setStmtTimeout)
+		if _, err := conn.Exec(setStmtTimeout); err != nil {
+			t.Fatal(err)
+		}
+		logStmt(setStmtTimeout)
+
+		setUnconstrainedStmt := "SET unconstrained_non_covering_index_scan_enabled = true;"
+		t.Status("setting unconstrained_non_covering_index_scan_enabled")
+		t.L().Printf("\n%s", setUnconstrainedStmt)
+		if _, err := conn.Exec(setUnconstrainedStmt); err != nil {
+			logStmt(setUnconstrainedStmt)
+			t.Fatal(err)
+		}
+		logStmt(setUnconstrainedStmt)
+	}
+
 	node := 1
 	conn := c.Conn(ctx, t.L(), node)
 
 	rnd, seed := randutil.NewTestRand()
 	t.L().Printf("seed: %d", seed)
 	t.L().Printf("setupName: %s", qct.setupName)
+
+	connSetup(conn)
 
 	if qct.setupName == "workload-replay" {
 
@@ -308,32 +325,17 @@ func runOneRoundQueryComparison(
 			}
 		}
 
-		setStmtTimeout := fmt.Sprintf("SET statement_timeout='%s';", statementTimeout.String())
-		t.Status("setting statement_timeout")
-		t.L().Printf("statement timeout:\n%s", setStmtTimeout)
-		if _, err := conn.Exec(setStmtTimeout); err != nil {
-			t.Fatal(err)
-		}
-		logStmt(setStmtTimeout)
-
-		setUnconstrainedStmt := "SET unconstrained_non_covering_index_scan_enabled = true;"
-		t.Status("setting unconstrained_non_covering_index_scan_enabled")
-		t.L().Printf("\n%s", setUnconstrainedStmt)
-		if _, err := conn.Exec(setUnconstrainedStmt); err != nil {
-			logStmt(setUnconstrainedStmt)
-			t.Fatal(err)
-		}
-		logStmt(setUnconstrainedStmt)
-
 		conn2 := conn
+		node2 := 1
 		if qct.isMultiRegion {
 			t.Status("setting up multi-region database")
 			setupMultiRegionDatabase(t, conn, rnd, logStmt)
 
 			// Choose a different node than node 1.
-			node2 := rnd.Intn(qct.nodeCount-1) + 2
+			node2 = rnd.Intn(qct.nodeCount-1) + 2
 			t.Status(fmt.Sprintf("running some queries from node %d with conn1 and some queries from node %d with conn2", node, node2))
 			conn2 = c.Conn(ctx, t.L(), node2)
+			connSetup(conn2)
 		}
 
 		// Initialize a smither that generates only INSERT and UPDATE statements with
@@ -395,6 +397,8 @@ func runOneRoundQueryComparison(
 			h := queryComparisonHelper{
 				conn1:      conn,
 				conn2:      conn2,
+				node1:      node,
+				node2:      node2,
 				logStmt:    logStmt,
 				logFailure: logFailure,
 				printStmt:  printStmt,
@@ -407,8 +411,7 @@ func runOneRoundQueryComparison(
 			// state of the database.
 			if i < numInitialMutations || i%25 == 0 {
 				mConn, mConnInfo := h.chooseConn()
-				logStmt(mConnInfo)
-				runMutationStatement(mConn, mutatingSmither, logStmt)
+				runMutationStatement(t, mConn, mConnInfo, mutatingSmither, logStmt)
 				continue
 			}
 
@@ -459,13 +462,13 @@ type sqlAndOutput struct {
 type queryComparisonHelper struct {
 	// There are two different connections so that we sometimes execute the
 	// queries on different nodes.
-	conn1      *gosql.DB
-	conn2      *gosql.DB
-	logStmt    func(string)
-	logFailure func(string, [][]string)
-	printStmt  func(string)
-	stmtNo     int
-	rnd        *rand.Rand
+	conn1, conn2 *gosql.DB
+	node1, node2 int
+	logStmt      func(string)
+	logFailure   func(string, [][]string)
+	printStmt    func(string)
+	stmtNo       int
+	rnd          *rand.Rand
 
 	statements            []string
 	statementsAndExplains []sqlAndOutput
@@ -475,12 +478,19 @@ type queryComparisonHelper struct {
 // chooseConn flips a coin to determine which connection is used. It returns the
 // connection and a string to identify the connection for debugging purposes.
 func (h *queryComparisonHelper) chooseConn() (conn *gosql.DB, connInfo string) {
+	if h.node1 == h.node2 {
+		return h.conn1, ""
+	}
+	// Assuming we will be using cockroach demo --insecure to replay any failed
+	// logs, we add a \connect command for the SQL CLI to switch to the other node
+	// using only a port number.
+	defaultFirstPort, _ := strconv.Atoi(base.DefaultPort)
 	if h.rnd.Intn(2) == 0 {
 		conn = h.conn1
-		connInfo = "-- executing with conn1\n"
+		connInfo = fmt.Sprintf("\\connect - - - %d\n", defaultFirstPort+h.node1-1)
 	} else {
 		conn = h.conn2
-		connInfo = "-- executing with conn2\n"
+		connInfo = fmt.Sprintf("\\connect - - - %d\n", defaultFirstPort+h.node2-1)
 	}
 	return conn, connInfo
 }
@@ -501,16 +511,11 @@ func (h *queryComparisonHelper) runQuery(
 	// such a scenario, since the stmt didn't execute successfully, it won't get
 	// logged by the caller).
 	h.logStmt(fmt.Sprintf("-- %s: %s", timeutil.Now(),
-		// Replace all control characters, including newline symbols, with a
-		// single space to log this stmt as a single line. This way this
-		// auxiliary logging takes up less space (if the stmt executes
-		// successfully, it'll still get logged with the nice formatting).
-		strings.Map(func(r rune) rune {
-			if unicode.IsControl(r) {
-				return ' '
-			}
-			return r
-		}, connInfo+"; "+stmt),
+		// Escape all control characters, including newline symbols, to log this
+		// stmt as a single line. This way this auxiliary logging takes up less
+		// space (if the stmt executes successfully, it'll still get logged with the
+		// usual formatting below).
+		strconv.Quote(connInfo+stmt+";"),
 	))
 
 	runQueryImpl := func(stmt string, conn *gosql.DB) ([][]string, error) {
@@ -606,13 +611,30 @@ func joinAndSortRows(rowMatrix1, rowMatrix2 [][]string, sep string) (rows1, rows
 	return rows1, rows2
 }
 
+func isFloatArray(colType string) bool {
+	switch colType {
+	case "[]FLOAT4", "[]FLOAT8", "_FLOAT4", "_FLOAT8":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDecimalArray(colType string) bool {
+	switch colType {
+	case "[]DECIMAL", "_DECIMAL":
+		return true
+	default:
+		return false
+	}
+}
+
 func needApproximateMatch(colType string) bool {
 	// On s390x, check that values for both float and decimal coltypes are
 	// approximately equal to take into account platform differences in floating
 	// point calculations. On other architectures, check float values only.
-	return (runtime.GOARCH == "s390x" && (colType == "DECIMAL" || colType == "[]DECIMAL")) ||
-		colType == "FLOAT4" || colType == "[]FLOAT4" ||
-		colType == "FLOAT8" || colType == "[]FLOAT8"
+	return (runtime.GOARCH == "s390x" && (colType == "DECIMAL" || isDecimalArray(colType))) ||
+		colType == "FLOAT4" || colType == "FLOAT8" || isFloatArray(colType)
 }
 
 // sortRowsWithFloatComp is similar to joinAndSortRows, but it uses float
@@ -622,7 +644,7 @@ func sortRowsWithFloatComp(rowMatrix1, rowMatrix2 [][]string, colTypes []string)
 		for idx := range colTypes {
 			if needApproximateMatch(colTypes[idx]) {
 				cmpFn := floatcmp.FloatsCmp
-				if strings.HasPrefix(colTypes[idx], "[]") {
+				if isFloatArray(colTypes[idx]) || isDecimalArray(colTypes[idx]) {
 					cmpFn = floatcmp.FloatArraysCmp
 				}
 				res, err := cmpFn(rowMatrix[i][idx], rowMatrix[j][idx])
@@ -650,6 +672,28 @@ func sortRowsWithFloatComp(rowMatrix1, rowMatrix2 [][]string, colTypes []string)
 	})
 }
 
+func trimDecimalTrailingZeroes(d string) string {
+	if !strings.Contains(d, ".") {
+		// The number is an integer - nothing to trim.
+		return d
+	}
+	d = strings.TrimRight(d, "0")
+	if d[len(d)-1] == '.' {
+		// We fully trimmed the fractional part, so we need to remove the
+		// dangling dot.
+		d = d[:len(d)-1]
+	}
+	return d
+}
+
+func trimDecimalsTrailingZeroesInArray(array string) string {
+	decimals := strings.Split(strings.Trim(array, "{}"), ",")
+	for i := range decimals {
+		decimals[i] = trimDecimalTrailingZeroes(decimals[i])
+	}
+	return "{" + strings.Join(decimals, ",") + "}"
+}
+
 // unsortedMatricesDiffWithFloatComp sorts and compares the rows in rowMatrix1
 // to rowMatrix2 and outputs a diff or message related to the comparison. If a
 // string comparison of the rows fails, and they contain floats or decimals, it
@@ -668,14 +712,14 @@ func unsortedMatricesDiffWithFloatComp(
 	if len(rows1) != len(rows2) || len(colTypes) != len(rowMatrix1[0]) || len(colTypes) != len(rowMatrix2[0]) {
 		return result, nil
 	}
-	var needApproxMatch bool
+	var needCustomMatch bool
 	for _, colType := range colTypes {
-		if needApproximateMatch(colType) {
-			needApproxMatch = true
+		if needApproximateMatch(colType) || colType == "DECIMAL" || isDecimalArray(colType) {
+			needCustomMatch = true
 			break
 		}
 	}
-	if !needApproxMatch {
+	if !needCustomMatch {
 		return result, nil
 	}
 	sortRowsWithFloatComp(rowMatrix1, rowMatrix2, colTypes)
@@ -685,13 +729,14 @@ func unsortedMatricesDiffWithFloatComp(
 
 		for j, colType := range colTypes {
 			if needApproximateMatch(colType) {
+				isFloatOrDecimalArray := isFloatArray(colType) || isDecimalArray(colType)
 				cmpFn := floatcmp.FloatsMatch
 				switch {
-				case runtime.GOARCH == "s390x" && strings.HasPrefix(colType, "[]"):
+				case runtime.GOARCH == "s390x" && isFloatOrDecimalArray:
 					cmpFn = floatcmp.FloatArraysMatchApprox
-				case runtime.GOARCH == "s390x" && !strings.HasPrefix(colType, "[]"):
+				case runtime.GOARCH == "s390x" && !isFloatOrDecimalArray:
 					cmpFn = floatcmp.FloatsMatchApprox
-				case strings.HasPrefix(colType, "[]"):
+				case isFloatOrDecimalArray:
 					cmpFn = floatcmp.FloatArraysMatch
 				}
 				match, err := cmpFn(row1[j], row2[j])
@@ -702,6 +747,17 @@ func unsortedMatricesDiffWithFloatComp(
 					return result, nil
 				}
 			} else {
+				switch {
+				case colType == "DECIMAL":
+					// For decimals, remove any trailing zeroes.
+					row1[j] = trimDecimalTrailingZeroes(row1[j])
+					row2[j] = trimDecimalTrailingZeroes(row2[j])
+				case isDecimalArray(colType):
+					// For decimal arrays, remove any trailing zeroes from each
+					// decimal.
+					row1[j] = trimDecimalsTrailingZeroesInArray(row1[j])
+					row2[j] = trimDecimalsTrailingZeroesInArray(row2[j])
+				}
 				// Check that other columns are equal with a string comparison.
 				if row1[j] != row2[j] {
 					return result, nil

@@ -1,30 +1,23 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package insights
 
 import (
 	"context"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/clusterunique"
-	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/uint128"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
-	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -81,10 +74,10 @@ func TestIngester(t *testing.T) {
 				newRegistry(st, &fakeDetector{
 					stubEnabled: true,
 					stubIsSlow:  true,
-				}, store),
+				}, store, nil),
 			)
 
-			ingester.Start(ctx, stopper)
+			ingester.Start(ctx, stopper, WithFlushInterval(10))
 			for _, e := range tc.observations {
 				if e.statementID != 0 {
 					ingester.ObserveStatement(e.SessionID(), &Statement{ID: e.StatementID()})
@@ -100,7 +93,7 @@ func TestIngester(t *testing.T) {
 					numInsights++
 				})
 				return numInsights == tc.totalTxnInsights
-			}, 1*time.Second, 50*time.Millisecond)
+			}, 1*time.Second, 10*time.Millisecond)
 
 			// See that the insights we were expecting are the ones that
 			// arrived. We allow the provider to do whatever it needs to, so
@@ -127,56 +120,53 @@ func TestIngester_Clear(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	settings := cluster.MakeTestingClusterSettings()
 
-	t.Run("clears buffer", func(t *testing.T) {
-		ctx := context.Background()
-		stopper := stop.NewStopper()
-		defer stopper.Stop(ctx)
-		store := newStore(settings)
-		ingester := newConcurrentBufferIngester(
-			newRegistry(settings, &fakeDetector{
-				stubEnabled: true,
-				stubIsSlow:  true,
-			}, store))
-		// Start the ingester and wait for its async task to start.
-		// Disable timed flushes, so we can guarantee the presence of data
-		// in the buffer later on.
-		ingester.Start(ctx, stopper, WithoutTimedFlush())
-		testutils.SucceedsSoon(t, func() error {
-			if !(atomic.LoadUint64(&ingester.running) == 1) {
-				return errors.New("ingester not yet started")
-			}
-			return nil
-		})
-		// Fill the ingester's buffer with some data. This sets us up to
-		// call Clear() with guaranteed data in the buffer, so we can assert
-		// afterward that it's been cleared.
-		ingesterObservations := []testEvent{
-			{sessionID: 1, statementID: 10},
-			{sessionID: 2, statementID: 20},
-			{sessionID: 1, statementID: 11},
-			{sessionID: 2, statementID: 21},
-			{sessionID: 1, transactionID: 100},
-			{sessionID: 2, transactionID: 200},
+	ctx := context.Background()
+	stopper := stop.NewStopper()
+	defer stopper.Stop(ctx)
+
+	store := newStore(settings)
+	ingester := newConcurrentBufferIngester(
+		newRegistry(settings, &fakeDetector{
+			stubEnabled: true,
+			stubIsSlow:  true,
+		}, store, nil))
+
+	// Fill the ingester's buffer with some data. This sets us up to
+	// call Clear() with guaranteed data in the buffer, so we can assert
+	// afterward that it's been cleared.
+	ingesterObservations := []testEvent{
+		{sessionID: 1, statementID: 10},
+		{sessionID: 2, statementID: 20},
+		{sessionID: 1, statementID: 11},
+		{sessionID: 2, statementID: 21},
+		{sessionID: 1, transactionID: 100},
+		{sessionID: 2, transactionID: 200},
+	}
+	for _, o := range ingesterObservations {
+		if o.statementID != 0 {
+			ingester.ObserveStatement(o.SessionID(), &Statement{ID: o.StatementID()})
+		} else {
+			ingester.ObserveTransaction(o.SessionID(), &Transaction{ID: o.TransactionID()})
 		}
-		for _, o := range ingesterObservations {
-			if o.statementID != 0 {
-				ingester.ObserveStatement(o.SessionID(), &Statement{ID: o.StatementID()})
-			} else {
-				ingester.ObserveTransaction(o.SessionID(), &Transaction{ID: o.TransactionID()})
-			}
-		}
-		empty := event{}
-		require.NotEqual(t, empty, ingester.guard.eventBuffer[0])
-		// Now, call Clear() to verify it clears the buffer.
-		// Use SucceedsSoon for assertions, since the operation is async.
-		ingester.Clear()
-		testutils.SucceedsSoon(t, func() error {
-			if ingester.guard.eventBuffer[0] != empty {
-				return errors.New("eventBuffer not empty")
-			}
-			return nil
-		})
-	})
+	}
+	empty := event{}
+	require.Empty(t, ingester.eventBufferCh)
+	require.NotEqual(t, empty, ingester.guard.eventBuffer[0])
+	// Now, call Clear() to verify it clears the buffer. This operation
+	// is synchronous here because `ingester.eventBufferCh` has a buffer
+	// of 1 so the `Clear` operation can write to it without requiring a
+	// corresponding insights ingester task running. We just check to
+	// make sure `Clear` results in something getting posted to the
+	// channel.
+	ingester.Clear()
+	require.Equal(t, empty, ingester.guard.eventBuffer[0])
+	require.NotEmpty(t, ingester.eventBufferCh)
+	recv := <-ingester.eventBufferCh
+	for i := range ingesterObservations {
+		require.NotEqual(t, empty, recv.events[i])
+	}
+	// events 0-5 contain the payloads above, rest are empty
+	require.Equal(t, empty, recv.events[6])
 }
 
 func TestIngester_Disabled(t *testing.T) {
@@ -186,13 +176,15 @@ func TestIngester_Disabled(t *testing.T) {
 	// the underlying registry is currently disabled.
 	st := cluster.MakeTestingClusterSettings()
 
-	ingester := newConcurrentBufferIngester(newRegistry(st, &fakeDetector{}, newStore(st)))
+	ingester := newConcurrentBufferIngester(newRegistry(st, &fakeDetector{}, newStore(st), nil))
 	ingester.ObserveStatement(clusterunique.ID{}, &Statement{})
 	ingester.ObserveTransaction(clusterunique.ID{}, &Transaction{})
 	require.Equal(t, event{}, ingester.guard.eventBuffer[0])
 }
 
 func TestIngester_DoesNotBlockWhenReceivingManyObservationsAfterShutdown(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
 	// We have seen some tests hanging in CI, implicating this ingester in
 	// their goroutine dumps. We reproduce what we think is happening here,
 	// observing high volumes of SQL traffic after our consumer has shut down.
@@ -203,7 +195,7 @@ func TestIngester_DoesNotBlockWhenReceivingManyObservationsAfterShutdown(t *test
 	defer stopper.Stop(ctx)
 
 	st := cluster.MakeTestingClusterSettings()
-	registry := newRegistry(st, &fakeDetector{stubEnabled: true}, newStore(st))
+	registry := newRegistry(st, &fakeDetector{stubEnabled: true}, newStore(st), nil)
 	ingester := newConcurrentBufferIngester(registry)
 	ingester.Start(ctx, stopper)
 
@@ -245,4 +237,41 @@ func (s testEvent) TransactionID() uuid.UUID {
 
 func (s testEvent) StatementID() clusterunique.ID {
 	return clusterunique.ID{Uint128: uint128.FromInts(0, s.statementID)}
+}
+
+// We had an issue with the insights ingester flush task being blocked
+// forever on shutdown. This was because of a bug where the order of
+// operations during stopper quiescence could cause `ForceSync()` to be
+// triggered twice without an intervening ingest operation. The second
+// `ForceSync()` would block forever because the buffer channel has a
+// capacity of 1.
+func TestIngesterBlockedForceSync(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	stopper := stop.NewStopper()
+	defer stopper.Stop(ctx)
+
+	st := cluster.MakeTestingClusterSettings()
+	registry := newRegistry(st, &fakeDetector{stubEnabled: true}, newStore(st), nil)
+	ingester := newConcurrentBufferIngester(registry)
+
+	// We queue up a bunch of sync operations because it's unclear how
+	// many will proceed between the `Start()` and `Stop()` calls below.
+	ingester.guard.ForceSync()
+
+	wg := sync.WaitGroup{}
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ingester.guard.ForceSync()
+		}()
+	}
+
+	ingester.Start(ctx, stopper, WithoutTimedFlush())
+	stopper.Stop(ctx)
+	<-stopper.IsStopped()
+	wg.Wait()
 }

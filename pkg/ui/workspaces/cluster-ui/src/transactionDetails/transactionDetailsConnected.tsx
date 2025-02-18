@@ -1,46 +1,41 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { connect } from "react-redux";
 import { withRouter } from "react-router-dom";
 import { Dispatch } from "redux";
 
-import { actions as localStorageActions } from "src/store/localStorage";
+import { StatementsRequest } from "src/api/statementsApi";
 import { AppState, uiConfigActions } from "src/store";
-import { actions as sqlStatsActions } from "src/store/sqlStats";
-import { actions as txnStatsActions } from "src/store/transactionStats";
 import {
   actions as transactionInsights,
   selectTxnInsightsByFingerprint,
 } from "src/store/insights/transactionInsights";
-import { StatementsRequest } from "src/api/statementsApi";
+import { actions as localStorageActions } from "src/store/localStorage";
+import { actions as sqlStatsActions } from "src/store/sqlStats";
+import { actions as txnStatsActions } from "src/store/transactionStats";
 import { selectRequestTime } from "src/transactionsPage/transactionsPage.selectors";
 
+import { TxnInsightsRequest } from "../api";
+import { actions as analyticsActions } from "../store/analytics";
+import {
+  nodeRegionsByIDSelector,
+  actions as nodesActions,
+} from "../store/nodes";
 import {
   selectIsTenant,
   selectHasViewActivityRedactedRole,
   selectHasAdminRole,
 } from "../store/uiConfig";
 import {
-  nodeRegionsByIDSelector,
-  actions as nodesActions,
-} from "../store/nodes";
-import {
   selectTimeScale,
   selectTxnsPageLimit,
   selectTxnsPageReqSort,
 } from "../store/utils/selectors";
-import { txnFingerprintIdAttr, getMatchParamByName } from "../util";
 import { TimeScale } from "../timeScaleDropdown";
-import { actions as analyticsActions } from "../store/analytics";
-import { TxnInsightsRequest } from "../api";
+import { txnFingerprintIdAttr, getMatchParamByName } from "../util";
 
 import {
   TransactionDetails,

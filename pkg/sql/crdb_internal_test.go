@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -88,14 +83,15 @@ func TestGetAllNamesInternal(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	params, _ := createTestServerParams()
+	params, _ := createTestServerParamsAllowTenants()
+
 	s, _ /* sqlDB */, kvDB := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
 
 	err := kvDB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		batch := txn.NewBatch()
-		batch.Put(catalogkeys.EncodeNameKey(keys.SystemSQLCodec, &descpb.NameInfo{ParentID: 999, ParentSchemaID: 444, Name: "bob"}), 9999)
-		batch.Put(catalogkeys.EncodeNameKey(keys.SystemSQLCodec, &descpb.NameInfo{ParentID: 1000, ParentSchemaID: 29, Name: "alice"}), 10000)
+		batch.Put(catalogkeys.EncodeNameKey(s.Codec(), &descpb.NameInfo{ParentID: 999, ParentSchemaID: 444, Name: "bob"}), 9999)
+		batch.Put(catalogkeys.EncodeNameKey(s.Codec(), &descpb.NameInfo{ParentID: 1000, ParentSchemaID: 29, Name: "alice"}), 10000)
 		return txn.CommitInBatch(ctx, batch)
 	})
 	require.NoError(t, err)
@@ -172,12 +168,12 @@ func TestGossipAlertsTable(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	params, _ := createTestServerParams()
+	params, _ := createTestServerParamsAllowTenants()
 	s := serverutils.StartServerOnly(t, params)
-	defer s.Stopper().Stop(context.Background())
+	defer s.Stop(context.Background())
 	ctx := context.Background()
 
-	if err := s.GossipI().(*gossip.Gossip).AddInfoProto(gossip.MakeNodeHealthAlertKey(456), &statuspb.HealthCheckResult{
+	if err := s.StorageLayer().GossipI().(*gossip.Gossip).AddInfoProto(gossip.MakeNodeHealthAlertKey(456), &statuspb.HealthCheckResult{
 		Alerts: []statuspb.HealthAlert{{
 			StoreID:     123,
 			Category:    statuspb.HealthAlert_METRICS,
@@ -188,7 +184,7 @@ func TestGossipAlertsTable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ie := s.InternalExecutor().(*sql.InternalExecutor)
+	ie := s.SystemLayer().InternalExecutor().(*sql.InternalExecutor)
 	row, err := ie.QueryRowEx(ctx, "test", nil, /* txn */
 		sessiondata.NodeUserSessionDataOverride,
 		"SELECT * FROM crdb_internal.gossip_alerts WHERE store_id = 123")
@@ -212,14 +208,14 @@ func TestOldBitColumnMetadata(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	ctx := context.Background()
+	params, _ := createTestServerParamsAllowTenants()
+	s, sqlDB, kvDB := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(ctx)
+
 	// The descriptor changes made must have an immediate effect
 	// so disable leases on tables.
 	defer lease.TestingDisableTableLeases()()
-
-	ctx := context.Background()
-	params, _ := createTestServerParams()
-	s, sqlDB, kvDB := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(ctx)
 
 	if _, err := sqlDB.Exec(`
 CREATE DATABASE t;
@@ -232,7 +228,7 @@ CREATE TABLE t.test (k INT);
 	// old-style bit column. We're going to edit the table descriptor
 	// manually, without going through SQL.
 	tableDesc := desctestutils.TestingGetMutableExistingTableDescriptor(
-		kvDB, keys.SystemSQLCodec, "t", "test")
+		kvDB, s.Codec(), "t", "test")
 	for i := range tableDesc.Columns {
 		if tableDesc.Columns[i].Name == "k" {
 			tableDesc.Columns[i].Type.InternalType.VisibleType = 4 // Pre-2.1 BIT.
@@ -269,7 +265,7 @@ CREATE TABLE t.test (k INT);
 
 	// Write the modified descriptor.
 	if err := kvDB.Txn(context.Background(), func(ctx context.Context, txn *kv.Txn) error {
-		return txn.Put(ctx, catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, tableDesc.ID), tableDesc.DescriptorProto())
+		return txn.Put(ctx, catalogkeys.MakeDescMetadataKey(s.Codec(), tableDesc.ID), tableDesc.DescriptorProto())
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +322,7 @@ SELECT column_name, character_maximum_length, numeric_precision, numeric_precisi
 	}
 
 	// And verify that this has re-set the fields.
-	tableDesc = desctestutils.TestingGetMutableExistingTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "test")
+	tableDesc = desctestutils.TestingGetMutableExistingTableDescriptor(kvDB, s.Codec(), "t", "test")
 	found := false
 	for i := range tableDesc.Columns {
 		col := &tableDesc.Columns[i]
@@ -433,12 +429,8 @@ func TestInvalidObjects(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	// The descriptor changes made must have an immediate effect
-	// so disable leases on tables.
-	defer lease.TestingDisableTableLeases()()
-
 	ctx := context.Background()
-	params, _ := createTestServerParams()
+	params, _ := createTestServerParamsAllowTenants()
 	params.Knobs = base.TestingKnobs{
 		Store: &kvserver.StoreTestingKnobs{
 			DisableMergeQueue: true,
@@ -446,6 +438,10 @@ func TestInvalidObjects(t *testing.T) {
 	}
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
+
+	// The descriptor changes made must have an immediate effect
+	// so disable leases on tables.
+	defer lease.TestingDisableTableLeases()()
 
 	tdb := sqlutils.MakeSQLRunner(sqlDB)
 
@@ -808,78 +804,6 @@ func TestClusterInflightTracesVirtualTable(t *testing.T) {
 	})
 }
 
-// TestInternalJobsTableRetryColumns tests values of last_run, next_run, and
-// num_runs columns in crdb_internal.jobs table. The test creates a job in
-// system.jobs table and retrieves the job's information from crdb_internal.jobs
-// table for validation.
-func TestInternalJobsTableRetryColumns(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	testFn := func(validateFn func(context.Context, *sqlutils.SQLRunner)) func(t *testing.T) {
-		return func(t *testing.T) {
-			s, db, _ := serverutils.StartServer(t, base.TestServerArgs{
-				Knobs: base.TestingKnobs{
-					JobsTestingKnobs: &jobs.TestingKnobs{
-						DisableAdoptions: true,
-					},
-					// DisableAdoptions needs this.
-					UpgradeManager: &upgradebase.TestingKnobs{
-						DontUseJobs: true,
-					},
-				},
-			})
-			ctx := context.Background()
-			defer s.Stopper().Stop(ctx)
-			tdb := sqlutils.MakeSQLRunner(db)
-
-			payload := jobspb.Payload{
-				Details:       jobspb.WrapPayloadDetails(jobspb.ImportDetails{}),
-				UsernameProto: username.RootUserName().EncodeProto(),
-			}
-			payloadBytes, err := protoutil.Marshal(&payload)
-			assert.NoError(t, err)
-			tdb.Exec(t,
-				"INSERT INTO system.jobs (id, status, created) values ($1, $2, $3)",
-				1, jobs.StatusRunning, timeutil.Now(),
-			)
-			tdb.Exec(t,
-				"INSERT INTO system.job_info (job_id, info_key, value) values ($1, $2, $3)",
-				1, jobs.GetLegacyPayloadKey(), payloadBytes,
-			)
-
-			validateFn(ctx, tdb)
-		}
-	}
-
-	t.Run("null values", testFn(func(_ context.Context, tdb *sqlutils.SQLRunner) {
-		// Values should be NULL if not populated.
-		tdb.CheckQueryResults(t, `
-SELECT last_run IS NULL,
-       next_run IS NOT NULL,
-       num_runs = 0,
-       execution_errors IS NULL
-  FROM crdb_internal.jobs WHERE job_id = 1`,
-			[][]string{{"true", "true", "true", "true"}})
-	}))
-
-	t.Run("valid backoff params", testFn(func(_ context.Context, tdb *sqlutils.SQLRunner) {
-		lastRun := timeutil.Unix(1, 0)
-		tdb.Exec(t, "UPDATE system.jobs SET last_run = $1, num_runs = 1 WHERE id = 1", lastRun)
-		tdb.Exec(t, "SET CLUSTER SETTING jobs.registry.retry.initial_delay = '1s'")
-		tdb.Exec(t, "SET CLUSTER SETTING jobs.registry.retry.max_delay = '1s'")
-
-		var validLastRun, validNextRun, validNumRuns bool
-		tdb.QueryRow(t,
-			"SELECT last_run = $1, next_run = $2, num_runs = 1 FROM crdb_internal.jobs WHERE job_id = 1",
-			lastRun, lastRun.Add(time.Second),
-		).Scan(&validLastRun, &validNextRun, &validNumRuns)
-		require.True(t, validLastRun)
-		require.True(t, validNextRun)
-		require.True(t, validNumRuns)
-	}))
-}
-
 func TestIsAtLeastVersion(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -1065,9 +989,6 @@ func causeContention(
 func testTxnContentionEventsTableHelper(
 	t *testing.T, ctx context.Context, conn *gosql.DB, sqlDB *sqlutils.SQLRunner,
 ) {
-	sqlDB.Exec(
-		t,
-		`SET CLUSTER SETTING sql.metrics.statement_details.plan_collection.enabled = false;`)
 
 	// Reduce the resolution interval to speed up the test.
 	sqlDB.Exec(
@@ -1167,10 +1088,6 @@ func testTxnContentionEventsTableHelper(
 func testTxnContentionEventsTableWithDroppedInfo(
 	t *testing.T, ctx context.Context, conn *gosql.DB, sqlDB *sqlutils.SQLRunner,
 ) {
-	sqlDB.Exec(
-		t,
-		`SET CLUSTER SETTING sql.metrics.statement_details.plan_collection.enabled = false;`)
-
 	// Reduce the resolution interval to speed up the test.
 	sqlDB.Exec(
 		t,
@@ -1397,7 +1314,7 @@ func TestInternalSystemJobsTableMirrorsSystemJobsTable(t *testing.T) {
 
 	tdb.Exec(t,
 		"INSERT INTO system.jobs (id, status, created) values ($1, $2, $3)",
-		1, jobs.StatusRunning, timeutil.Now(),
+		1, jobs.StateRunning, timeutil.Now(),
 	)
 	tdb.Exec(t,
 		"INSERT INTO system.job_info (job_id, info_key, value) values ($1, $2, $3)",
@@ -1407,7 +1324,7 @@ func TestInternalSystemJobsTableMirrorsSystemJobsTable(t *testing.T) {
 	tdb.Exec(t,
 		`INSERT INTO system.jobs (id, status, created, created_by_type, created_by_id, 
                          claim_session_id, claim_instance_id, num_runs, last_run, job_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-		2, jobs.StatusRunning, timeutil.Now(), "created by", 2, []byte("claim session id"),
+		2, jobs.StateRunning, timeutil.Now(), "created by", 2, []byte("claim session id"),
 		2, 2, timeutil.Now(), jobspb.TypeImport.String(),
 	)
 	tdb.Exec(t,
@@ -1432,46 +1349,6 @@ func TestInternalSystemJobsTableMirrorsSystemJobsTable(t *testing.T) {
 	)
 
 	// TODO(adityamaru): add checks for payload and progress
-}
-
-// TestCorruptPayloadError asserts that we can an error
-// with the correct hint when we fail to decode a payload.
-func TestCorruptPayloadError(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{
-		Knobs: base.TestingKnobs{
-			// Because this test modifies system.jobs and asserts its contents,
-			// we should disable jobs from being adopted and disable automatic jobs
-			// from being created.
-			JobsTestingKnobs: &jobs.TestingKnobs{
-				DisableAdoptions: true,
-			},
-			// DisableAdoptions needs this.
-			UpgradeManager: &upgradebase.TestingKnobs{
-				DontUseJobs: true,
-			},
-			SpanConfig: &spanconfig.TestingKnobs{
-				ManagerDisableJobCreation: true,
-			},
-		},
-	})
-	ctx := context.Background()
-	defer s.Stopper().Stop(ctx)
-	tdb := sqlutils.MakeSQLRunner(db)
-
-	tdb.Exec(t,
-		"INSERT INTO system.jobs (id, status, created) values ($1, $2, $3)",
-		1, jobs.StatusRunning, timeutil.Now(),
-	)
-	tdb.Exec(t,
-		"INSERT INTO system.job_info (job_id, info_key, value) values ($1, $2, $3)",
-		1, jobs.GetLegacyPayloadKey(), []byte("invalid payload"),
-	)
-
-	tdb.ExpectErrWithHint(t, "proto", "could not decode the payload for job 1. consider deleting this job from system.jobs", "SELECT * FROM crdb_internal.system_jobs")
-	tdb.ExpectErrWithHint(t, "proto", "could not decode the payload for job 1. consider deleting this job from system.jobs", "SELECT * FROM crdb_internal.jobs")
 }
 
 // TestInternalSystemJobsAccess asserts which entries a user can query
@@ -1591,7 +1468,7 @@ func TestVirtualTableDoesntHangOnQueryCanceledError(t *testing.T) {
 							return nil
 						}
 						opName, ok := sql.GetInternalOpName(ctx)
-						if !ok || opName != "system-jobs-scan" {
+						if !ok || !(opName == "system-jobs-scan" || opName == "system-jobs-join") {
 							return nil
 						}
 						numCallbacksAdded.Add(1)
@@ -1897,4 +1774,53 @@ func TestVirtualPTSTable(t *testing.T) {
 		_, virtualRow := scanRecord(t, sqlDB, rec.ID)
 		require.Equal(t, ts, virtualRow.lastUpdated)
 	})
+}
+
+// TestMVCCValueHeaderSystemColumns tests that the system columns that read MVCCValueHeaders data.
+func TestMVCCValueHeaderSystemColumns(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+
+	srv, conn, _ := serverutils.StartServer(t, base.TestServerArgs{})
+	defer srv.Stopper().Stop(ctx)
+	internalDB := srv.ApplicationLayer().InternalDB().(isql.DB)
+
+	sqlDB := sqlutils.MakeSQLRunner(conn)
+	sqlDB.Exec(t, "CREATE DATABASE test")
+	sqlDB.Exec(t, "CREATE TABLE test.foo (pk int primary key, v1 int, v2 int, INDEX(v2))")
+
+	_, err := internalDB.Executor().ExecEx(ctx, "test-insert-with-origin-id",
+		nil,
+		sessiondata.InternalExecutorOverride{OriginIDForLogicalDataReplication: 42},
+		"INSERT INTO test.foo VALUES (1, 1, 1), (2, 2, 2)")
+	require.NoError(t, err)
+
+	_, err = internalDB.Executor().ExecEx(ctx, "test-insert-with-origin-id",
+		nil,
+		sessiondata.InternalExecutorOverride{},
+		"INSERT INTO test.foo VALUES (3, 3, 3)")
+	require.NoError(t, err)
+
+	queries := map[string]string{
+		"primary":    "SELECT pk, v1, crdb_internal_origin_id FROM test.foo ",
+		"index join": "SELECT pk, v1, crdb_internal_origin_id FROM test.foo@{FORCE_INDEX=foo_v2_idx}",
+	}
+	exp := [][]string{
+		{"1", "1", "42"},
+		{"2", "2", "42"},
+		{"3", "3", "0"}}
+	for n, q := range queries {
+		t.Run(n, func(t *testing.T) {
+			testutils.RunTrueAndFalse(t, "vectorize", func(t *testing.T, vectorize bool) {
+				if vectorize {
+					sqlDB.Exec(t, "SET vectorize=on")
+				} else {
+					sqlDB.Exec(t, "SET vectorize=off")
+				}
+				sqlDB.CheckQueryResults(t, q, exp)
+			})
+		})
+	}
 }

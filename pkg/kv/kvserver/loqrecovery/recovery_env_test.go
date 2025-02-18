@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package loqrecovery
 
@@ -323,7 +318,7 @@ func (e *quorumRecoveryEnv) handleReplicationData(t *testing.T, d datadriven.Tes
 			replica.NodeID = roachpb.NodeID(replica.StoreID)
 		}
 
-		replicaID, key, desc, replicaState, hardState, raftLog :=
+		replicaID, key, desc, replicaState, truncState, hardState, raftLog :=
 			buildReplicaDescriptorFromTestData(t, replica)
 
 		eng := e.getOrCreateStore(ctx, t, replica.StoreID, replica.NodeID)
@@ -336,6 +331,9 @@ func (e *quorumRecoveryEnv) handleReplicationData(t *testing.T, d datadriven.Tes
 		sl := stateloader.Make(replica.RangeID)
 		if _, err := sl.Save(ctx, eng, replicaState); err != nil {
 			t.Fatalf("failed to save raft replica state into store: %v", err)
+		}
+		if err := sl.SetRaftTruncatedState(ctx, eng, &truncState); err != nil {
+			t.Fatalf("failed to save raft truncated state: %v", err)
 		}
 		if err := sl.SetHardState(ctx, eng, hardState); err != nil {
 			t.Fatalf("failed to save raft hard state: %v", err)
@@ -364,6 +362,7 @@ func buildReplicaDescriptorFromTestData(
 	roachpb.Key,
 	roachpb.RangeDescriptor,
 	kvserverpb.ReplicaState,
+	kvserverpb.RaftTruncatedState,
 	raftpb.HardState,
 	[]enginepb.MVCCMetadata,
 ) {
@@ -409,19 +408,19 @@ func buildReplicaDescriptorFromTestData(
 		AcquisitionType: 0,
 	}
 	replicaState := kvserverpb.ReplicaState{
-		RaftAppliedIndex:  replica.RangeAppliedIndex,
-		LeaseAppliedIndex: 0,
-		Desc:              &desc,
-		Lease:             &lease,
-		TruncatedState: &kvserverpb.RaftTruncatedState{
-			Index: 1,
-			Term:  1,
-		},
+		RaftAppliedIndex:    replica.RangeAppliedIndex,
+		LeaseAppliedIndex:   0,
+		Desc:                &desc,
+		Lease:               &lease,
 		GCThreshold:         &hlc.Timestamp{},
 		GCHint:              &roachpb.GCHint{},
 		Version:             nil,
 		Stats:               &enginepb.MVCCStats{},
 		RaftClosedTimestamp: clock.Now().Add(-30*time.Second.Nanoseconds(), 0),
+	}
+	truncState := kvserverpb.RaftTruncatedState{
+		Index: 1,
+		Term:  1,
 	}
 	hardState := raftpb.HardState{
 		Term:   0,
@@ -433,7 +432,7 @@ func buildReplicaDescriptorFromTestData(
 		entry := raftLogFromPendingDescriptorUpdate(t, replica, u, desc, kvpb.RaftIndex(i))
 		raftLog = append(raftLog, enginepb.MVCCMetadata{RawBytes: entry.RawBytes})
 	}
-	return replicaID, key, desc, replicaState, hardState, raftLog
+	return replicaID, key, desc, replicaState, truncState, hardState, raftLog
 }
 
 func raftLogFromPendingDescriptorUpdate(
@@ -489,7 +488,8 @@ func raftLogFromPendingDescriptorUpdate(
 		t.Fatalf("failed to serialize raftCommand: %v", err)
 	}
 	data := raftlog.EncodeCommandBytes(
-		raftlog.EntryEncodingStandardWithoutAC, kvserverbase.CmdIDKey(fmt.Sprintf("%08d", entryIndex)), out)
+		raftlog.EntryEncodingStandardWithoutAC,
+		kvserverbase.CmdIDKey(fmt.Sprintf("%08d", entryIndex)), out, 0 /* pri */)
 	ent := raftpb.Entry{
 		Term:  1,
 		Index: uint64(replica.RaftCommittedIndex + entryIndex),

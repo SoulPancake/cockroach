@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package gossip
 
@@ -279,6 +274,23 @@ func (is *infoStore) getHighWaterStamps() map[roachpb.NodeID]int64 {
 		copy[k] = hws
 	}
 	return copy
+}
+
+// getHighWaterStampsWithDiff returns a copy of the high water stamps that are
+// different from the ones provided in prevFull. It also returns a full map of
+// updated high water stamps. The caller should use this in subsequent calls to
+// this method.
+func (is *infoStore) getHighWaterStampsWithDiff(
+	prevFull map[roachpb.NodeID]int64,
+) (newFull, diff map[roachpb.NodeID]int64) {
+	diff = make(map[roachpb.NodeID]int64)
+	for k, hws := range is.highWaterStamps {
+		if prevFull[k] != hws {
+			prevFull[k] = hws
+			diff[k] = hws
+		}
+	}
+	return prevFull, diff
 }
 
 // registerCallback registers a callback for a key pattern to be

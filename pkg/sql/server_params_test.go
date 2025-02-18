@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -25,8 +20,6 @@ import (
 func createTestServerParamsAllowTenants() (base.TestServerArgs, *tests.CommandFilters) {
 	var cmdFilters tests.CommandFilters
 	params := base.TestServerArgs{}
-	// Disable the default test tenant as limits to the number of spans in a
-	// secondary tenant cause this test to fail. Tracked with #76378.
 	params.Knobs.SQLStatsKnobs = sqlstats.CreateTestingKnobs()
 	params.Knobs.Store = &kvserver.StoreTestingKnobs{
 		EvalKnobs: kvserverbase.BatchEvalTestingKnobs{

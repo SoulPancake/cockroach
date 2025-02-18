@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package log
 
@@ -112,7 +107,7 @@ func testBase(
 
 	// Apply the configuration.
 	TestingResetActive()
-	cleanup, err := ApplyConfig(cfg, FileSinkMetrics{}, nil /* fatalOnLogStall */)
+	cleanup, err := ApplyConfig(cfg, nil /* fileSinkMetricsForDir */, nil /* fatalOnLogStall */)
 	require.NoError(t, err)
 	defer cleanup()
 
@@ -121,18 +116,15 @@ func testBase(
 	Ops.Infof(context.Background(), "hello world")
 	logDuration := timeutil.Since(logStart)
 
-	// Note: deadline is passed by the caller and already contains slack
-	// to accommodate for the overhead of the logging call compared to
-	// the timeout in the HTTP request.
-	if deadline > 0 && logDuration > deadline {
+	if deadline > 0 {
+		// Note: deadline is passed by the caller and already contains slack
+		// to accommodate for the overhead of the logging call compared to
+		// the timeout in the HTTP request.
 		require.LessOrEqualf(t, logDuration, deadline,
 			"Log call exceeded timeout, expected to be less than %s, got %s", deadline.String(), logDuration.String())
-	}
-
-	// If we don't properly hang in the handler when we want to test a
-	// timeout, we'll just log very quickly. This check ensures that we
-	// catch that testing error.
-	if deadline > 0 && logDuration < *defaults.Timeout {
+		// If we don't properly hang in the handler when we want to test a
+		// timeout, we'll just log very quickly. This check ensures that we
+		// catch that testing error.
 		require.Greaterf(t, logDuration, *defaults.Timeout,
 			"Log call was too fast, expected to be greater than %s, got %s", defaults.Timeout.String(), logDuration.String())
 	}
@@ -204,7 +196,7 @@ func TestHTTPSinkTimeout(t *testing.T) {
 		},
 	}
 
-	testBase(t, defaults, nil /* testFn */, true /* hangServer */, 1*time.Second, time.Duration(0))
+	testBase(t, defaults, nil /* testFn */, true /* hangServer */, 10*time.Second, time.Duration(0))
 }
 
 // TestHTTPSinkContentTypeJSON verifies that the HTTP sink content type

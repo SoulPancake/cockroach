@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sslocal
 
@@ -50,8 +45,7 @@ type SQLStats struct {
 
 	knobs *sqlstats.TestingKnobs
 
-	insights           insights.WriterProvider
-	latencyInformation insights.LatencyInformation
+	anomalies *insights.AnomalyDetector
 }
 
 func newSQLStats(
@@ -60,25 +54,23 @@ func newSQLStats(
 	uniqueTxnFingerprintLimit *settings.IntSetting,
 	curMemBytesCount *metric.Gauge,
 	maxMemBytesHist metric.IHistogram,
-	insightsWriter insights.WriterProvider,
 	parentMon *mon.BytesMonitor,
 	flushTarget Sink,
 	knobs *sqlstats.TestingKnobs,
-	latencyInformation insights.LatencyInformation,
+	anomalies *insights.AnomalyDetector,
 ) *SQLStats {
 	monitor := mon.NewMonitor(mon.Options{
-		Name:       "SQLStats",
+		Name:       mon.MakeMonitorName("SQLStats"),
 		CurCount:   curMemBytesCount,
 		MaxHist:    maxMemBytesHist,
 		Settings:   st,
 		LongLiving: true,
 	})
 	s := &SQLStats{
-		st:                 st,
-		flushTarget:        flushTarget,
-		knobs:              knobs,
-		insights:           insightsWriter,
-		latencyInformation: latencyInformation,
+		st:          st,
+		flushTarget: flushTarget,
+		knobs:       knobs,
+		anomalies:   anomalies,
 	}
 	s.atomic = ssmemstorage.NewSQLStatsAtomicCounters(
 		st,
@@ -121,7 +113,7 @@ func (s *SQLStats) getStatsForApplication(appName string) *ssmemstorage.Containe
 		s.mu.mon,
 		appName,
 		s.knobs,
-		s.latencyInformation,
+		s.anomalies,
 	)
 	s.mu.apps[appName] = a
 	return a

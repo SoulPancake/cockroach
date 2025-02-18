@@ -1,10 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -42,6 +39,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/pgurlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
@@ -51,6 +49,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
 	"github.com/lib/pq"
@@ -101,7 +100,7 @@ func readNextMessages(
 			return nil, ctx.Err()
 		}
 		if log.V(1) {
-			log.Infof(context.Background(), "About to read a message (%d out of %d)", len(actual), numMessages)
+			log.Infof(context.Background(), "about to read a message (%d out of %d)", len(actual), numMessages)
 		}
 		m, err := f.Next()
 		if log.V(1) {
@@ -132,7 +131,9 @@ func readNextMessages(
 	return actual, nil
 }
 
-func stripTsFromPayloads(payloads []cdctest.TestFeedMessage) ([]string, error) {
+func stripTsFromPayloads(
+	envelopeType changefeedbase.EnvelopeType, payloads []cdctest.TestFeedMessage,
+) ([]string, error) {
 	var actual []string
 	for _, m := range payloads {
 		var value []byte
@@ -140,7 +141,21 @@ func stripTsFromPayloads(payloads []cdctest.TestFeedMessage) ([]string, error) {
 		if err := gojson.Unmarshal(m.Value, &message); err != nil {
 			return nil, errors.Wrapf(err, `unmarshal: %s`, m.Value)
 		}
-		delete(message, "updated")
+
+		switch envelopeType {
+		case changefeedbase.OptEnvelopeEnriched:
+			// This message may have a `payload` wrapper if format=json and `enriched_properties` includes `schema`
+			if message["payload"] == nil {
+				delete(message, "ts_ns")
+			} else {
+				delete(message["payload"].(map[string]any), "ts_ns")
+			}
+		case changefeedbase.OptEnvelopeWrapped:
+			delete(message, "updated")
+		default:
+			return nil, errors.Newf("unexpected envelope type: %s", envelopeType)
+		}
+
 		value, err := reformatJSON(message)
 		if err != nil {
 			return nil, err
@@ -188,7 +203,12 @@ func checkPerKeyOrdering(payloads []cdctest.TestFeedMessage) (bool, error) {
 }
 
 func assertPayloadsBase(
-	t testing.TB, f cdctest.TestFeed, expected []string, stripTs bool, perKeyOrdered bool,
+	t testing.TB,
+	f cdctest.TestFeed,
+	expected []string,
+	stripTs bool,
+	perKeyOrdered bool,
+	envelopeType changefeedbase.EnvelopeType,
 ) {
 	t.Helper()
 	timeout := assertPayloadsTimeout()
@@ -200,13 +220,18 @@ func assertPayloadsBase(
 	require.NoError(t,
 		withTimeout(f, timeout,
 			func(ctx context.Context) (err error) {
-				return assertPayloadsBaseErr(ctx, f, expected, stripTs, perKeyOrdered)
+				return assertPayloadsBaseErr(ctx, f, expected, stripTs, perKeyOrdered, envelopeType)
 			},
 		))
 }
 
 func assertPayloadsBaseErr(
-	ctx context.Context, f cdctest.TestFeed, expected []string, stripTs bool, perKeyOrdered bool,
+	ctx context.Context,
+	f cdctest.TestFeed,
+	expected []string,
+	stripTs bool,
+	perKeyOrdered bool,
+	envelopeType changefeedbase.EnvelopeType,
 ) error {
 	actual, err := readNextMessages(ctx, f, len(expected))
 	if err != nil {
@@ -232,7 +257,7 @@ func assertPayloadsBaseErr(
 	// strip timestamps after checking per-key ordering since check uses timestamps
 	if stripTs {
 		// format again with timestamps stripped
-		actualFormatted, err = stripTsFromPayloads(actual)
+		actualFormatted, err = stripTsFromPayloads(envelopeType, actual)
 		if err != nil {
 			return err
 		}
@@ -272,19 +297,26 @@ func withTimeout(
 
 func assertPayloads(t testing.TB, f cdctest.TestFeed, expected []string) {
 	t.Helper()
-	assertPayloadsBase(t, f, expected, false, false)
+	assertPayloadsBase(t, f, expected, false, false, changefeedbase.OptEnvelopeWrapped)
+}
+
+func assertPayloadsEnvelopeStripTs(
+	t testing.TB, f cdctest.TestFeed, envelopeType changefeedbase.EnvelopeType, expected []string,
+) {
+	t.Helper()
+	assertPayloadsBase(t, f, expected, true, false, envelopeType)
 }
 
 func assertPayloadsStripTs(t testing.TB, f cdctest.TestFeed, expected []string) {
 	t.Helper()
-	assertPayloadsBase(t, f, expected, true, false)
+	assertPayloadsBase(t, f, expected, true, false, changefeedbase.OptEnvelopeWrapped)
 }
 
 // assert that the messages received by the sink maintain per-key ordering guarantees. then,
 // strip the timestamp from the messages and compare them to the expected payloads.
 func assertPayloadsPerKeyOrderedStripTs(t testing.TB, f cdctest.TestFeed, expected []string) {
 	t.Helper()
-	assertPayloadsBase(t, f, expected, true, true)
+	assertPayloadsBase(t, f, expected, true, true, changefeedbase.OptEnvelopeWrapped)
 }
 
 func avroToJSON(t testing.TB, reg *cdctest.SchemaRegistry, avroBytes []byte) []byte {
@@ -413,6 +445,10 @@ func startTestFullServer(
 		Settings:          options.settings,
 	}
 
+	if options.debugUseAfterFinish {
+		args.Tracer = tracing.NewTracerWithOpt(context.Background(), tracing.WithUseAfterFinishOpt(true, true))
+	}
+
 	if options.argsFn != nil {
 		options.argsFn(&args)
 	}
@@ -523,6 +559,10 @@ func startTestTenant(
 		Settings:      options.settings,
 	}
 
+	if options.debugUseAfterFinish {
+		tenantArgs.Tracer = tracing.NewTracerWithOpt(context.Background(), tracing.WithUseAfterFinishOpt(true, true))
+	}
+
 	tenantServer, tenantDB := serverutils.StartTenant(t, systemServer, tenantArgs)
 	// Re-run setup on the tenant as well
 	tenantRunner := sqlutils.MakeSQLRunner(tenantDB)
@@ -551,6 +591,8 @@ type feedTestOptions struct {
 	allowedSinkTypes             []string
 	disabledSinkTypes            []string
 	settings                     *cluster.Settings
+	additionalSystemPrivs        []string
+	debugUseAfterFinish          bool
 }
 
 type feedTestOption func(opts *feedTestOptions)
@@ -586,6 +628,12 @@ var feedTestOmitSinks = func(sinkTypes ...string) feedTestOption {
 	return func(opts *feedTestOptions) { opts.disabledSinkTypes = append(opts.disabledSinkTypes, sinkTypes...) }
 }
 
+var feedTestAdditionalSystemPrivs = func(privs ...string) feedTestOption {
+	return func(opts *feedTestOptions) {
+		opts.additionalSystemPrivs = append(opts.additionalSystemPrivs, privs...)
+	}
+}
+
 func (opts feedTestOptions) omitSinks(sinks ...string) feedTestOptions {
 	res := opts
 	res.disabledSinkTypes = append(opts.disabledSinkTypes, sinks...)
@@ -609,6 +657,10 @@ func withKnobsFn(fn updateKnobsFn) feedTestOption {
 
 // Silence the linter.
 var _ = withKnobsFn(nil /* fn */)
+
+var withDebugUseAfterFinish feedTestOption = func(opts *feedTestOptions) {
+	opts.debugUseAfterFinish = true
+}
 
 func newTestOptions() feedTestOptions {
 	// percentTenant is the percentage of tests that will be run against
@@ -643,7 +695,7 @@ func serverArgsRegion(args base.TestServerArgs) string {
 func expectNotice(
 	t *testing.T, s serverutils.ApplicationLayerInterface, sql string, expected string,
 ) {
-	url, cleanup := sqlutils.PGUrl(t, s.SQLAddr(), t.Name(), url.User(username.RootUser))
+	url, cleanup := pgurlutils.PGUrl(t, s.SQLAddr(), t.Name(), url.User(username.RootUser))
 	defer cleanup()
 	base, err := pq.NewConnector(url.String())
 	if err != nil {
@@ -714,8 +766,8 @@ func loadProgress(
 	jobID := jobFeed.JobID()
 	job, err := jobRegistry.LoadJob(context.Background(), jobID)
 	require.NoError(t, err)
-	if job.Status().Terminal() {
-		t.Errorf("tried to load progress for job %v but it has reached terminal status %s with error %s", job, job.Status(), jobFeed.FetchTerminalJobErr())
+	if job.State().Terminal() {
+		t.Errorf("tried to load progress for job %v but it has reached terminal status %s with error %s", job, job.State(), jobFeed.FetchTerminalJobErr())
 	}
 	return job.Progress()
 }
@@ -957,7 +1009,7 @@ func makeFeedFactoryWithOptions(
 	pgURLForUser := func(u string, pass ...string) (url.URL, func()) {
 		t.Logf("pgURL %s %s", sinkType, u)
 		if len(pass) < 1 {
-			return sqlutils.PGUrl(t, s.SQLAddr(), t.Name(), url.User(u))
+			return pgurlutils.PGUrl(t, s.SQLAddr(), t.Name(), url.User(u))
 		}
 		return url.URL{
 			Scheme: "postgres",
@@ -966,7 +1018,7 @@ func makeFeedFactoryWithOptions(
 	}
 	switch sinkType {
 	case "kafka":
-		f := makeKafkaFeedFactory(srvOrCluster, db)
+		f := makeKafkaFeedFactory(t, srvOrCluster, db)
 		userDB, cleanup := getInitialDBForEnterpriseFactory(t, s, db, options)
 		f.(*kafkaFeedFactory).configureUserDB(userDB)
 		return f, func() { cleanup() }
@@ -1008,7 +1060,7 @@ func makeFeedFactoryWithOptions(
 		pgURLForUserSinkless := func(u string, pass ...string) (url.URL, func()) {
 			t.Logf("pgURL %s %s", sinkType, u)
 			if len(pass) < 1 {
-				sink, cleanup := sqlutils.PGUrl(t, s.SQLAddr(), t.Name(), url.User(u))
+				sink, cleanup := pgurlutils.PGUrl(t, s.SQLAddr(), t.Name(), url.User(u))
 				sink.Path = "d"
 				return sink, cleanup
 			}
@@ -1017,9 +1069,9 @@ func makeFeedFactoryWithOptions(
 				User:   url.UserPassword(u, pass[0]),
 				Host:   s.SQLAddr(), Path: "d"}, func() {}
 		}
-		sink, cleanup := getInitialSinkForSinklessFactory(t, db, pgURLForUserSinkless)
+		sink, cleanup := getInitialSinkForSinklessFactory(t, db, pgURLForUserSinkless, options)
 		root, cleanupRoot := pgURLForUserSinkless(username.RootUser)
-		f := makeSinklessFeedFactory(s, sink, root, pgURLForUserSinkless)
+		f := makeSinklessFeedFactory(t, s, sink, root, pgURLForUserSinkless)
 		return f, func() {
 			cleanup()
 			cleanupRoot()
@@ -1042,6 +1094,7 @@ func getInitialDBForEnterpriseFactory(
 		user := "EnterpriseFeedUser"
 		password := "hunter2"
 		createUserWithDefaultPrivilege(t, rootDB, user, password, "CHANGEFEED", "SELECT")
+		grantUserAdditionalSystemPrivileges(t, rootDB, user, opts.additionalSystemPrivs)
 		pgURL := url.URL{
 			Scheme: "postgres",
 			User:   url.UserPassword(user, password),
@@ -1058,16 +1111,17 @@ func getInitialDBForEnterpriseFactory(
 }
 
 func getInitialSinkForSinklessFactory(
-	t *testing.T, db *gosql.DB, sinkForUser sinkForUser,
+	t *testing.T, db *gosql.DB, sinkForUser sinkForUser, opts feedTestOptions,
 ) (url.URL, func()) {
 	// Instead of creating sinkless changefeeds on the root connection, we may choose to create
 	// them on a test user connection. This user should have the minimum privileges to create a changefeed,
 	// which means they default to having the SELECT privilege on all tables.
 	const percentNonRoot = 1
-	if rand.Float32() < percentNonRoot {
+	if !opts.forceRootUserConnection && rand.Float32() < percentNonRoot {
 		user := "SinklessFeedUser"
 		password := "hunter2"
 		createUserWithDefaultPrivilege(t, db, user, password, "SELECT")
+		grantUserAdditionalSystemPrivileges(t, db, user, opts.additionalSystemPrivs)
 		return sinkForUser(user, password)
 	}
 	return sinkForUser(username.RootUser)
@@ -1093,6 +1147,15 @@ func createUserWithDefaultPrivilege(
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func grantUserAdditionalSystemPrivileges(
+	t *testing.T, rootDB *gosql.DB, user string, privs []string,
+) {
+	for _, priv := range privs {
+		_, err := rootDB.Exec(fmt.Sprintf(`GRANT SYSTEM %s TO %s`, priv, user))
+		require.NoError(t, err)
 	}
 }
 
@@ -1256,9 +1319,7 @@ func verifyLogsWithEmittedBytesAndMessages(
 			emittedBytes += msg.EmittedBytes
 			emittedMessages += msg.EmittedMessages
 			require.Equal(t, interval, msg.LoggingInterval)
-			if closing {
-				require.Equal(t, true, msg.Closing)
-			}
+			require.Equal(t, closing, msg.Closing)
 		}
 		if emittedBytes == 0 || emittedMessages == 0 {
 			return errors.Newf(
@@ -1316,15 +1377,15 @@ func checkS3Credentials(t *testing.T) (bucket string, accessKey string, secretKe
 	return bucket, accessKey, secretKey
 }
 
-func waitForJobStatus(
-	runner *sqlutils.SQLRunner, t *testing.T, id jobspb.JobID, targetStatus jobs.Status,
+func waitForJobState(
+	runner *sqlutils.SQLRunner, t *testing.T, id jobspb.JobID, targetState jobs.State,
 ) {
 	testutils.SucceedsSoon(t, func() error {
-		var jobStatus string
+		var jobState string
 		query := `SELECT status FROM [SHOW CHANGEFEED JOB $1]`
-		runner.QueryRow(t, query, id).Scan(&jobStatus)
-		if targetStatus != jobs.Status(jobStatus) {
-			return errors.Errorf("Expected status:%s but found status:%s", targetStatus, jobStatus)
+		runner.QueryRow(t, query, id).Scan(&jobState)
+		if targetState != jobs.State(jobState) {
+			return errors.Errorf("Expected status:%s but found status:%s", targetState, jobState)
 		}
 		return nil
 	})
@@ -1375,4 +1436,16 @@ func ChangefeedJobPermissionsTestSetup(t *testing.T, s TestServer) {
 
 		`CREATE USER regularUser`,
 	)
+}
+
+// getTestingEnrichedSourceData creates an enrichedSourceData
+// for use in tests.
+func getTestingEnrichedSourceData() enrichedSourceData {
+	return enrichedSourceData{jobId: "test_id"}
+}
+
+// getTestingEnrichedSourceProvider creates an enrichedSourceProvider
+// for use in tests.
+func getTestingEnrichedSourceProvider(opts changefeedbase.EncodingOptions) *enrichedSourceProvider {
+	return newEnrichedSourceProvider(opts, getTestingEnrichedSourceData())
 }

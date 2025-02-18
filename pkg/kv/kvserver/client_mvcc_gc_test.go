@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver_test
 
@@ -265,7 +260,7 @@ SELECT count(*)
 	// applied to foo's empty range.
 	ptsReader := store.GetStoreConfig().ProtectedTimestampReader
 	require.NoError(t,
-		spanconfigptsreader.TestingRefreshPTSState(ctx, t, ptsReader, s.Clock().Now()))
+		spanconfigptsreader.TestingRefreshPTSState(ctx, ptsReader, s.Clock().Now()))
 	ts, _, err := kvSubscriber.GetProtectionTimestamps(ctx, sp)
 	require.NoError(t, err)
 	require.Len(t, ts, 1)
@@ -274,7 +269,7 @@ SELECT count(*)
 	testutils.SucceedsSoon(t, func() error {
 		require.NoError(t, store.ManualMVCCGC(repl))
 		require.NoError(t,
-			spanconfigptsreader.TestingRefreshPTSState(ctx, t, ptsReader, s.Clock().Now()))
+			spanconfigptsreader.TestingRefreshPTSState(ctx, ptsReader, s.Clock().Now()))
 		threshold := repl.GetGCThreshold()
 		if !threshold.Equal(ptsTime.Prev()) {
 			require.False(t, ptsTime.Prev().Less(threshold), "range GC threshold should never pass protected timestamp")

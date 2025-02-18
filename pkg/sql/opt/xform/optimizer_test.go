@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package xform_test
 
@@ -59,23 +54,15 @@ func TestDetachMemo(t *testing.T) {
 		t.Error("after memo cannot be the same as the detached memo")
 	}
 
-	if !strings.Contains(after.RootExpr().String(), "variable: a:1 [type=int]") {
+	if !strings.Contains(after.String(), "variable: a:1 [type=int]") {
 		t.Error("after memo did not contain expected operator")
-	}
-
-	if after.RootExpr().(memo.RelExpr).Memo() != after {
-		t.Error("after memo expression does not reference the after memo")
 	}
 
 	if before == o.Memo() {
 		t.Error("detached memo should not be reused")
 	}
 
-	if before.RootExpr().(memo.RelExpr).Memo() != before {
-		t.Error("detached memo expression does not reference the detached memo")
-	}
-
-	if !strings.Contains(before.RootExpr().String(), "variable: c:3 [type=string]") {
+	if !strings.Contains(before.String(), "variable: c:3 [type=string]") {
 		t.Error("detached memo did not contain expected operator")
 	}
 }
@@ -126,7 +113,7 @@ func TestDetachMemoRace(t *testing.T) {
 			// Rewrite the filter to use a different column, which will trigger creation
 			// of new table statistics. If the statistics object is aliased, this will
 			// be racy.
-			f.CopyAndReplace(mem.RootExpr().(memo.RelExpr), mem.RootProps(), replaceFn)
+			f.CopyAndReplace(mem, mem.RootExpr().(memo.RelExpr), mem.RootProps(), replaceFn)
 			wg.Done()
 		}()
 	}

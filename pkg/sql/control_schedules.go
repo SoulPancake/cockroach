@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -30,7 +25,7 @@ import (
 )
 
 type controlSchedulesNode struct {
-	rows    planNode
+	singleInputPlanNode
 	command tree.ScheduleCommand
 	numRows int
 }
@@ -115,7 +110,7 @@ func DeleteSchedule(
 // startExec implements planNode interface.
 func (n *controlSchedulesNode) startExec(params runParams) error {
 	for {
-		ok, err := n.rows.Next(params)
+		ok, err := n.input.Next(params)
 		if err != nil {
 			return err
 		}
@@ -123,7 +118,7 @@ func (n *controlSchedulesNode) startExec(params runParams) error {
 			break
 		}
 
-		schedule, err := loadSchedule(params, n.rows.Values()[0])
+		schedule, err := loadSchedule(params, n.input.Values()[0])
 		if err != nil {
 			return err
 		}
@@ -208,5 +203,5 @@ func (*controlSchedulesNode) Values() tree.Datums { return nil }
 
 // Close implements planNode interface.
 func (n *controlSchedulesNode) Close(ctx context.Context) {
-	n.rows.Close(ctx)
+	n.input.Close(ctx)
 }

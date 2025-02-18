@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package builtins
 
@@ -108,8 +103,8 @@ func testMin(t *testing.T, evalCtx *eval.Context, wfr *eval.WindowFrameRun) {
 			if minResult != naiveMin {
 				t.Errorf("Min sliding window returned wrong result: expected %+v, found %+v", naiveMin, minResult)
 				t.Errorf("partitionSize: %+v idx: %+v offset: %+v", wfr.PartitionSize(), wfr.RowIdx, offset)
-				t.Errorf(min.sw.string())
-				t.Errorf(partitionToString(context.Background(), wfr.Rows))
+				t.Error(min.sw.string())
+				t.Error(partitionToString(context.Background(), wfr.Rows))
 				panic("")
 			}
 		}
@@ -151,8 +146,8 @@ func testMax(t *testing.T, evalCtx *eval.Context, wfr *eval.WindowFrameRun) {
 			if maxResult != naiveMax {
 				t.Errorf("Max sliding window returned wrong result: expected %+v, found %+v", naiveMax, maxResult)
 				t.Errorf("partitionSize: %+v idx: %+v offset: %+v", wfr.PartitionSize(), wfr.RowIdx, offset)
-				t.Errorf(max.sw.string())
-				t.Errorf(partitionToString(context.Background(), wfr.Rows))
+				t.Error(max.sw.string())
+				t.Error(partitionToString(context.Background(), wfr.Rows))
 				panic("")
 			}
 		}
@@ -199,7 +194,7 @@ func testSumAndAvg(t *testing.T, evalCtx *eval.Context, wfr *eval.WindowFrameRun
 			if s != naiveSum {
 				t.Errorf("Sum sliding window returned wrong result: expected %+v, found %+v", naiveSum, s)
 				t.Errorf("partitionSize: %+v idx: %+v offset: %+v", wfr.PartitionSize(), wfr.RowIdx, offset)
-				t.Errorf(partitionToString(context.Background(), wfr.Rows))
+				t.Error(partitionToString(context.Background(), wfr.Rows))
 				panic("")
 			}
 			a, err := avgResult.Float64()
@@ -213,7 +208,7 @@ func testSumAndAvg(t *testing.T, evalCtx *eval.Context, wfr *eval.WindowFrameRun
 			if a != float64(naiveSum)/float64(frameSize) {
 				t.Errorf("Sum sliding window returned wrong result: expected %+v, found %+v", float64(naiveSum)/float64(frameSize), a)
 				t.Errorf("partitionSize: %+v idx: %+v offset: %+v", wfr.PartitionSize(), wfr.RowIdx, offset)
-				t.Errorf(partitionToString(context.Background(), wfr.Rows))
+				t.Error(partitionToString(context.Background(), wfr.Rows))
 				panic("")
 			}
 		}

@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sslocal_test
 
@@ -14,7 +9,6 @@ import (
 	"context"
 	gosql "database/sql"
 	"encoding/json"
-	"fmt"
 	"net/url"
 	"sort"
 	"strings"
@@ -39,11 +33,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessionphase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/insights"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/persistedsqlstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/persistedsqlstats/sqlstatstestutil"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/sslocal"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/ssmemstorage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/pgurlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -54,7 +48,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/jackc/pgx/v4"
+	"github.com/cockroachdb/redact"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 )
 
@@ -342,7 +337,7 @@ WHERE
 `, [][]string{{"SELECT _ WHERE _", "1"}})
 
 	server.SQLServer().(*sql.Server).
-		GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats).MaybeFlush(ctx, cluster.ApplicationLayer(0).AppStopper())
+		GetSQLStatsProvider().MaybeFlush(ctx, cluster.ApplicationLayer(0).AppStopper())
 
 	sqlDB.CheckQueryResults(t, `
 SELECT
@@ -444,29 +439,28 @@ func TestExplicitTxnFingerprintAccounting(t *testing.T) {
 
 	st := cluster.MakeTestingClusterSettings()
 	monitor := mon.NewUnlimitedMonitor(ctx, mon.Options{
-		Name:     "test",
+		Name:     mon.MakeMonitorName("test"),
 		Settings: st,
 	})
 
-	insightsProvider := insights.New(st, insights.NewMetrics())
+	insightsProvider := insights.New(st, insights.NewMetrics(), nil)
 	sqlStats := sslocal.New(
 		st,
 		sqlstats.MaxMemSQLStatsStmtFingerprints,
 		sqlstats.MaxMemSQLStatsTxnFingerprints,
 		nil, /* curMemoryBytesCount */
 		nil, /* maxMemoryBytesHist */
-		insightsProvider.Writer,
 		monitor,
 		nil, /* reportingSink */
 		nil, /* knobs */
-		insightsProvider.LatencyInformation(),
+		insightsProvider.Anomalies(),
 	)
 
 	appStats := sqlStats.GetApplicationStats("" /* appName */)
 	statsCollector := sslocal.NewStatsCollector(
 		st,
 		appStats,
-		insightsProvider.Writer(false /* internal */),
+		insightsProvider.Writer(),
 		sessionphase.NewTimes(),
 		sqlStats.GetCounters(),
 		false, /* underOuterTxn */
@@ -478,7 +472,7 @@ func TestExplicitTxnFingerprintAccounting(t *testing.T) {
 		txnFingerprintIDHash := util.MakeFNV64()
 		statsCollector.StartTransaction()
 		defer func() {
-			statsCollector.EndTransaction(ctx, txnFingerprintID)
+			statsCollector.EndTransaction(ctx, txnFingerprintID, false /* implicit */)
 			require.NoError(t,
 				statsCollector.
 					RecordTransaction(ctx, txnFingerprintID, sqlstats.RecordedTxnStats{
@@ -563,7 +557,7 @@ func TestAssociatingStmtStatsWithTxnFingerprint(t *testing.T) {
 	st := cluster.MakeTestingClusterSettings()
 	updater := st.MakeUpdater()
 	monitor := mon.NewUnlimitedMonitor(ctx, mon.Options{
-		Name:     "test",
+		Name:     mon.MakeMonitorName("test"),
 		Settings: st,
 	})
 
@@ -577,24 +571,23 @@ func TestAssociatingStmtStatsWithTxnFingerprint(t *testing.T) {
 		require.NoError(t, err)
 
 		// Construct the SQL Stats machinery.
-		insightsProvider := insights.New(st, insights.NewMetrics())
+		insightsProvider := insights.New(st, insights.NewMetrics(), nil)
 		sqlStats := sslocal.New(
 			st,
 			sqlstats.MaxMemSQLStatsStmtFingerprints,
 			sqlstats.MaxMemSQLStatsTxnFingerprints,
 			nil,
 			nil,
-			insightsProvider.Writer,
 			monitor,
 			nil,
 			nil,
-			insightsProvider.LatencyInformation(),
+			insightsProvider.Anomalies(),
 		)
 		appStats := sqlStats.GetApplicationStats("" /* appName */)
 		statsCollector := sslocal.NewStatsCollector(
 			st,
 			appStats,
-			insightsProvider.Writer(false /* internal */),
+			insightsProvider.Writer(),
 			sessionphase.NewTimes(),
 			sqlStats.GetCounters(),
 			false, /* underOuterTxn */
@@ -617,7 +610,7 @@ func TestAssociatingStmtStatsWithTxnFingerprint(t *testing.T) {
 			}
 
 			transactionFingerprintID := appstatspb.TransactionFingerprintID(txnFingerprintIDHash.Sum())
-			statsCollector.EndTransaction(ctx, transactionFingerprintID)
+			statsCollector.EndTransaction(ctx, transactionFingerprintID, false /* implicit */)
 			err := statsCollector.RecordTransaction(ctx, transactionFingerprintID, sqlstats.RecordedTxnStats{
 				SessionData: &sessiondata.SessionData{
 					SessionData: sessiondatapb.SessionData{
@@ -764,7 +757,7 @@ func TestTransactionServiceLatencyOnExtendedProtocol(t *testing.T) {
 	defer s.Stopper().Stop(ctx)
 	ts := s.ApplicationLayer()
 
-	pgURL, cleanupGoDB := sqlutils.PGUrl(
+	pgURL, cleanupGoDB := pgurlutils.PGUrl(
 		t, ts.AdvSQLAddr(), "StartServer", url.User(username.RootUser))
 	defer cleanupGoDB()
 	c, err := pgx.Connect(ctx, pgURL.String())
@@ -792,7 +785,7 @@ func TestTransactionServiceLatencyOnExtendedProtocol(t *testing.T) {
 		// Ensure test case phase times are populated by query txn.
 		require.NotNil(t, tc.phaseTimes)
 		// Ensure SessionTransactionStarted variable is populated.
-		require.False(t, tc.phaseTimes.GetSessionPhaseTime(sessionphase.SessionTransactionStarted).IsZero())
+		require.NotZero(t, tc.phaseTimes.GetSessionPhaseTime(sessionphase.SessionTransactionStarted))
 		// Ensure compute transaction service latency is within a reasonable threshold.
 		require.Less(t, tc.phaseTimes.GetTransactionServiceLatency(), latencyThreshold)
 	}()
@@ -1427,7 +1420,7 @@ func TestSQLStatsIdleLatencies(t *testing.T) {
 
 			// Set a unique application name for our session, so we can find our
 			// stats easily.
-			appName := t.Name()
+			appName := redact.RedactableString(t.Name())
 			_, err := opsDB.Exec("SET application_name = $1", appName)
 			require.NoError(t, err)
 
@@ -1489,7 +1482,7 @@ func TestSQLStatsIndexesUsed(t *testing.T) {
 	testServer, sqlConn, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer testServer.Stopper().Stop(ctx)
 	testConn := sqlutils.MakeSQLRunner(sqlConn)
-	appName := "indexes-usage"
+	var appName redact.RedactableString = "indexes-usage"
 	testConn.Exec(t, "SET application_name = $1", appName)
 
 	testCases := []struct {
@@ -1593,7 +1586,7 @@ func TestSQLStatsLatencyInfo(t *testing.T) {
 	testServer, sqlConn, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer testServer.Stopper().Stop(ctx)
 	testConn := sqlutils.MakeSQLRunner(sqlConn)
-	appName := "latency-info"
+	var appName redact.RedactableString = "latency-info"
 	testConn.Exec(t, "SET application_name = $1", appName)
 	testConn.Exec(t, "CREATE TABLE t1 (k INT)")
 
@@ -1626,9 +1619,6 @@ func TestSQLStatsLatencyInfo(t *testing.T) {
 
 	var min float64
 	var max float64
-	var p50 float64
-	var p90 float64
-	var p99 float64
 	stopwatch := timeutil.NewStopWatch()
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1638,22 +1628,16 @@ func TestSQLStatsLatencyInfo(t *testing.T) {
 			stopwatch.Stop()
 
 			rows := testConn.QueryRow(t, "SELECT statistics -> 'statistics' -> 'latencyInfo' ->> 'min',"+
-				"statistics -> 'statistics' -> 'latencyInfo' ->> 'max',"+
-				"statistics -> 'statistics' -> 'latencyInfo' ->> 'p50',"+
-				"statistics -> 'statistics' -> 'latencyInfo' ->> 'p90',"+
-				"statistics -> 'statistics' -> 'latencyInfo' ->> 'p99' "+
+				"statistics -> 'statistics' -> 'latencyInfo' ->> 'max' "+
 				"FROM CRDB_INTERNAL.STATEMENT_STATISTICS WHERE app_name = $1 "+
 				"AND metadata ->> 'query'=$2", appName, "SELECT * FROM t1")
-			rows.Scan(&min, &max, &p50, &p90, &p99)
+			rows.Scan(&min, &max)
 
 			require.Positivef(t, min, "expected min latency %f greater than 0", min)
 			require.Positivef(t, max, "expected max latency %f greater than 0", max)
 			require.GreaterOrEqualf(t, max, min, "expected max latency %f greater than min latency %f", max, min)
 			require.LessOrEqualf(t, max, stopwatch.Elapsed().Seconds(), "expected max latency %f less or equal %f",
 				max, stopwatch.Elapsed().Seconds())
-			require.GreaterOrEqualf(t, p99, p90, "expected p99 latency %f greater or equal p90 latency %f", p99, p90)
-			require.GreaterOrEqualf(t, p90, p50, "expected p90 latency %f greater or equal p50 latency %f", p90, p50)
-			require.LessOrEqualf(t, p99, max, "expected p99 latency %f less or equal max latency %f", p99, max)
 		})
 	}
 }
@@ -1724,10 +1708,10 @@ func TestSQLStats_ConsumeStats(t *testing.T) {
 
 	st := cluster.MakeTestingClusterSettings()
 	monitor := mon.NewUnlimitedMonitor(context.Background(), mon.Options{
-		Name:     "test",
+		Name:     mon.MakeMonitorName("test"),
 		Settings: st,
 	})
-	insightsProvider := insights.New(st, insights.NewMetrics())
+	insightsProvider := insights.New(st, insights.NewMetrics(), nil)
 
 	sqlStats := sslocal.New(
 		st,
@@ -1735,11 +1719,10 @@ func TestSQLStats_ConsumeStats(t *testing.T) {
 		sqlstats.MaxMemSQLStatsTxnFingerprints,
 		nil, /* curMemoryBytesCount */
 		nil, /* maxMemoryBytesHist */
-		insightsProvider.Writer,
 		monitor,
 		nil, /* reportingSink */
 		nil, /* knobs */
-		insightsProvider.LatencyInformation(),
+		insightsProvider.Anomalies(),
 	)
 
 	stmtContainer, _, _ := ssmemstorage.NewTempContainerFromExistingStmtStats(testStmtData)
@@ -1822,7 +1805,7 @@ FROM crdb_internal.statement_statistics WHERE app_name = $1`, appName)
 	// statement if it's the first time we've seen it.
 	t.Run("internal statement without a transaction", func(t *testing.T) {
 		testutils.RunTrueAndFalse(t, "attributed to user", func(t *testing.T, attributedToUser bool) {
-			appName := "without-txn"
+			var appName redact.RedactableString = "without-txn"
 			for i := 0; i < 10; i++ {
 				_, err := ts.InternalExecutor().(*sql.InternalExecutor).ExecEx(
 					ctx,
@@ -1835,7 +1818,7 @@ FROM crdb_internal.statement_statistics WHERE app_name = $1`, appName)
 			}
 
 			// Verify that the internal statement is captured.
-			query, cnt, sampledCnt := getStmtRow(appName, attributedToUser)
+			query, cnt, sampledCnt := getStmtRow(appName.StripMarkers(), attributedToUser)
 			require.Equal(t, "SELECT _", query)
 			require.Equal(t, 10, cnt)
 			require.Equal(t, 1, sampledCnt)
@@ -1844,7 +1827,7 @@ FROM crdb_internal.statement_statistics WHERE app_name = $1`, appName)
 
 	t.Run("internal statement with a transaction", func(t *testing.T) {
 		testutils.RunTrueAndFalse(t, "attributed to user", func(t *testing.T, attributedToUser bool) {
-			appName := "with-txn"
+			var appName redact.RedactableString = "with-txn"
 			for i := 0; i < 10; i++ {
 				err := ts.InternalDB().(descs.DB).Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 					_, err := txn.ExecEx(
@@ -1860,7 +1843,7 @@ FROM crdb_internal.statement_statistics WHERE app_name = $1`, appName)
 			}
 
 			// Verify that the internal statement is captured.
-			query, cnt, sampledCnt := getStmtRow(appName, attributedToUser)
+			query, cnt, sampledCnt := getStmtRow(appName.StripMarkers(), attributedToUser)
 			require.Equal(t, "SELECT _", query)
 			require.Equal(t, 10, cnt)
 			require.Equal(t, 1, sampledCnt)
@@ -1868,7 +1851,7 @@ FROM crdb_internal.statement_statistics WHERE app_name = $1`, appName)
 	})
 
 	t.Run("internal multi-statement transaction", func(t *testing.T) {
-		appName := "with-txn-multiple"
+		var appName redact.RedactableString = "with-txn-multiple"
 		err := ts.InternalDB().(descs.DB).Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 			for i := 0; i < 10; i++ {
 				if _, err := txn.Exec(ctx, appName, txn.KV(), "SELECT 1"); err != nil {
@@ -1880,7 +1863,7 @@ FROM crdb_internal.statement_statistics WHERE app_name = $1`, appName)
 		require.NoError(t, err)
 
 		// Verify that the internal statement is captured.
-		query, cnt, sampledCnt := getStmtRow(appName, false /* attributedToUser */)
+		query, cnt, sampledCnt := getStmtRow(appName.StripMarkers(), false /* attributedToUser */)
 		require.Equal(t, "SELECT _", query)
 		require.Equal(t, 10, cnt)
 		require.Equal(t, 1, sampledCnt)
@@ -1889,7 +1872,7 @@ FROM crdb_internal.statement_statistics WHERE app_name = $1`, appName)
 	// This test case differs from "internal statement with a transaction" since
 	// we use the internal executor without any extra txn state set up.
 	t.Run("internal statement with a transaction through executor", func(t *testing.T) {
-		appName := "with-txn-through-executor"
+		var appName redact.RedactableString = "with-txn-through-executor"
 		testutils.RunTrueAndFalse(t, "attributed to user", func(t *testing.T, attributedToUser bool) {
 			for i := 0; i < 10; i++ {
 				err := ts.InternalDB().(descs.DB).Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
@@ -1906,7 +1889,7 @@ FROM crdb_internal.statement_statistics WHERE app_name = $1`, appName)
 			}
 
 			// Verify that the internal statement is captured.
-			query, cnt, sampledCnt := getStmtRow(appName, attributedToUser)
+			query, cnt, sampledCnt := getStmtRow(appName.StripMarkers(), attributedToUser)
 			require.Equal(t, "SELECT _", query)
 			require.Equal(t, 10, cnt)
 			require.Equal(t, 1, sampledCnt)
@@ -1960,7 +1943,7 @@ func TestSQLStatsDiscardStatsOnFingerprintLimit(t *testing.T) {
 	// the total fingerprint count across all applications exceeds the limit.
 	conns := make([]*sqlutils.SQLRunner, 3)
 	for i := 0; i < 3; i++ {
-		appName := fmt.Sprintf("app%d", i)
+		appName := redact.Sprintf("app%d", i)
 		conns[i] = sqlutils.MakeSQLRunner(ts.SQLConn(t))
 		conns[i].Exec(t, "SET application_name = $1", appName)
 	}

@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowexec
 
@@ -67,8 +62,9 @@ type invertedJoiner struct {
 
 	fetchSpec fetchpb.IndexFetchSpec
 
-	runningState invertedJoinerState
-	diskMonitor  *mon.BytesMonitor
+	runningState        invertedJoinerState
+	unlimitedMemMonitor *mon.BytesMonitor
+	diskMonitor         *mon.BytesMonitor
 
 	// prefixEqualityCols are the ordinals of the columns from the join input
 	// that represent join values for the non-inverted prefix columns of
@@ -300,6 +296,7 @@ func newInvertedJoiner(
 			LockWaitPolicy:             spec.LockingWaitPolicy,
 			LockDurability:             spec.LockingDurability,
 			LockTimeout:                flowCtx.EvalCtx.SessionData().LockTimeout,
+			DeadlockTimeout:            flowCtx.EvalCtx.SessionData().DeadlockTimeout,
 			Alloc:                      &ij.alloc,
 			MemMonitor:                 flowCtx.Mon,
 			Spec:                       &spec.FetchSpec,
@@ -322,6 +319,7 @@ func newInvertedJoiner(
 
 	// Initialize memory monitors and row container for index rows.
 	ij.MemMonitor = execinfra.NewLimitedMonitor(ctx, flowCtx.Mon, flowCtx, "invertedjoiner-limited")
+	ij.unlimitedMemMonitor = execinfra.NewMonitor(ctx, flowCtx.Mon, "invertedjoiner-unlimited")
 	ij.diskMonitor = execinfra.NewMonitor(ctx, flowCtx.DiskMonitor, "invertedjoiner-disk")
 	ij.indexRows = rowcontainer.NewDiskBackedNumberedRowContainer(
 		true, /* deDup */
@@ -329,6 +327,7 @@ func newInvertedJoiner(
 		ij.FlowCtx.EvalCtx,
 		ij.FlowCtx.Cfg.TempStorage,
 		ij.MemMonitor,
+		ij.unlimitedMemMonitor,
 		ij.diskMonitor,
 	)
 
@@ -753,6 +752,9 @@ func (ij *invertedJoiner) close() {
 			ij.indexRows.Close(ij.Ctx())
 		}
 		ij.MemMonitor.Stop(ij.Ctx())
+		if ij.unlimitedMemMonitor != nil {
+			ij.unlimitedMemMonitor.Stop(ij.Ctx())
+		}
 		if ij.diskMonitor != nil {
 			ij.diskMonitor.Stop(ij.Ctx())
 		}
@@ -781,7 +783,7 @@ func (ij *invertedJoiner) execStatsForTrace() *execinfrapb.ComponentStats {
 			KVCPUTime:           optional.MakeTimeValue(fis.kvCPUTime),
 		},
 		Exec: execinfrapb.ExecStats{
-			MaxAllocatedMem:  optional.MakeUint(uint64(ij.MemMonitor.MaximumBytes())),
+			MaxAllocatedMem:  optional.MakeUint(uint64(ij.MemMonitor.MaximumBytes() + ij.unlimitedMemMonitor.MaximumBytes())),
 			MaxAllocatedDisk: optional.MakeUint(uint64(ij.diskMonitor.MaximumBytes())),
 		},
 		Output: ij.OutputHelper.Stats(),

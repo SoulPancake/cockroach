@@ -1,16 +1,12 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package memo
 
 import (
+	"context"
 	"math"
 	"math/rand"
 	"reflect"
@@ -24,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree/treewindow"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -187,6 +184,9 @@ func TestInterner(t *testing.T) {
 	invSpans4 := inverted.Spans{invSpan1, invSpan2}
 	invSpans5 := inverted.Spans{invSpan2, invSpan1}
 	invSpans6 := inverted.Spans{invSpan1, invSpan3}
+
+	postQueryBuilder1 := &testingPostQueryBuilder{id: 1}
+	postQueryBuilder2 := &testingPostQueryBuilder{id: 2}
 
 	type testVariation struct {
 		val1  interface{}
@@ -402,7 +402,7 @@ func TestInterner(t *testing.T) {
 		{hashFn: in.hasher.HashScanFlags, eqFn: in.hasher.IsScanFlagsEqual, variations: []testVariation{
 			// Use unnamed fields so that compilation fails if a new field is
 			// added to ScanFlags.
-			{val1: ScanFlags{false, false, false, false, false, false, false, 0, 0, intsets.Fast{}}, val2: ScanFlags{}, equal: true},
+			{val1: ScanFlags{false, false, false, false, false, false, false, false, 0, 0, intsets.Fast{}}, val2: ScanFlags{}, equal: true},
 			{val1: ScanFlags{}, val2: ScanFlags{}, equal: true},
 			{val1: ScanFlags{NoIndexJoin: false}, val2: ScanFlags{NoIndexJoin: true}, equal: false},
 			{val1: ScanFlags{NoIndexJoin: true}, val2: ScanFlags{NoIndexJoin: true}, equal: true},
@@ -417,6 +417,8 @@ func TestInterner(t *testing.T) {
 			{val1: ScanFlags{NoIndexJoin: true, Index: 1}, val2: ScanFlags{NoIndexJoin: false, Index: 1}, equal: false},
 			{val1: ScanFlags{NoFullScan: true}, val2: ScanFlags{NoFullScan: false}, equal: false},
 			{val1: ScanFlags{NoFullScan: true}, val2: ScanFlags{NoFullScan: true}, equal: true},
+			{val1: ScanFlags{AvoidFullScan: true}, val2: ScanFlags{AvoidFullScan: false}, equal: false},
+			{val1: ScanFlags{AvoidFullScan: true}, val2: ScanFlags{AvoidFullScan: true}, equal: true},
 			{val1: ScanFlags{ForceInvertedIndex: true}, val2: ScanFlags{ForceInvertedIndex: false}, equal: false},
 			{val1: ScanFlags{ForceInvertedIndex: true}, val2: ScanFlags{ForceInvertedIndex: true}, equal: true},
 			{
@@ -880,6 +882,12 @@ func TestInterner(t *testing.T) {
 			{val1: tree.PersistencePermanent, val2: tree.PersistencePermanent, equal: true},
 			{val1: tree.PersistencePermanent, val2: tree.PersistenceTemporary, equal: false},
 		}},
+
+		{hashFn: in.hasher.HashAfterTriggers, eqFn: in.hasher.IsAfterTriggersEqual, variations: []testVariation{
+			{val1: (*AfterTriggers)(nil), val2: (*AfterTriggers)(nil), equal: true},
+			{val1: &AfterTriggers{Builder: postQueryBuilder1}, val2: &AfterTriggers{Builder: postQueryBuilder1}, equal: true},
+			{val1: &AfterTriggers{Builder: postQueryBuilder1}, val2: &AfterTriggers{Builder: postQueryBuilder2}, equal: false},
+		}},
 	}
 
 	computeHashValue := func(hashFn reflect.Value, val interface{}) internHash {
@@ -1055,7 +1063,7 @@ func BenchmarkEncodeDatum(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		for _, d := range datums {
-			encodeDatum(nil, d)
+			encodeDatum(nil, d, nil /* scratch */)
 		}
 	}
 }
@@ -1076,4 +1084,23 @@ func BenchmarkIsDatumEqual(b *testing.B) {
 			h.IsDatumEqual(d, d)
 		}
 	}
+}
+
+type testingPostQueryBuilder struct {
+	id int
+}
+
+var _ PostQueryBuilder = &testingPostQueryBuilder{}
+
+func (*testingPostQueryBuilder) Build(
+	_ context.Context,
+	_ *tree.SemaContext,
+	_ *eval.Context,
+	_ cat.Catalog,
+	_ interface{},
+	_ opt.WithID,
+	_ *props.Relational,
+	_ opt.ColMap,
+) (RelExpr, error) {
+	return nil, nil
 }

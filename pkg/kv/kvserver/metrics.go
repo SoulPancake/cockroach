@@ -1,23 +1,15 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
 import (
 	"context"
 	"fmt"
-	"runtime/debug"
-	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval/result"
@@ -26,17 +18,19 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/split"
 	"github.com/cockroachdb/cockroach/pkg/multitenant"
 	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
+	"github.com/cockroachdb/cockroach/pkg/raft/tracker"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/disk"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/storage/fs"
+	"github.com/cockroachdb/cockroach/pkg/util/debugutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/metric/aggmetric"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/pebble"
-	"github.com/cockroachdb/pebble/sstable"
+	"github.com/cockroachdb/pebble/sstable/block"
 	"github.com/cockroachdb/pebble/vfs"
 )
 
@@ -72,6 +66,12 @@ var (
 		Measurement: "Replicas",
 		Unit:        metric.Unit_COUNT,
 	}
+	metaRaftLeaderNotFortifiedCount = metric.Metadata{
+		Name:        "replicas.leaders_not_fortified",
+		Help:        "Number of replicas that are not fortified Raft leaders",
+		Measurement: "Replicas",
+		Unit:        metric.Unit_COUNT,
+	}
 	metaRaftLeaderInvalidLeaseCount = metric.Metadata{
 		Name:        "replicas.leaders_invalid_lease",
 		Help:        "Number of replicas that are Raft leaders whose lease is invalid",
@@ -90,10 +90,35 @@ var (
 		Measurement: "Replicas",
 		Unit:        metric.Unit_COUNT,
 	}
+	metaAsleepCount = metric.Metadata{
+		Name:        "replicas.asleep",
+		Help:        "Number of asleep replicas. Similarly to quiesced replicas, asleep replicas do not tick in Raft.",
+		Measurement: "Replicas",
+		Unit:        metric.Unit_COUNT,
+	}
 	metaUninitializedCount = metric.Metadata{
 		Name:        "replicas.uninitialized",
 		Help:        "Number of uninitialized replicas, this does not include uninitialized replicas that can lie dormant in a persistent state.",
 		Measurement: "Replicas",
+		Unit:        metric.Unit_COUNT,
+	}
+
+	metaRaftFlowsReplicate = metric.Metadata{
+		Name:        "raft.flows.state_replicate",
+		Help:        "Number of leader->peer flows in StateReplicate",
+		Measurement: "Flows",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaRaftFlowsProbe = metric.Metadata{
+		Name:        "raft.flows.state_probe",
+		Help:        "Number of leader->peer flows in StateProbe",
+		Measurement: "Flows",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaRaftFlowsSnapshot = metric.Metadata{
+		Name:        "raft.flows.state_snapshot",
+		Help:        "Number of leader->peer flows in StateSnapshot",
+		Measurement: "Flows",
 		Unit:        metric.Unit_COUNT,
 	}
 
@@ -119,6 +144,12 @@ var (
 	metaOverReplicatedRangeCount = metric.Metadata{
 		Name:        "ranges.overreplicated",
 		Help:        "Number of ranges with more live replicas than the replication target",
+		Measurement: "Ranges",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaDecommissioningRangeCount = metric.Metadata{
+		Name:        "ranges.decommissioning",
+		Help:        "Number of ranges with at lease one replica on a decommissioning node",
 		Measurement: "Ranges",
 		Unit:        metric.Unit_COUNT,
 	}
@@ -163,6 +194,12 @@ var (
 	metaLeaseEpochCount = metric.Metadata{
 		Name:        "leases.epoch",
 		Help:        "Number of replica leaseholders using epoch-based leases",
+		Measurement: "Replicas",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaLeaseLeaderCount = metric.Metadata{
+		Name:        "leases.leader",
+		Help:        "Number of replica leaseholders using leader leases",
 		Measurement: "Replicas",
 		Unit:        metric.Unit_COUNT,
 	}
@@ -755,6 +792,16 @@ fully utilized.`,
 		Measurement: "Processing Time",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
+	metaStorageWriteAmplification = metric.Metadata{
+		Name: "storage.write-amplification",
+		Help: `Running measure of write-amplification.
+
+Write amplification is measured as the ratio of bytes written to disk relative to the logical
+bytes present in sstables, over the life of a store. This metric is a running average
+of the write amplification as tracked by Pebble.`,
+		Measurement: "Ratio of bytes written to logical bytes",
+		Unit:        metric.Unit_COUNT,
+	}
 	metaStorageCompactionsKeysPinnedCount = metric.Metadata{
 		Name: "storage.compactions.keys.pinned.count",
 		Help: `Cumulative count of storage engine KVs written to sstables during flushes and compactions due to open LSM snapshots.
@@ -780,6 +827,18 @@ would have been dropped. This increases write amplification, and introduces keys
 that must be skipped during iteration. This metric records the cumulative number of
 bytes preserved during flushes and compactions over the lifetime of the process.
 `,
+		Measurement: "Bytes",
+		Unit:        metric.Unit_BYTES,
+	}
+	metaStorageCompactionsCancelledCount = metric.Metadata{
+		Name:        "storage.compactions.cancelled.count",
+		Help:        `Cumulative count of compactions that were cancelled before they completed due to a conflicting operation.`,
+		Measurement: "Compactions",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaStorageCompactionsCancelledBytes = metric.Metadata{
+		Name:        "storage.compactions.cancelled.bytes",
+		Help:        `Cumulative volume of data written to sstables during compactions that were ultimately cancelled due to a conflicting operation.`,
 		Measurement: "Bytes",
 		Unit:        metric.Unit_BYTES,
 	}
@@ -1602,6 +1661,24 @@ cache will already have moved on to newer entries.
 		Measurement: "Messages",
 		Unit:        metric.Unit_COUNT,
 	}
+	metaRaftRcvdFortifyLeader = metric.Metadata{
+		Name:        "raft.rcvd.fortifyleader",
+		Help:        "Number of MsgFortifyLeader messages received by this store",
+		Measurement: "Messages",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaRaftRcvdFortifyLeaderResp = metric.Metadata{
+		Name:        "raft.rcvd.fortifyleaderresp",
+		Help:        "Number of MsgFortifyLeaderResp messages received by this store",
+		Measurement: "Messages",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaRaftRcvdDeFortifyLeader = metric.Metadata{
+		Name:        "raft.rcvd.defortifyleader",
+		Help:        "Number of MsgDeFortifyLeader messages received by this store",
+		Measurement: "Messages",
+		Unit:        metric.Unit_COUNT,
+	}
 	metaRaftRcvdDropped = metric.Metadata{
 		Name:        "raft.rcvd.dropped",
 		Help:        "Number of incoming Raft messages dropped (due to queue length or size)",
@@ -1744,13 +1821,6 @@ The messages are dropped to help these replicas to recover from I/O overload.`,
 		Unit:        metric.Unit_PERCENT,
 	}
 
-	// Replica queue metrics.
-	metaStoreFailures = metric.Metadata{
-		Name:        "storage.queue.store-failures",
-		Help:        "Number of replicas which failed processing in replica queues due to retryable store errors",
-		Measurement: "Replicas",
-		Unit:        metric.Unit_COUNT,
-	}
 	metaMVCCGCQueueSuccesses = metric.Metadata{
 		Name:        "queue.gc.process.success",
 		Help:        "Number of replicas successfully processed by the MVCC GC queue",
@@ -2071,6 +2141,12 @@ The messages are dropped to help these replicas to recover from I/O overload.`,
 		Measurement: "Txn Entries",
 		Unit:        metric.Unit_COUNT,
 	}
+	metaGCTransactionSpanGCPrepared = metric.Metadata{
+		Name:        "queue.gc.info.transactionspangcprepared",
+		Help:        "Number of GC'able entries corresponding to prepared txns",
+		Measurement: "Txn Entries",
+		Unit:        metric.Unit_COUNT,
+	}
 	metaGCAbortSpanScanned = metric.Metadata{
 		Name:        "queue.gc.info.abortspanscanned",
 		Help:        "Number of transactions present in the AbortSpan scanned from the engine",
@@ -2253,7 +2329,7 @@ throttled they do count towards 'delay.total' and 'delay.enginebackpressure'.
 	// TODO(mberhault): metrics for key age, per-key file/bytes counts.
 	metaEncryptionAlgorithm = metric.Metadata{
 		Name:        "rocksdb.encryption.algorithm",
-		Help:        "Algorithm in use for encryption-at-rest, see ccl/storageccl/engineccl/enginepbccl/key_registry.proto",
+		Help:        "Algorithm in use for encryption-at-rest, see storage/enginepb/key_registry.proto",
 		Measurement: "Encryption At Rest",
 		Unit:        metric.Unit_CONST,
 	}
@@ -2540,16 +2616,20 @@ type StoreMetrics struct {
 	ReservedReplicaCount          *metric.Gauge
 	RaftLeaderCount               *metric.Gauge
 	RaftLeaderNotLeaseHolderCount *metric.Gauge
+	RaftLeaderNotFortifiedCount   *metric.Gauge
 	RaftLeaderInvalidLeaseCount   *metric.Gauge
 	LeaseHolderCount              *metric.Gauge
 	QuiescentCount                *metric.Gauge
+	AsleepCount                   *metric.Gauge
 	UninitializedCount            *metric.Gauge
+	RaftFlowStateCounts           [tracker.StateCount]*metric.Gauge
 
 	// Range metrics.
 	RangeCount                *metric.Gauge
 	UnavailableRangeCount     *metric.Gauge
 	UnderReplicatedRangeCount *metric.Gauge
 	OverReplicatedRangeCount  *metric.Gauge
+	DecommissioningRangeCount *metric.Gauge
 
 	// Lease request metrics for successful and failed lease requests. These
 	// count proposals (i.e. it does not matter how many replicas apply the
@@ -2561,6 +2641,7 @@ type StoreMetrics struct {
 	LeaseTransferErrorCount        *metric.Counter
 	LeaseExpirationCount           *metric.Gauge
 	LeaseEpochCount                *metric.Gauge
+	LeaseLeaderCount               *metric.Gauge
 	LeaseLivenessCount             *metric.Gauge
 	LeaseViolatingPreferencesCount *metric.Gauge
 	LeaseLessPreferredCount        *metric.Gauge
@@ -2651,7 +2732,10 @@ type StoreMetrics struct {
 	SecondaryCacheWriteBackFails      *metric.Counter
 	StorageCompactionsPinnedKeys      *metric.Counter
 	StorageCompactionsPinnedBytes     *metric.Counter
+	StorageCompactionsCancelledCount  *metric.Counter
+	StorageCompactionsCancelledBytes  *metric.Counter
 	StorageCompactionsDuration        *metric.Counter
+	StorageWriteAmplification         *metric.GaugeFloat64
 	IterBlockBytes                    *metric.Counter
 	IterBlockBytesInCache             *metric.Counter
 	IterBlockReadDuration             *metric.Counter
@@ -2791,7 +2875,6 @@ type StoreMetrics struct {
 	RaftCoalescedHeartbeatsPending *metric.Gauge
 
 	// Replica queue metrics.
-	StoreFailures                             *metric.Counter
 	MVCCGCQueueSuccesses                      *metric.Counter
 	MVCCGCQueueFailures                       *metric.Counter
 	MVCCGCQueuePending                        *metric.Gauge
@@ -2847,6 +2930,7 @@ type StoreMetrics struct {
 	GCTransactionSpanGCCommitted *metric.Counter
 	GCTransactionSpanGCStaging   *metric.Counter
 	GCTransactionSpanGCPending   *metric.Counter
+	GCTransactionSpanGCPrepared  *metric.Counter
 	GCAbortSpanScanned           *metric.Counter
 	GCAbortSpanConsidered        *metric.Counter
 	GCAbortSpanGCNum             *metric.Counter
@@ -2923,14 +3007,14 @@ type StoreMetrics struct {
 	FsyncLatency     *metric.ManualWindowHistogram
 
 	// Disk metrics
-	DiskReadBytes              *metric.Gauge
-	DiskReadCount              *metric.Gauge
-	DiskReadTime               *metric.Gauge
-	DiskWriteBytes             *metric.Gauge
-	DiskWriteCount             *metric.Gauge
-	DiskWriteTime              *metric.Gauge
-	DiskIOTime                 *metric.Gauge
-	DiskWeightedIOTime         *metric.Gauge
+	DiskReadBytes              *metric.Counter
+	DiskReadCount              *metric.Counter
+	DiskReadTime               *metric.Counter
+	DiskWriteBytes             *metric.Counter
+	DiskWriteCount             *metric.Counter
+	DiskWriteTime              *metric.Counter
+	DiskIOTime                 *metric.Counter
+	DiskWeightedIOTime         *metric.Counter
 	DiskIopsInProgress         *metric.Gauge
 	DiskReadMaxBytesPerSecond  *metric.Gauge
 	DiskWriteMaxBytesPerSecond *metric.Gauge
@@ -2947,7 +3031,7 @@ type tenantMetricsRef struct {
 	// in assertions on failure.
 	_stack struct {
 		syncutil.Mutex
-		string
+		debugutil.SafeStack
 	}
 }
 
@@ -2955,7 +3039,7 @@ func (ref *tenantMetricsRef) assert(ctx context.Context) {
 	if atomic.LoadInt32(&ref._state) != 0 {
 		ref._stack.Lock()
 		defer ref._stack.Unlock()
-		log.FatalfDepth(ctx, 1, "tenantMetricsRef already finalized in:\n%s", ref._stack.string)
+		log.FatalfDepth(ctx, 1, "tenantMetricsRef already finalized in:\n%s", ref._stack.SafeStack)
 	}
 }
 
@@ -2994,7 +3078,7 @@ type TenantsStorageMetrics struct {
 	// everything will work with tenantsIDs in excess of math.MaxInt64
 	// except that should one ever look at this map through a debugger
 	// the int64->uint64 conversion has to be done manually.
-	tenants syncutil.IntMap // map[int64(roachpb.TenantID)]*tenantStorageMetrics
+	tenants syncutil.Map[roachpb.TenantID, tenantStorageMetrics]
 }
 
 // tenantsStorageMetricsSet returns the set of all metric names contained
@@ -3045,10 +3129,8 @@ func (sm *TenantsStorageMetrics) acquireTenant(tenantID roachpb.TenantID) *tenan
 		m.mu.refCount++
 		return false
 	}
-	key := int64(tenantID.ToUint64())
 	for {
-		if mPtr, ok := sm.tenants.Load(key); ok {
-			m := (*tenantStorageMetrics)(mPtr)
+		if m, ok := sm.tenants.Load(tenantID); ok {
 			if alreadyDestroyed := incRef(m); !alreadyDestroyed {
 				return &tenantMetricsRef{
 					_tenantID: tenantID,
@@ -3060,7 +3142,7 @@ func (sm *TenantsStorageMetrics) acquireTenant(tenantID roachpb.TenantID) *tenan
 		} else {
 			m := &tenantStorageMetrics{}
 			m.mu.Lock()
-			_, loaded := sm.tenants.LoadOrStore(key, unsafe.Pointer(m))
+			_, loaded := sm.tenants.LoadOrStore(tenantID, m)
 			if loaded {
 				// Lost the race with another goroutine to add the instance, go back
 				// around.
@@ -3107,7 +3189,7 @@ func (sm *TenantsStorageMetrics) releaseTenant(ctx context.Context, ref *tenantM
 		return          // unreachable
 	}
 	ref._stack.Lock()
-	ref._stack.string = string(debug.Stack())
+	ref._stack.SafeStack = debugutil.Stack()
 	ref._stack.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -3148,7 +3230,7 @@ func (sm *TenantsStorageMetrics) releaseTenant(ctx context.Context, ref *tenantM
 		(*gptr).Unlink()
 		*gptr = nil
 	}
-	sm.tenants.Delete(int64(ref._tenantID.ToUint64()))
+	sm.tenants.Delete(ref._tenantID)
 }
 
 // getTenant is a helper method used to retrieve the metrics for a tenant. The
@@ -3157,12 +3239,11 @@ func (sm *TenantsStorageMetrics) getTenant(
 	ctx context.Context, ref *tenantMetricsRef,
 ) *tenantStorageMetrics {
 	ref.assert(ctx)
-	key := int64(ref._tenantID.ToUint64())
-	mPtr, ok := sm.tenants.Load(key)
+	m, ok := sm.tenants.Load(ref._tenantID)
 	if !ok {
 		log.Fatalf(ctx, "no metrics exist for tenant %v", ref._tenantID)
 	}
-	return (*tenantStorageMetrics)(mPtr)
+	return m
 }
 
 type tenantStorageMetrics struct {
@@ -3239,16 +3320,20 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		ReservedReplicaCount:          metric.NewGauge(metaReservedReplicaCount),
 		RaftLeaderCount:               metric.NewGauge(metaRaftLeaderCount),
 		RaftLeaderNotLeaseHolderCount: metric.NewGauge(metaRaftLeaderNotLeaseHolderCount),
+		RaftLeaderNotFortifiedCount:   metric.NewGauge(metaRaftLeaderNotFortifiedCount),
 		RaftLeaderInvalidLeaseCount:   metric.NewGauge(metaRaftLeaderInvalidLeaseCount),
 		LeaseHolderCount:              metric.NewGauge(metaLeaseHolderCount),
 		QuiescentCount:                metric.NewGauge(metaQuiescentCount),
+		AsleepCount:                   metric.NewGauge(metaAsleepCount),
 		UninitializedCount:            metric.NewGauge(metaUninitializedCount),
+		RaftFlowStateCounts:           raftFlowStateGaugeSlice(),
 
 		// Range metrics.
 		RangeCount:                metric.NewGauge(metaRangeCount),
 		UnavailableRangeCount:     metric.NewGauge(metaUnavailableRangeCount),
 		UnderReplicatedRangeCount: metric.NewGauge(metaUnderReplicatedRangeCount),
 		OverReplicatedRangeCount:  metric.NewGauge(metaOverReplicatedRangeCount),
+		DecommissioningRangeCount: metric.NewGauge(metaDecommissioningRangeCount),
 
 		// Lease request metrics.
 		LeaseRequestSuccessCount: metric.NewCounter(metaLeaseRequestSuccessCount),
@@ -3263,6 +3348,7 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		LeaseTransferErrorCount:        metric.NewCounter(metaLeaseTransferErrorCount),
 		LeaseExpirationCount:           metric.NewGauge(metaLeaseExpirationCount),
 		LeaseEpochCount:                metric.NewGauge(metaLeaseEpochCount),
+		LeaseLeaderCount:               metric.NewGauge(metaLeaseLeaderCount),
 		LeaseLivenessCount:             metric.NewGauge(metaLeaseLivenessCount),
 		LeaseViolatingPreferencesCount: metric.NewGauge(metaLeaseViolatingPreferencesCount),
 		LeaseLessPreferredCount:        metric.NewGauge(metaLeaseLessPreferredCount),
@@ -3374,7 +3460,10 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		SecondaryCacheWriteBackFails:      metric.NewCounter(metaSecondaryCacheWriteBackFailures),
 		StorageCompactionsPinnedKeys:      metric.NewCounter(metaStorageCompactionsKeysPinnedCount),
 		StorageCompactionsPinnedBytes:     metric.NewCounter(metaStorageCompactionsKeysPinnedBytes),
+		StorageCompactionsCancelledCount:  metric.NewCounter(metaStorageCompactionsCancelledCount),
+		StorageCompactionsCancelledBytes:  metric.NewCounter(metaStorageCompactionsCancelledBytes),
 		StorageCompactionsDuration:        metric.NewCounter(metaStorageCompactionsDuration),
+		StorageWriteAmplification:         metric.NewGaugeFloat64(metaStorageWriteAmplification),
 		FlushableIngestCount:              metric.NewCounter(metaFlushableIngestCount),
 		FlushableIngestTableCount:         metric.NewCounter(metaFlushableIngestTableCount),
 		FlushableIngestTableSize:          metric.NewCounter(metaFlushableIngestTableBytes),
@@ -3391,9 +3480,6 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		SSTableCompressionZstd:            metric.NewGauge(metaSSTableCompressionZstd),
 		SSTableCompressionUnknown:         metric.NewGauge(metaSSTableCompressionUnknown),
 		SSTableCompressionNone:            metric.NewGauge(metaSSTableCompressionNone),
-		categoryIterMetrics: pebbleCategoryIterMetricsContainer{
-			registry: storeRegistry,
-		},
 		categoryDiskWriteMetrics: pebbleCategoryDiskWriteMetricsContainer{
 			registry: storeRegistry,
 		},
@@ -3519,18 +3605,21 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 
 		// Raft message metrics.
 		RaftRcvdMessages: [maxRaftMsgType + 1]*metric.Counter{
-			raftpb.MsgProp:           metric.NewCounter(metaRaftRcvdProp),
-			raftpb.MsgApp:            metric.NewCounter(metaRaftRcvdApp),
-			raftpb.MsgAppResp:        metric.NewCounter(metaRaftRcvdAppResp),
-			raftpb.MsgVote:           metric.NewCounter(metaRaftRcvdVote),
-			raftpb.MsgVoteResp:       metric.NewCounter(metaRaftRcvdVoteResp),
-			raftpb.MsgPreVote:        metric.NewCounter(metaRaftRcvdPreVote),
-			raftpb.MsgPreVoteResp:    metric.NewCounter(metaRaftRcvdPreVoteResp),
-			raftpb.MsgSnap:           metric.NewCounter(metaRaftRcvdSnap),
-			raftpb.MsgHeartbeat:      metric.NewCounter(metaRaftRcvdHeartbeat),
-			raftpb.MsgHeartbeatResp:  metric.NewCounter(metaRaftRcvdHeartbeatResp),
-			raftpb.MsgTransferLeader: metric.NewCounter(metaRaftRcvdTransferLeader),
-			raftpb.MsgTimeoutNow:     metric.NewCounter(metaRaftRcvdTimeoutNow),
+			raftpb.MsgProp:              metric.NewCounter(metaRaftRcvdProp),
+			raftpb.MsgApp:               metric.NewCounter(metaRaftRcvdApp),
+			raftpb.MsgAppResp:           metric.NewCounter(metaRaftRcvdAppResp),
+			raftpb.MsgVote:              metric.NewCounter(metaRaftRcvdVote),
+			raftpb.MsgVoteResp:          metric.NewCounter(metaRaftRcvdVoteResp),
+			raftpb.MsgPreVote:           metric.NewCounter(metaRaftRcvdPreVote),
+			raftpb.MsgPreVoteResp:       metric.NewCounter(metaRaftRcvdPreVoteResp),
+			raftpb.MsgSnap:              metric.NewCounter(metaRaftRcvdSnap),
+			raftpb.MsgHeartbeat:         metric.NewCounter(metaRaftRcvdHeartbeat),
+			raftpb.MsgHeartbeatResp:     metric.NewCounter(metaRaftRcvdHeartbeatResp),
+			raftpb.MsgTransferLeader:    metric.NewCounter(metaRaftRcvdTransferLeader),
+			raftpb.MsgTimeoutNow:        metric.NewCounter(metaRaftRcvdTimeoutNow),
+			raftpb.MsgFortifyLeader:     metric.NewCounter(metaRaftRcvdFortifyLeader),
+			raftpb.MsgFortifyLeaderResp: metric.NewCounter(metaRaftRcvdFortifyLeaderResp),
+			raftpb.MsgDeFortifyLeader:   metric.NewCounter(metaRaftRcvdDeFortifyLeader),
 		},
 		RaftRcvdDropped:          metric.NewCounter(metaRaftRcvdDropped),
 		RaftRcvdDroppedBytes:     metric.NewCounter(metaRaftRcvdDroppedBytes),
@@ -3556,7 +3645,6 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		RaftCoalescedHeartbeatsPending: metric.NewGauge(metaRaftCoalescedHeartbeatsPending),
 
 		// Replica queue metrics.
-		StoreFailures:                             metric.NewCounter(metaStoreFailures),
 		MVCCGCQueueSuccesses:                      metric.NewCounter(metaMVCCGCQueueSuccesses),
 		MVCCGCQueueFailures:                       metric.NewCounter(metaMVCCGCQueueFailures),
 		MVCCGCQueuePending:                        metric.NewGauge(metaMVCCGCQueuePending),
@@ -3612,6 +3700,7 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		GCTransactionSpanGCCommitted: metric.NewCounter(metaGCTransactionSpanGCCommitted),
 		GCTransactionSpanGCStaging:   metric.NewCounter(metaGCTransactionSpanGCStaging),
 		GCTransactionSpanGCPending:   metric.NewCounter(metaGCTransactionSpanGCPending),
+		GCTransactionSpanGCPrepared:  metric.NewCounter(metaGCTransactionSpanGCPrepared),
 		GCAbortSpanScanned:           metric.NewCounter(metaGCAbortSpanScanned),
 		GCAbortSpanConsidered:        metric.NewCounter(metaGCAbortSpanConsidered),
 		GCAbortSpanGCNum:             metric.NewCounter(metaGCAbortSpanGCNum),
@@ -3695,14 +3784,14 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		ReplicaReadBatchDroppedLatchesBeforeEval: metric.NewCounter(metaReplicaReadBatchDroppedLatchesBeforeEval),
 		ReplicaReadBatchWithoutInterleavingIter:  metric.NewCounter(metaReplicaReadBatchWithoutInterleavingIter),
 
-		DiskReadBytes:              metric.NewGauge(metaDiskReadBytes),
-		DiskReadCount:              metric.NewGauge(metaDiskReadCount),
-		DiskReadTime:               metric.NewGauge(metaDiskReadTime),
-		DiskWriteBytes:             metric.NewGauge(metaDiskWriteBytes),
-		DiskWriteCount:             metric.NewGauge(metaDiskWriteCount),
-		DiskWriteTime:              metric.NewGauge(metaDiskWriteTime),
-		DiskIOTime:                 metric.NewGauge(metaDiskIOTime),
-		DiskWeightedIOTime:         metric.NewGauge(metaDiskWeightedIOTime),
+		DiskReadBytes:              metric.NewCounter(metaDiskReadBytes),
+		DiskReadCount:              metric.NewCounter(metaDiskReadCount),
+		DiskReadTime:               metric.NewCounter(metaDiskReadTime),
+		DiskWriteBytes:             metric.NewCounter(metaDiskWriteBytes),
+		DiskWriteCount:             metric.NewCounter(metaDiskWriteCount),
+		DiskWriteTime:              metric.NewCounter(metaDiskWriteTime),
+		DiskIOTime:                 metric.NewCounter(metaDiskIOTime),
+		DiskWeightedIOTime:         metric.NewCounter(metaDiskWeightedIOTime),
 		DiskIopsInProgress:         metric.NewGauge(metaDiskIopsInProgress),
 		DiskReadMaxBytesPerSecond:  metric.NewGauge(metaDiskReadMaxBytesPerSecond),
 		DiskWriteMaxBytesPerSecond: metric.NewGauge(metaDiskWriteMaxBytesPerSecond),
@@ -3711,9 +3800,14 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		SplitsWithEstimatedStats:     metric.NewCounter(metaSplitEstimatedStats),
 		SplitEstimatedTotalBytesDiff: metric.NewCounter(metaSplitEstimatedTotalBytesDiff),
 	}
+	sm.categoryIterMetrics.init(storeRegistry)
 
 	storeRegistry.AddMetricStruct(sm)
 	storeRegistry.AddMetricStruct(sm.LoadSplitterMetrics)
+	for i := range sm.categoryIterMetrics.metrics {
+		storeRegistry.AddMetricStruct(&sm.categoryIterMetrics.metrics[i])
+	}
+
 	return sm
 }
 
@@ -3776,7 +3870,7 @@ func (sm *StoreMetrics) updateEngineMetrics(m storage.Metrics) {
 	compactedRead, compactedWritten := m.CompactedBytes()
 	sm.RdbCompactedBytesRead.Update(int64(compactedRead))
 	sm.RdbCompactedBytesWritten.Update(int64(compactedWritten))
-	sm.RdbTableReadersMemEstimate.Update(m.TableCache.Size)
+	sm.RdbTableReadersMemEstimate.Update(m.FileCache.Size)
 	sm.RdbReadAmplification.Update(int64(m.ReadAmp()))
 	sm.RdbPendingCompaction.Update(int64(m.Compact.EstimatedDebt))
 	sm.RdbMarkedForCompactionFiles.Update(int64(m.Compact.MarkedFiles))
@@ -3796,6 +3890,8 @@ func (sm *StoreMetrics) updateEngineMetrics(m storage.Metrics) {
 	sm.IterInternalSteps.Update(int64(m.Iterator.InternalSteps))
 	sm.StorageCompactionsPinnedKeys.Update(int64(m.Snapshots.PinnedKeys))
 	sm.StorageCompactionsPinnedBytes.Update(int64(m.Snapshots.PinnedSize))
+	sm.StorageCompactionsCancelledCount.Update(m.Compact.CancelledCount)
+	sm.StorageCompactionsCancelledBytes.Update(m.Compact.CancelledBytes)
 	sm.StorageCompactionsDuration.Update(int64(m.Compact.Duration))
 	sm.SingleDelInvariantViolations.Update(m.SingleDelInvariantViolationCount)
 	sm.SingleDelIneffectualCount.Update(m.SingleDelIneffectualCount)
@@ -3844,11 +3940,14 @@ func (sm *StoreMetrics) updateEngineMetrics(m storage.Metrics) {
 	sm.categoryIterMetrics.update(m.CategoryStats)
 	sm.categoryDiskWriteMetrics.update(m.DiskWriteStats)
 
+	totalWriteAmp := float64(0)
 	for level, stats := range m.Levels {
 		sm.RdbBytesIngested[level].Update(int64(stats.BytesIngested))
 		sm.RdbLevelSize[level].Update(stats.Size)
 		sm.RdbLevelScore[level].Update(stats.Score)
+		totalWriteAmp += stats.WriteAmp()
 	}
+	sm.StorageWriteAmplification.Update(totalWriteAmp)
 }
 
 // updateCrossLocalityMetricsOnSnapshotSent updates cross-locality related store
@@ -3930,17 +4029,26 @@ func (sm *StoreMetrics) updateEnvStats(stats fs.EnvStats) {
 	sm.EncryptionAlgorithm.Update(int64(stats.EncryptionType))
 }
 
-func (sm *StoreMetrics) updateDiskStats(rollingStats disk.StatsWindow) {
-	cumulativeStats := rollingStats.Latest()
-	sm.DiskReadCount.Update(int64(cumulativeStats.ReadsCount))
-	sm.DiskReadBytes.Update(int64(cumulativeStats.BytesRead()))
-	sm.DiskReadTime.Update(int64(cumulativeStats.ReadsDuration))
-	sm.DiskWriteCount.Update(int64(cumulativeStats.WritesCount))
-	sm.DiskWriteBytes.Update(int64(cumulativeStats.BytesWritten()))
-	sm.DiskWriteTime.Update(int64(cumulativeStats.WritesDuration))
-	sm.DiskIOTime.Update(int64(cumulativeStats.CumulativeDuration))
-	sm.DiskWeightedIOTime.Update(int64(cumulativeStats.WeightedIODuration))
-	sm.DiskIopsInProgress.Update(int64(cumulativeStats.InProgressCount))
+func (sm *StoreMetrics) updateDiskStats(
+	ctx context.Context,
+	rollingStats disk.StatsWindow,
+	cumulativeStats disk.Stats,
+	cumulativeStatsErr error,
+) {
+	if cumulativeStatsErr == nil {
+		sm.DiskReadCount.Update(int64(cumulativeStats.ReadsCount))
+		sm.DiskReadBytes.Update(int64(cumulativeStats.BytesRead()))
+		sm.DiskReadTime.Update(int64(cumulativeStats.ReadsDuration))
+		sm.DiskWriteCount.Update(int64(cumulativeStats.WritesCount))
+		sm.DiskWriteBytes.Update(int64(cumulativeStats.BytesWritten()))
+		sm.DiskWriteTime.Update(int64(cumulativeStats.WritesDuration))
+		sm.DiskIOTime.Update(int64(cumulativeStats.CumulativeDuration))
+		sm.DiskWeightedIOTime.Update(int64(cumulativeStats.WeightedIODuration))
+		sm.DiskIopsInProgress.Update(int64(cumulativeStats.InProgressCount))
+	} else {
+		// Don't update cumulative stats to the useless zero value.
+		log.Errorf(ctx, "not updating cumulative stats due to %s", cumulativeStatsErr)
+	}
 	maxRollingStats := rollingStats.Max()
 	// maxRollingStats is computed as the change in stats every 100ms, so we
 	// scale them to represent the change in stats every 1s.
@@ -3978,6 +4086,16 @@ func (sm *StoreMetrics) handleMetricsResult(ctx context.Context, metric result.M
 	if metric != (result.Metrics{}) {
 		log.Fatalf(ctx, "unhandled fields in metrics result: %+v", metric)
 	}
+}
+
+func raftFlowStateGaugeSlice() [tracker.StateCount]*metric.Gauge {
+	// NB: explicitly initialize each index so that this does not depend on int
+	// values of StateProbe, StateReplicate and StateSnapshot.
+	var gauges [tracker.StateCount]*metric.Gauge
+	gauges[tracker.StateProbe] = metric.NewGauge(metaRaftFlowsProbe)
+	gauges[tracker.StateReplicate] = metric.NewGauge(metaRaftFlowsReplicate)
+	gauges[tracker.StateSnapshot] = metric.NewGauge(metaRaftFlowsSnapshot)
+	return gauges
 }
 
 func storageLevelMetricMetadata(
@@ -4037,12 +4155,12 @@ func (sm *StoreMetrics) getCounterForRangeLogEventType(
 }
 
 type pebbleCategoryIterMetrics struct {
-	IterBlockBytes          *metric.Gauge
-	IterBlockBytesInCache   *metric.Gauge
-	IterBlockReadLatencySum *metric.Gauge
+	IterBlockBytes          *metric.Counter
+	IterBlockBytesInCache   *metric.Counter
+	IterBlockReadLatencySum *metric.Counter
 }
 
-func makePebbleCategorizedIterMetrics(category sstable.Category) *pebbleCategoryIterMetrics {
+func makePebbleCategorizedIterMetrics(category block.Category) pebbleCategoryIterMetrics {
 	metaBlockBytes := metric.Metadata{
 		Name:        fmt.Sprintf("storage.iterator.category-%s.block-load.bytes", category),
 		Help:        "Bytes loaded by storage sstable iterators (possibly cached).",
@@ -4061,17 +4179,17 @@ func makePebbleCategorizedIterMetrics(category sstable.Category) *pebbleCategory
 		Measurement: "Latency",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
-	return &pebbleCategoryIterMetrics{
-		IterBlockBytes:          metric.NewGauge(metaBlockBytes),
-		IterBlockBytesInCache:   metric.NewGauge(metaBlockBytesInCache),
-		IterBlockReadLatencySum: metric.NewGauge(metaBlockReadLatencySum),
+	return pebbleCategoryIterMetrics{
+		IterBlockBytes:          metric.NewCounter(metaBlockBytes),
+		IterBlockBytesInCache:   metric.NewCounter(metaBlockBytesInCache),
+		IterBlockReadLatencySum: metric.NewCounter(metaBlockReadLatencySum),
 	}
 }
 
 // MetricStruct implements the metric.Struct interface.
 func (m *pebbleCategoryIterMetrics) MetricStruct() {}
 
-func (m *pebbleCategoryIterMetrics) update(stats sstable.CategoryStats) {
+func (m *pebbleCategoryIterMetrics) update(stats block.CategoryStats) {
 	m.IterBlockBytes.Update(int64(stats.BlockBytes))
 	m.IterBlockBytesInCache.Update(int64(stats.BlockBytesInCache))
 	m.IterBlockReadLatencySum.Update(int64(stats.BlockReadDuration))
@@ -4079,26 +4197,30 @@ func (m *pebbleCategoryIterMetrics) update(stats sstable.CategoryStats) {
 
 type pebbleCategoryIterMetricsContainer struct {
 	registry *metric.Registry
-	// sstable.Category => *pebbleCategoryIterMetrics
-	metricsMap sync.Map
+	// metrics slice for all categories; can be directly indexed by block.Category.
+	metrics []pebbleCategoryIterMetrics
 }
 
-func (m *pebbleCategoryIterMetricsContainer) update(stats []sstable.CategoryStatsAggregate) {
-	for _, s := range stats {
-		val, ok := m.metricsMap.Load(s.Category)
-		if !ok {
-			val, ok = m.metricsMap.LoadOrStore(s.Category, makePebbleCategorizedIterMetrics(s.Category))
-			if !ok {
-				m.registry.AddMetricStruct(val)
-			}
-		}
-		cm := val.(*pebbleCategoryIterMetrics)
-		cm.update(s.CategoryStats)
+func (m *pebbleCategoryIterMetricsContainer) init(registry *metric.Registry) {
+	m.registry = registry
+	categories := block.Categories()
+	m.metrics = make([]pebbleCategoryIterMetrics, len(categories))
+	for _, c := range categories {
+		m.metrics[c] = makePebbleCategorizedIterMetrics(c)
 	}
 }
 
+func (m *pebbleCategoryIterMetricsContainer) update(stats []block.CategoryStatsAggregate) {
+	for _, s := range stats {
+		m.metrics[s.Category].update(s.CategoryStats)
+	}
+}
+
+// MetricStruct implements metrics.Struct.
+func (m *pebbleCategoryIterMetricsContainer) MetricStruct() {}
+
 type pebbleCategoryDiskWriteMetrics struct {
-	BytesWritten *metric.Gauge
+	BytesWritten *metric.Counter
 }
 
 func makePebbleCategorizedWriteMetrics(
@@ -4110,7 +4232,7 @@ func makePebbleCategorizedWriteMetrics(
 		Measurement: "Bytes",
 		Unit:        metric.Unit_BYTES,
 	}
-	return &pebbleCategoryDiskWriteMetrics{BytesWritten: metric.NewGauge(metaDiskBytesWritten)}
+	return &pebbleCategoryDiskWriteMetrics{BytesWritten: metric.NewCounter(metaDiskBytesWritten)}
 }
 
 // MetricStruct implements the metric.Struct interface.
@@ -4121,21 +4243,19 @@ func (m *pebbleCategoryDiskWriteMetrics) update(stats vfs.DiskWriteStatsAggregat
 }
 
 type pebbleCategoryDiskWriteMetricsContainer struct {
-	registry *metric.Registry
-	// vfs.DiskWriteCategory => *pebbleCategoryDiskWriteMetrics
-	metricsMap sync.Map
+	registry   *metric.Registry
+	metricsMap syncutil.Map[vfs.DiskWriteCategory, pebbleCategoryDiskWriteMetrics]
 }
 
 func (m *pebbleCategoryDiskWriteMetricsContainer) update(stats []vfs.DiskWriteStatsAggregate) {
 	for _, s := range stats {
-		val, ok := m.metricsMap.Load(s.Category)
+		cm, ok := m.metricsMap.Load(s.Category)
 		if !ok {
-			val, ok = m.metricsMap.LoadOrStore(s.Category, makePebbleCategorizedWriteMetrics(s.Category))
+			cm, ok = m.metricsMap.LoadOrStore(s.Category, makePebbleCategorizedWriteMetrics(s.Category))
 			if !ok {
-				m.registry.AddMetricStruct(val)
+				m.registry.AddMetricStruct(cm)
 			}
 		}
-		cm := val.(*pebbleCategoryDiskWriteMetrics)
 		cm.update(s)
 	}
 }

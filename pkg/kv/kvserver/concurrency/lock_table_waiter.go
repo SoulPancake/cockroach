@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package concurrency
 
@@ -201,7 +196,11 @@ func (w *lockTableWaiterImpl) WaitOn(
 				// transaction (one that's acquired a claim but not the lock).
 				delay := time.Duration(math.MaxInt64)
 				if deadlockOrLivenessPush {
-					delay = LockTableDeadlockOrLivenessDetectionPushDelay.Get(&w.st.SV)
+					if req.DeadlockTimeout == 0 {
+						delay = LockTableDeadlockOrLivenessDetectionPushDelay.Get(&w.st.SV)
+					} else {
+						delay = req.DeadlockTimeout
+					}
 				}
 				if timeoutPush {
 					// Only reset the lock timeout deadline if this is the first time

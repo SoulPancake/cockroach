@@ -1,17 +1,12 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import React from "react";
 
-import * as docsURL from "src/util/docs";
 import { Anchor } from "src/components";
+import * as docsURL from "src/util/docs";
 
 export const CapacityGraphTooltip: React.FC<{ tooltipSelection?: string }> = ({
   tooltipSelection,
@@ -164,10 +159,6 @@ export const CircuitBreakerTrippedEventsTooltip: React.ReactNode = (
     The number of circuit breaker events occurred per aggregated interval of
     time across all nodes since the process started.
   </div>
-);
-
-export const PausedFollowersTooltip: React.ReactNode = (
-  <div>The number of nonessential followers that have replication paused.</div>
 );
 
 export const ReceiverSnapshotsQueuedTooltip: React.ReactNode = (

@@ -1,6 +1,6 @@
-# LogicTest: !local-read-committed
-# READ COMMITTED does not work with UNIQUE WITHOUT INDEX constraints.
-# See https://github.com/cockroachdb/cockroach/issues/110873.
+# LogicTest: !weak-iso-level-configs
+# READ COMMITTED and REPEATABLE READ do not work with UNIQUE WITHOUT INDEX
+# constraints. See https://github.com/cockroachdb/cockroach/issues/110873.
 
 statement ok
 SET experimental_enable_unique_without_index_constraints = true
@@ -1050,6 +1050,23 @@ INSERT INTO t115377 VALUES (2, 0, 0, 'east')
 
 statement error pgcode 23505 duplicate key value violates unique constraint \"unique_k\"
 INSERT INTO t115377 VALUES (2, 1, 1, 'east')
+
+# Regression test for #126988.
+statement ok
+CREATE TABLE t126988 (
+  k INT PRIMARY KEY,
+  j INT,
+  i INT,
+  v INT AS (i) VIRTUAL,
+  UNIQUE WITHOUT INDEX (i, j),
+  INDEX (j, v) STORING (i)
+)
+
+statement ok
+INSERT INTO t126988 VALUES (1, 10, 200)
+
+statement error pgcode 23505 duplicate key value violates unique constraint \"unique_i_j\"\nDETAIL: Key \(10, 200\) already exists.
+INSERT INTO t126988 VALUES (1, 10, 200)
 
 subtest end
 

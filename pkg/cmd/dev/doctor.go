@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -20,10 +15,12 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/dev/io/exec"
+	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/spf13/cobra"
 )
 
@@ -83,6 +80,49 @@ type doctorConfig struct {
 	// be skipped in either remote or non-remote mode.
 	remote bool
 }
+
+// maybePromptForAutofixPermission prompts the user for autofix permission if it
+// has not already been provided and we are running in interactive mode. It will
+// prompt with the given question with a default ansewr of 'y', call toBoolFuzzy
+// with the result, and if permission is given, will set haveAutofixPermission
+// on the doctorConfig object before returning.
+func (cfg *doctorConfig) maybePromptForAutofixPermission(question string) {
+	if !cfg.haveAutofixPermission && cfg.interactive {
+		response := promptInteractiveInput(question, "y")
+		canAutofix, ok := toBoolFuzzy(response)
+		if ok && canAutofix {
+			cfg.haveAutofixPermission = true
+		}
+	}
+}
+
+type buildConfig struct {
+	name        string
+	description string
+}
+
+// buildConfigs are the available build configs (typically "dev" and
+// "crosslinux"). The first config will always be "dev".
+var buildConfigs []buildConfig = func() []buildConfig {
+	configs := []buildConfig{
+		{name: "dev", description: "uses the host toolchain"},
+	}
+	if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
+		configs = append(configs, buildConfig{
+			name:        "crosslinux",
+			description: "uses the cross-compiler that we use in CI",
+		})
+	}
+
+	if runtime.GOOS == "linux" && runtime.GOARCH == "arm64" {
+		configs = append(configs, buildConfig{
+			name:        "crosslinuxarm",
+			description: "uses the cross-compiler that we use in CI",
+		})
+	}
+
+	return configs
+}()
 
 // The list of all checks performed by `dev doctor`.
 var allDoctorChecks = []doctorCheck{
@@ -168,46 +208,42 @@ Please perform the following steps:
 	{
 		name: "devconfig_local",
 		check: func(d *dev, ctx context.Context, cfg doctorConfig) string {
-			var alreadyHaveSuggestion bool
-			for _, str := range []string{"dev", "crosslinux"} {
-				alreadyHaveSuggestion = alreadyHaveSuggestion || d.checkUsingConfig(cfg.workspace, str)
-			}
-			if alreadyHaveSuggestion {
-				return ""
+			for _, bldCfg := range buildConfigs {
+				if d.checkUsingConfig(cfg.workspace, bldCfg.name) {
+					// Already configured.
+					return ""
+				}
 			}
 			ret := fmt.Sprintf(`
 Make sure one of the following lines is in the file %s/.bazelrc.user:
 `, cfg.workspace)
-			if runtime.GOOS == "linux" {
-				ret = ret + "    build --config=dev\n"
-				ret = ret + "             OR       \n"
-				ret = ret + "    build --config=crosslinux\n"
-				ret = ret + "The former will use your host toolchain, while the latter will use the cross-compiler that we use in CI."
-			} else {
-				ret = ret + "    build --config=dev"
+			for i, bldCfg := range buildConfigs {
+				if i > 0 {
+					ret = ret + "\n             OR       \n"
+				}
+				ret = fmt.Sprintf("%s    build --config=%s  # %s", ret, bldCfg.name, bldCfg.description)
 			}
 			return ret
 		},
 		autofix: func(d *dev, ctx context.Context, cfg doctorConfig) error {
-			if runtime.GOOS == "linux" {
+			if len(buildConfigs) > 1 {
 				if !cfg.interactive {
 					return fmt.Errorf("must be running in --interactive mode to autofix")
 				}
-				log.Println("DOCTOR >> I can configure your .bazelrc.user to build either in the `dev` configuration or the `crosslinux` configuration.")
-				log.Println("DOCTOR >> The former uses your host toolchain, while the latter downloads and uses our production cross-toolchains.")
-				response := promptInteractiveInput("Which config you want to use (dev,crosslinux)?", "dev")
-				if response != "dev" && response != "crosslinux" {
+				log.Println("DOCTOR >> I can configure your .bazelrc.user to build in one of the following configurations:")
+				var names []string
+				for _, c := range buildConfigs {
+					names = append(names, c.name)
+					log.Printf("           - %s: %s\n", c.name, c.description)
+				}
+				question := fmt.Sprintf("Which config you want to use (%s)?", strings.Join(names, ","))
+				response := promptInteractiveInput(question, names[0])
+				if !slices.Contains(names, response) {
 					return fmt.Errorf("unrecognized configuration option %s", response)
 				}
 				return d.addLineToBazelRcUser(cfg.workspace, fmt.Sprintf("build --config=%s", response))
 			}
-			if !cfg.haveAutofixPermission && cfg.interactive {
-				response := promptInteractiveInput("Do you want me to add `build --config=dev` to your .bazelrc.user file for you?", "y")
-				canAutofix, ok := toBoolFuzzy(response)
-				if ok && canAutofix {
-					cfg.haveAutofixPermission = true
-				}
-			}
+			cfg.maybePromptForAutofixPermission("Do you want me to add `build --config=dev` to your .bazelrc.user file for you?")
 			if !cfg.haveAutofixPermission {
 				return fmt.Errorf("do not have permission to update .bazelrc.user")
 			}
@@ -224,13 +260,7 @@ Make sure one of the following lines is in the file %s/.bazelrc.user:
 			return ""
 		},
 		autofix: func(d *dev, ctx context.Context, cfg doctorConfig) error {
-			if !cfg.haveAutofixPermission && cfg.interactive {
-				response := promptInteractiveInput("Do you want me to remove the engflow configuration from your .bazelrc.user file for you?", "y")
-				canAutofix, ok := toBoolFuzzy(response)
-				if ok && canAutofix {
-					cfg.haveAutofixPermission = true
-				}
-			}
+			cfg.maybePromptForAutofixPermission("Do you want me to remove the engflow configuration from your .bazelrc.user file for you?")
 			if !cfg.haveAutofixPermission {
 				return fmt.Errorf("do not have permission to update .bazelrc.user")
 			}
@@ -250,16 +280,13 @@ Make sure one of the following lines is in the file %s/.bazelrc.user:
 			if d.checkUsingConfig(cfg.workspace, "dev") {
 				return "In --remote mode, you cannot use the `dev` build configuration."
 			}
+			if !d.checkLinePresenceInBazelRcUser(cfg.workspace, "build:engflow --jobs=200") {
+				return fmt.Sprintf("Make sure the following line is in %s/.bazelrc.user: build:engflow --jobs=200", cfg.workspace)
+			}
 			return ""
 		},
 		autofix: func(d *dev, ctx context.Context, cfg doctorConfig) error {
-			if !cfg.haveAutofixPermission && cfg.interactive {
-				response := promptInteractiveInput("Do you want me to update your .bazelrc.user file for you? I will set the crosslinux and engflow configs and remove any usage of the dev config if you have any.", "y")
-				canAutofix, ok := toBoolFuzzy(response)
-				if ok && canAutofix {
-					cfg.haveAutofixPermission = true
-				}
-			}
+			cfg.maybePromptForAutofixPermission("Do you want me to update your .bazelrc.user file for you? I will set the crosslinux and engflow configs, specify the number of jobs to use, and remove any usage of the dev config if you have any.")
 			if !cfg.haveAutofixPermission {
 				return fmt.Errorf("do not have permission to update .bazelrc.user")
 			}
@@ -281,6 +308,12 @@ Make sure one of the following lines is in the file %s/.bazelrc.user:
 					return err
 				}
 			}
+			if !d.checkLinePresenceInBazelRcUser(cfg.workspace, "build:engflow --jobs=200") {
+				err := d.addLineToBazelRcUser(cfg.workspace, "build:engflow --jobs=200")
+				if err != nil {
+					return err
+				}
+			}
 
 			return nil
 		},
@@ -289,14 +322,15 @@ Make sure one of the following lines is in the file %s/.bazelrc.user:
 	{
 		name: "nogo_configured",
 		check: func(d *dev, ctx context.Context, cfg doctorConfig) string {
-			err := d.exec.CommandContextInheritingStdStreams(ctx, "bazel", "build", "//build/bazelutil:test_nogo_configured")
-			if err != nil {
-				return "Failed to run `bazel build //build/bazelutil:test_nogo_configured. " + `
-This may be because you haven't configured whether to run lints during builds.
+			configured := d.checkUsingConfig(cfg.workspace, "lintonbuild") ||
+				d.checkUsingConfig(cfg.workspace, "nolintonbuild")
+			if !configured {
+				return "Failed to find `--config=lintonbuild` or `--config=nolintonbuild` in .bazelrc.user." + `
+
 Put EXACTLY ONE of the following lines in your .bazelrc.user:
-    build --config lintonbuild
+    build --config=lintonbuild
         OR
-    build --config nolintonbuild
+    build --config=nolintonbuild
 The former will run lint checks while you build. This will make incremental builds
 slightly slower and introduce a noticeable delay in first-time build setup.`
 			}
@@ -380,17 +414,52 @@ slightly slower and introduce a noticeable delay in first-time build setup.`
 			return ""
 		},
 		autofix: func(d *dev, ctx context.Context, cfg doctorConfig) error {
-			if !cfg.haveAutofixPermission && cfg.interactive {
-				response := promptInteractiveInput("Do you want me to update your .bazelrc.user file for you? I will remove any `test --test_tmpdir=` line from the file.", "y")
-				canAutofix, ok := toBoolFuzzy(response)
-				if ok && canAutofix {
-					cfg.haveAutofixPermission = true
-				}
-			}
+			cfg.maybePromptForAutofixPermission("Do you want me to update your .bazelrc.user file for you? I will remove any `test --test_tmpdir=` line from the file.")
 			if !cfg.haveAutofixPermission {
 				return fmt.Errorf("do not have permission to update .bazelrc.user")
 			}
 			return d.removeAllPrefixesInFile(filepath.Join(cfg.workspace, ".bazelrc.user"), "test --test_tmpdir=")
+		},
+		remoteOnly: true,
+	},
+	{
+		name: "sandbox_add_mount_pair_local",
+		check: func(d *dev, _ context.Context, cfg doctorConfig) string {
+			// This check only matters for Linux machines.
+			if runtime.GOOS != "linux" {
+				return ""
+			}
+			if !d.checkLinePresenceInBazelRcUser(cfg.workspace, "test --test_tmpdir=/tmp") {
+				return ""
+			}
+			if d.checkLinePresenceInBazelRcUser(cfg.workspace, "test --sandbox_add_mount_pair=/tmp") {
+				return ""
+			}
+			return "Should set --sandbox_add_mount_pair=/tmp given the use of --test_tmpdir=/tmp"
+		},
+		autofix: func(d *dev, ctx context.Context, cfg doctorConfig) error {
+			cfg.maybePromptForAutofixPermission("Do you want me to update your .bazelrc.user file for you? I will add a line `test --sandbox_add_mount_pair=/tmp`.")
+			if !cfg.haveAutofixPermission {
+				return fmt.Errorf("do not have permission to update .bazelrc.user")
+			}
+			return d.addLineToBazelRcUser(cfg.workspace, "test --sandbox_add_mount_pair=/tmp")
+		},
+		nonRemoteOnly: true,
+	},
+	{
+		name: "sandbox_add_mount_pair_remote",
+		check: func(d *dev, _ context.Context, cfg doctorConfig) string {
+			if d.checkLinePresenceInBazelRcUser(cfg.workspace, "test --sandbox_add_mount_pair=/tmp") {
+				return "Should not set --sandbox_add_mount_pair in remote mode"
+			}
+			return ""
+		},
+		autofix: func(d *dev, ctx context.Context, cfg doctorConfig) error {
+			cfg.maybePromptForAutofixPermission("Do you want me to update your .bazelrc.user file for you? I will remove all --sandbox_add_mount_pair from your .bazelrc.user")
+			if !cfg.haveAutofixPermission {
+				return fmt.Errorf("do not have permission to update .bazelrc.user")
+			}
+			return d.removeAllPrefixesInFile(filepath.Join(cfg.workspace, ".bazelrc.user"), "test --sandbox_add_mount_pair")
 		},
 		remoteOnly: true,
 	},
@@ -429,13 +498,7 @@ slightly slower and introduce a noticeable delay in first-time build setup.`
 			return fmt.Sprintf("Please add the string `%s` to your .bazelrc.user", bazelRcLine)
 		},
 		autofix: func(d *dev, ctx context.Context, cfg doctorConfig) error {
-			if !cfg.haveAutofixPermission && cfg.interactive {
-				response := promptInteractiveInput("Do you want me to update your .bazelrc.user for you to configure the loopback cache? I will also update ~/.bazelrc if necessary.", "y")
-				canAutofix, ok := toBoolFuzzy(response)
-				if ok && canAutofix {
-					cfg.haveAutofixPermission = true
-				}
-			}
+			cfg.maybePromptForAutofixPermission("Do you want me to update your .bazelrc.user for you to configure the loopback cache? I will also update ~/.bazelrc if necessary.")
 			if !cfg.haveAutofixPermission {
 				return fmt.Errorf("do not have permission to configure the cache")
 			}
@@ -472,13 +535,7 @@ slightly slower and introduce a noticeable delay in first-time build setup.`
 			return ""
 		},
 		autofix: func(d *dev, ctx context.Context, cfg doctorConfig) error {
-			if !cfg.haveAutofixPermission && cfg.interactive {
-				response := promptInteractiveInput("Do you want me to update your .bazelrc.user file for you? I will remove any `build --remote_cache=` line from the file.", "y")
-				canAutofix, ok := toBoolFuzzy(response)
-				if ok && canAutofix {
-					cfg.haveAutofixPermission = true
-				}
-			}
+			cfg.maybePromptForAutofixPermission("Do you want me to update your .bazelrc.user file for you? I will remove any `build --remote_cache=` line from the file.")
 			if !cfg.haveAutofixPermission {
 				return fmt.Errorf("do not have permission to update .bazelrc.user")
 			}
@@ -499,13 +556,7 @@ slightly slower and introduce a noticeable delay in first-time build setup.`
 			return ""
 		},
 		autofix: func(d *dev, ctx context.Context, cfg doctorConfig) error {
-			if !cfg.haveAutofixPermission && cfg.interactive {
-				response := promptInteractiveInput("Do you want me to update your .bazelrc.user file for you? I will remove any `build --config=lintonbuild` or `build --config=nolintonbuild` line from the file.", "y")
-				canAutofix, ok := toBoolFuzzy(response)
-				if ok && canAutofix {
-					cfg.haveAutofixPermission = true
-				}
-			}
+			cfg.maybePromptForAutofixPermission("Do you want me to update your .bazelrc.user file for you? I will remove any `build --config=lintonbuild` or `build --config=nolintonbuild` line from the file.")
 			if !cfg.haveAutofixPermission {
 				return fmt.Errorf("do not have permission to update .bazelrc.user")
 			}
@@ -584,7 +635,7 @@ func (d *dev) getDoctorStatus(ctx context.Context) (int, error) {
 // checkDoctorStatus returns an error iff the current doctor status is not the
 // latest.
 func (d *dev) checkDoctorStatus(ctx context.Context) error {
-	if d.knobs.skipDoctorCheck {
+	if buildutil.CrdbTestBuild {
 		return nil
 	}
 

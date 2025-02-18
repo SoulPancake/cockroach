@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 // Processor definitions for distributed SQL APIs. See
 // docs/RFCS/distributed_sql.md.
@@ -22,6 +17,7 @@ option go_package = "github.com/cockroachdb/cockroach/pkg/sql/execinfrapb";
 import "jobs/jobspb/jobs.proto";
 import "roachpb/io-formats.proto";
 import "sql/catalog/descpb/structured.proto";
+import "roachpb/metadata.proto";
 import "util/hlc/timestamp.proto";
 import "gogoproto/gogo.proto";
 import "roachpb/data.proto";
@@ -37,10 +33,7 @@ import "cloud/cloudpb/external_storage.proto";
 // descriptor in the database, and doesn't emit any rows nor support
 // any post-processing.
 message BackfillerSpec {
-  // TODO(lidor): job_id is not needed when interoperability with 22.2 is
-  // dropped, the new way to send the job tag is using 'job_tag' in the
-  // SetupFlowRequest message.
-  optional int64 job_id = 13 [(gogoproto.nullable) = false, (gogoproto.customname) = "JobID"];
+  reserved 13; // job_id
   enum Type {
     Invalid = 0;
     Column = 1;
@@ -86,9 +79,6 @@ message BackfillerSpec {
   // timestamp, even if the request gets pushed server-side. This ensures the
   // writes comply with the timestamp cache and closed timestamp. See also
   // AddSSTableRequest.SSTTimestampToRequestTimestamp.
-  //
-  // Note that older nodes do not respect this flag so callers should
-  // check MVCCAddSSTable before setting this option.
   optional bool write_at_batch_timestamp = 12 [(gogoproto.nullable) = false];
 
   // NEXTID: 15.
@@ -193,7 +183,7 @@ message StreamIngestionPartitionSpec {
 
   optional string subscription_token = 2 [(gogoproto.nullable) = false];
 
-  optional string address = 3 [(gogoproto.nullable) = false];
+  optional string partition_conn_uri = 3 [(gogoproto.nullable) = false];
 
   repeated roachpb.Span spans = 4 [(gogoproto.nullable) = false];
 
@@ -279,8 +269,9 @@ message StreamIngestionFrontierSpec {
   // Checkpoint stores a set of resolved spans denoting completed progress
   optional jobs.jobspb.StreamIngestionCheckpoint checkpoint = 7 [(gogoproto.nullable) = false];
 
-  // StreamAddresses are the addresses that can be connected to to interact with the source job
-  repeated string stream_addresses = 8;
+	// ConnectionUris are the URIs that can be connected to to interact with the
+	// source job
+  repeated string connection_uris = 8;
 
   // PartitionSpecs contains the topology of the physical replication stream.
   optional StreamIngestionPartitionSpecs partition_specs = 9 [(gogoproto.nullable) = false];
@@ -379,7 +370,10 @@ message RestoreDataSpec {
   reserved 7;
   optional bool validate_only = 8 [(gogoproto.nullable) = false];
   reserved 9;
-  // NEXT ID: 10.
+
+  // ResumeClusterVersion is the cluster version when the restore job resumed.
+  optional roachpb.Version resume_cluster_version = 10 [(gogoproto.nullable) = false];
+  // NEXT ID: 11.
 }
 
 // ExporterSpec is the specification for a processor that consumes rows and
@@ -439,8 +433,7 @@ message GenerativeSplitAndScatterSpec {
   // Spans is the required spans in the restore.
   repeated roachpb.Span spans = 10 [(gogoproto.nullable) = false];
   repeated jobs.jobspb.RestoreDetails.BackupLocalityInfo backup_locality_info = 11 [(gogoproto.nullable) = false];
-  // HighWater is the high watermark of the previous run of restore.
-  optional bytes high_water = 12;
+  reserved 12;
   // User who initiated the restore.
   optional string user_proto = 13 [(gogoproto.nullable) = false, (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/security/username.SQLUsernameProto"];
   // ChunkSize is the number of import spans per chunk.
@@ -452,13 +445,15 @@ message GenerativeSplitAndScatterSpec {
   // NumNodes is the number of nodes available for dist restore.
   optional int64 num_nodes = 17[(gogoproto.nullable) = false];
   optional int64 job_id = 18 [(gogoproto.nullable) = false, (gogoproto.customname) = "JobID"];
-  optional bool use_frontier_checkpointing = 20 [(gogoproto.nullable) = false];
+  reserved 20 ;
   repeated jobs.jobspb.RestoreProgress.FrontierEntry checkpointed_spans = 21 [(gogoproto.nullable) = false];
   // ExclusiveFileSpanComparison is true if the backup can safely use
   // exclusive file span comparison.
   optional bool exclusive_file_span_comparison = 22 [(gogoproto.nullable) = false];
   // MaxFileCount is the max number of files in an extending restore span entry.
   optional int64 max_file_count = 23[(gogoproto.nullable) = false];
+  // SQLInstanceIDs is a slice of SQL instance IDs available for dist restore.
+  repeated int32 sql_instance_ids = 24[(gogoproto.customname) = "SQLInstanceIDs"];
   reserved 19;
 }
 
@@ -478,6 +473,16 @@ message CloudStorageTestSpec {
   }
   optional Params params = 2 [(gogoproto.nullable) = false];
   // NEXT ID: 3;
+}
+
+message TableReplicationMetadata {
+  optional cockroach.sql.sqlbase.TableDescriptor source_descriptor = 1 [(gogoproto.nullable) = false];
+  optional string destination_parent_database_name = 2 [(gogoproto.nullable) = false];
+  optional string destination_parent_schema_name = 3 [(gogoproto.nullable) = false];
+  optional string destination_table_name = 4 [(gogoproto.nullable) = false];
+  // DestinationFunctionOID, if non-zero, is the OID of the
+  // user-defined function that should be used for the table.
+  optional uint32 destination_function_oid = 5 [(gogoproto.nullable) = false, (gogoproto.customname) = "DestinationFunctionOID"];
 }
 
 message LogicalReplicationWriterSpec {
@@ -505,12 +510,57 @@ message LogicalReplicationWriterSpec {
     // ingesting data from the PreviousReplicatedTimestamp described above.
     optional util.hlc.Timestamp initial_scan_timestamp = 5 [(gogoproto.nullable) = false];
 
-    // StreamAddress locate the stream so that a stream client can be initialized.
-    optional string stream_address = 6 [(gogoproto.nullable) = false];
+		// PartitionConnUri locate the stream so that a stream client can be
+		// initialized.
+    optional string partition_conn_uri = 6 [(gogoproto.nullable) = false];
 
     // Checkpoint stores a set of resolved spans denoting completed progress.
     optional jobs.jobspb.StreamIngestionCheckpoint checkpoint = 7 [(gogoproto.nullable) = false];
 
-    // TableDescriptors is a map between from destination table IDs to the source table descriptor.
-    map<int32, cockroach.sql.sqlbase.TableDescriptor> table_descriptors = 8 [(gogoproto.nullable) = false];
+    // TableMetadataByDestID is a map from destination table IDs to metadata
+    // containing source table descriptors and fully qualified destination table
+    // names.
+    map<int32, TableReplicationMetadata> table_metadata_by_dest_id = 8 [(gogoproto.nullable) = false, (gogoproto.customname) = "TableMetadataByDestID"];
+
+    reserved 9;
+
+    // Discard is an option on whether to filter some events.
+    optional jobs.jobspb.LogicalReplicationDetails.Discard discard  = 12 [(gogoproto.nullable) = false];
+
+    optional jobs.jobspb.LogicalReplicationDetails.ApplyMode mode = 10 [(gogoproto.nullable) = false];
+
+    optional string metrics_label = 11 [(gogoproto.nullable) = false];
+
+    // Next ID: 13.
+}
+
+message LogicalReplicationOfflineScanSpec {
+    // JobID of the job that ran the replicationWriterProcessor.
+    optional int64 job_id = 1 [(gogoproto.nullable) = false, (gogoproto.customname) = "JobID"];
+
+    // StreamID is the ID of the stream (which is shared across the producer and consumer).
+    optional uint64 stream_id = 2 [(gogoproto.nullable) = false, (gogoproto.customname) = "StreamID"];
+
+    // PartitionSpec is the source partition this processor will create a
+    // subscription for.
+    optional StreamIngestionPartitionSpec partition_spec = 3 [(gogoproto.nullable) = false];
+
+    // InitialScanTimestamp is the timestamp at which the partition will run the
+    // initial rangefeed scan before replicating further changes to the target
+    // spans. This timestamp is always non-empty, but a partition will only run an
+    // initial scan if no progress has been recorded prior to the current
+    // resumption of the replication job. Otherwise, all spans will start
+    // ingesting data from the PreviousReplicatedTimestamp described above.
+    optional util.hlc.Timestamp initial_scan_timestamp = 4 [(gogoproto.nullable) = false];
+
+    // StreamAddress locate the stream so that a stream client can be initialized.
+    optional string stream_address = 5 [(gogoproto.nullable) = false];
+
+    // Checkpoint stores a set of resolved spans denoting completed progress.
+    optional jobs.jobspb.StreamIngestionCheckpoint checkpoint = 6 [(gogoproto.nullable) = false];
+
+    repeated TableRekey rekey = 7 [(gogoproto.nullable) = false];
+
+    optional string metrics_label = 8 [(gogoproto.nullable) = false];
+
 }

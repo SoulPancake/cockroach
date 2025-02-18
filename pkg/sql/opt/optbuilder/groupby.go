@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package optbuilder
 
@@ -726,7 +721,7 @@ func (b *Builder) buildAggregateFunction(
 	if f.OrderBy != nil {
 		for _, o := range f.OrderBy {
 			// ORDER BY (a, b) => ORDER BY a, b.
-			te := fromScope.resolveType(o.Expr, types.Any)
+			te := fromScope.resolveType(o.Expr, types.AnyElement)
 			cols := flattenTuples([]tree.TypedExpr{te})
 
 			nullsDefaultOrder := b.hasDefaultNullsOrder(o)
@@ -994,7 +989,7 @@ func (b *Builder) allowImplicitGroupingColumn(colID opt.ColumnID, g *groupby) bo
 	// Check UNIQUE INDEX constraints.
 	for i := 1; i < tab.IndexCount(); i++ {
 		index := tab.Index(i)
-		if !index.IsUnique() || index.IsInverted() {
+		if !index.IsUnique() || !index.Type().CanBeUnique() {
 			continue
 		}
 		// If any of the key columns is nullable, uniqueCols is suffixed with the

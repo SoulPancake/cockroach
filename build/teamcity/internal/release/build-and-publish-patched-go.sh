@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+# Copyright 2022 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 set -euo pipefail
 
 google_credentials="$GOOGLE_EPHEMERAL_CREDENTIALS"
@@ -18,7 +24,7 @@ mkdir -p "${toplevel}"/artifacts
 # See https://cockroachlabs.atlassian.net/wiki/spaces/devinf/pages/3462594561/Docker+image+sync for the details.
 docker run --rm -i ${tty-} -v $this_dir/build-and-publish-patched-go:/bootstrap \
        -v "${toplevel}"/artifacts:/artifacts \
-       us-east1-docker.pkg.dev/crl-docker-sync/docker-mirror/docker.io/library/ubuntu:focal /bootstrap/impl.sh
+       us-east1-docker.pkg.dev/crl-docker-sync/docker-io/library/ubuntu:focal /bootstrap/impl.sh
 tc_end_block "Build Go toolchains"
 
 tc_start_block "Build FIPS Go toolchains (linux/amd64)"

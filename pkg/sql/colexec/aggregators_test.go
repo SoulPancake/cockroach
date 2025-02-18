@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexec
 
@@ -71,9 +66,10 @@ const (
 // aggType is a helper struct that allows tests to test both the ordered and
 // hash aggregators at the same time.
 type aggType struct {
-	new   func(context.Context, *colexecagg.NewAggregatorArgs) colexecop.ResettableOperator
-	name  string
-	order ordering
+	new          func(context.Context, *colexecagg.NewAggregatorArgs) colexecop.ResettableOperator
+	afterEachRun func() // if set, will be called at the end of each benchmark iteration
+	name         string
+	order        ordering
 }
 
 var aggTypesWithPartial = []aggType{
@@ -827,7 +823,6 @@ func TestAggregators(t *testing.T) {
 				func(input []colexecop.Operator) (colexecop.Operator, error) {
 					args := &colexecagg.NewAggregatorArgs{
 						Allocator:      testAllocator,
-						MemAccount:     testMemAcc,
 						Input:          input[0],
 						InputTypes:     tc.typs,
 						Spec:           tc.spec,
@@ -956,7 +951,6 @@ func TestAggregatorRandom(t *testing.T) {
 					require.NoError(t, err)
 					args := &colexecagg.NewAggregatorArgs{
 						Allocator:      testAllocator,
-						MemAccount:     testMemAcc,
 						Input:          source,
 						InputTypes:     tc.typs,
 						Spec:           tc.spec,
@@ -1162,10 +1156,21 @@ func benchmarkAggregateFunction(
 	if numSameAggs != 1 {
 		numSameAggsSuffix = fmt.Sprintf("/numSameAggs=%d", numSameAggs)
 	}
+	afterEachRunDefault := func(b *testing.B, op colexecop.Operator) {
+		if err = op.(colexecop.Closer).Close(ctx); err != nil {
+			b.Fatal(err)
+		}
+	}
 	b.Run(fmt.Sprintf(
 		"%s/%s/%s%s/groupSize=%d%s/numInputRows=%d",
 		fName, agg.name, inputTypesString, numSameAggsSuffix, groupSize, distinctProbString, numInputRows),
 		func(b *testing.B) {
+			afterEachRun := afterEachRunDefault
+			if agg.afterEachRun != nil {
+				afterEachRun = func(*testing.B, colexecop.Operator) {
+					agg.afterEachRun()
+				}
+			}
 			// Simulate the scenario when the optimizer has the perfect
 			// estimate.
 			estimatedRowCount := uint64(math.Ceil(float64(numInputRows) / float64(groupSize)))
@@ -1174,7 +1179,6 @@ func benchmarkAggregateFunction(
 			for i := 0; i < b.N; i++ {
 				a := agg.new(ctx, &colexecagg.NewAggregatorArgs{
 					Allocator:         testAllocator,
-					MemAccount:        testMemAcc,
 					Input:             source,
 					InputTypes:        tc.typs,
 					Spec:              tc.spec,
@@ -1194,9 +1198,7 @@ func benchmarkAggregateFunction(
 						break
 					}
 				}
-				if err = a.(colexecop.Closer).Close(ctx); err != nil {
-					b.Fatal(err)
-				}
+				afterEachRun(b, a)
 				source.Reset(ctx)
 			}
 		},

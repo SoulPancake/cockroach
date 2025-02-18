@@ -1,10 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -17,6 +14,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math"
+	"net"
 	"net/url"
 	"strings"
 	"sync"
@@ -25,11 +23,13 @@ import (
 
 	"github.com/IBM/sarama"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
+	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/kafkaauth"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/kvevent"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/util/bufalloc"
+	"github.com/cockroachdb/cockroach/pkg/util/cidr"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
@@ -37,8 +37,6 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 	"github.com/rcrowley/go-metrics"
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/clientcredentials"
 )
 
 func isKafkaSink(u *url.URL) bool {
@@ -120,6 +118,7 @@ type kafkaClient interface {
 
 // kafkaSink emits to Kafka asynchronously. It is not concurrency-safe; all
 // calls to Emit and Flush should be from the same goroutine.
+// Deprecated: use kafkaSinkClientV2 in sink_kafka_v2.go instead.
 type kafkaSink struct {
 	ctx            context.Context
 	bootstrapAddrs string
@@ -199,7 +198,8 @@ type saramaConfig struct {
 		MaxMessages int          `json:",omitempty"`
 	}
 
-	Compression compressionCodec `json:",omitempty"`
+	Compression      compressionCodec `json:",omitempty"`
+	CompressionLevel int              `json:",omitempty"`
 
 	RequiredAcks string `json:",omitempty"`
 
@@ -240,6 +240,7 @@ func defaultSaramaConfig() *saramaConfig {
 	// The default compression protocol is sarama.CompressionNone,
 	// which is 0.
 	config.Compression = 0
+	config.CompressionLevel = sarama.CompressionLevelDefault
 
 	// This works around what seems to be a bug in sarama where it isn't
 	// computing the right value to compare against `Producer.MaxMessageBytes`
@@ -367,11 +368,21 @@ func (s *kafkaSink) EmitRow(
 		return err
 	}
 
+	// Since we cannot distinguish between time spent buffering vs emitting
+	// inside sarama, set the DownstreamClientSend timer to the same value as
+	// BatchHistNanos.
+	recordOneMessageCb := s.metrics.recordOneMessage()
+	downstreamClientSendCb := s.metrics.timers().DownstreamClientSend.Start()
+	updateMetrics := func(mvcc hlc.Timestamp, bytes int, compressedBytes int) {
+		recordOneMessageCb(mvcc, bytes, compressedBytes)
+		downstreamClientSendCb()
+	}
+
 	msg := &sarama.ProducerMessage{
 		Topic:    topic,
 		Key:      sarama.ByteEncoder(key),
 		Value:    sarama.ByteEncoder(value),
-		Metadata: messageMetadata{alloc: alloc, mvcc: mvcc, updateMetrics: s.metrics.recordOneMessage()},
+		Metadata: messageMetadata{alloc: alloc, mvcc: mvcc, updateMetrics: updateMetrics},
 	}
 	s.stats.startMessage(int64(msg.Key.Length() + msg.Value.Length()))
 	return s.emitMessage(ctx, msg)
@@ -765,58 +776,6 @@ func (j *jsonDuration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-type tokenProvider struct {
-	tokenSource oauth2.TokenSource
-}
-
-var _ sarama.AccessTokenProvider = (*tokenProvider)(nil)
-
-// Token implements the sarama.AccessTokenProvider interface.  This is called by
-// Sarama when connecting to the broker.
-func (t *tokenProvider) Token() (*sarama.AccessToken, error) {
-	token, err := t.tokenSource.Token()
-	if err != nil {
-		// Errors will result in Sarama retrying the broker connection and logging
-		// the transient error, with a Broker connection error surfacing after retry
-		// attempts have been exhausted.
-		return nil, err
-	}
-
-	return &sarama.AccessToken{Token: token.AccessToken}, nil
-}
-
-func newTokenProvider(
-	ctx context.Context, dialConfig kafkaDialConfig,
-) (sarama.AccessTokenProvider, error) {
-	// grant_type is by default going to be set to 'client_credentials' by the
-	// clientcredentials library as defined by the spec, however non-compliant
-	// auth server implementations may want a custom type
-	var endpointParams url.Values
-	if dialConfig.saslGrantType != `` {
-		endpointParams = url.Values{"grant_type": {dialConfig.saslGrantType}}
-	}
-
-	tokenURL, err := url.Parse(dialConfig.saslTokenURL)
-	if err != nil {
-		return nil, errors.Wrap(err, "malformed token url")
-	}
-
-	// the clientcredentials.Config's TokenSource method creates an
-	// oauth2.TokenSource implementation which returns tokens for the given
-	// endpoint, returning the same cached result until its expiration has been
-	// reached, and then once expired re-requesting a new token from the endpoint.
-	cfg := clientcredentials.Config{
-		ClientID:       dialConfig.saslClientID,
-		ClientSecret:   dialConfig.saslClientSecret,
-		TokenURL:       tokenURL.String(),
-		Scopes:         dialConfig.saslScopes,
-		EndpointParams: endpointParams,
-	}
-	return &tokenProvider{
-		tokenSource: cfg.TokenSource(ctx),
-	}, nil
-}
-
 // Apply configures provided kafka configuration struct based on this config.
 func (c *saramaConfig) Apply(kafka *sarama.Config) error {
 	// Sarama limits the size of each message to be MaxMessageSize (1MB) bytes.
@@ -830,6 +789,9 @@ func (c *saramaConfig) Apply(kafka *sarama.Config) error {
 	kafka.Producer.Flush.Frequency = time.Duration(c.Flush.Frequency)
 	kafka.Producer.Flush.MaxMessages = c.Flush.MaxMessages
 	kafka.ClientID = c.ClientID
+
+	kafka.Producer.Compression = sarama.CompressionCodec(c.Compression)
+	kafka.Producer.CompressionLevel = c.CompressionLevel
 
 	if c.Version != "" {
 		parsedVersion, err := sarama.ParseKafkaVersion(c.Version)
@@ -845,7 +807,7 @@ func (c *saramaConfig) Apply(kafka *sarama.Config) error {
 		}
 		kafka.Producer.RequiredAcks = parsedAcks
 	}
-	kafka.Producer.Compression = sarama.CompressionCodec(c.Compression)
+
 	return nil
 }
 
@@ -874,24 +836,15 @@ func getSaramaConfig(
 }
 
 type kafkaDialConfig struct {
-	tlsEnabled       bool
-	tlsSkipVerify    bool
-	caCert           []byte
-	clientCert       []byte
-	clientKey        []byte
-	saslEnabled      bool
-	saslHandshake    bool
-	saslUser         string
-	saslPassword     string
-	saslMechanism    string
-	saslTokenURL     string
-	saslClientID     string
-	saslClientSecret string
-	saslScopes       []string
-	saslGrantType    string
+	tlsEnabled    bool
+	tlsSkipVerify bool
+	caCert        []byte
+	clientCert    []byte
+	clientKey     []byte
+	authMechanism kafkaauth.SASLMechanism
 }
 
-func buildDialConfig(u sinkURL) (kafkaDialConfig, error) {
+func buildDialConfig(u *changefeedbase.SinkURL) (kafkaDialConfig, error) {
 	switch u.Scheme {
 	case changefeedbase.SinkSchemeConfluentKafka:
 		return buildConfluentKafkaConfig(u)
@@ -910,103 +863,32 @@ func buildDialConfig(u sinkURL) (kafkaDialConfig, error) {
 // related params (which I believe are common to all the SASL schemes). It would
 // also make sense to update the docs to reflect these cases
 // rather than having a huge table of auth params like we have now.
-func buildDefaultKafkaConfig(u sinkURL) (kafkaDialConfig, error) {
+func buildDefaultKafkaConfig(u *changefeedbase.SinkURL) (kafkaDialConfig, error) {
 	dialConfig := kafkaDialConfig{}
 
-	if _, err := u.consumeBool(changefeedbase.SinkParamTLSEnabled, &dialConfig.tlsEnabled); err != nil {
+	if _, err := u.ConsumeBool(changefeedbase.SinkParamTLSEnabled, &dialConfig.tlsEnabled); err != nil {
 		return kafkaDialConfig{}, err
 	}
-	if _, err := u.consumeBool(changefeedbase.SinkParamSkipTLSVerify, &dialConfig.tlsSkipVerify); err != nil {
+	if _, err := u.ConsumeBool(changefeedbase.SinkParamSkipTLSVerify, &dialConfig.tlsSkipVerify); err != nil {
 		return kafkaDialConfig{}, err
 	}
-	if err := u.decodeBase64(changefeedbase.SinkParamCACert, &dialConfig.caCert); err != nil {
+	if err := u.DecodeBase64(changefeedbase.SinkParamCACert, &dialConfig.caCert); err != nil {
 		return kafkaDialConfig{}, err
 	}
-	if err := u.decodeBase64(changefeedbase.SinkParamClientCert, &dialConfig.clientCert); err != nil {
+	if err := u.DecodeBase64(changefeedbase.SinkParamClientCert, &dialConfig.clientCert); err != nil {
 		return kafkaDialConfig{}, err
 	}
-	if err := u.decodeBase64(changefeedbase.SinkParamClientKey, &dialConfig.clientKey); err != nil {
-		return kafkaDialConfig{}, err
-	}
-	if _, err := u.consumeBool(changefeedbase.SinkParamSASLEnabled, &dialConfig.saslEnabled); err != nil {
+	if err := u.DecodeBase64(changefeedbase.SinkParamClientKey, &dialConfig.clientKey); err != nil {
 		return kafkaDialConfig{}, err
 	}
 
-	if wasSet, err := u.consumeBool(changefeedbase.SinkParamSASLHandshake, &dialConfig.saslHandshake); !wasSet && err == nil {
-		dialConfig.saslHandshake = true
-	} else {
-		if err != nil {
-			return kafkaDialConfig{}, err
-		}
-		if !dialConfig.saslEnabled {
-			return kafkaDialConfig{}, errors.Errorf(`%s must be enabled to configure SASL handshake behavior`, changefeedbase.SinkParamSASLEnabled)
-		}
-	}
-
-	dialConfig.saslMechanism = u.consumeParam(changefeedbase.SinkParamSASLMechanism)
-	if dialConfig.saslMechanism != `` && !dialConfig.saslEnabled {
-		return kafkaDialConfig{}, errors.Errorf(`%s must be enabled to configure SASL mechanism`,
-			changefeedbase.SinkParamSASLEnabled)
-	}
-	if dialConfig.saslMechanism == `` {
-		dialConfig.saslMechanism = sarama.SASLTypePlaintext
-	}
-	switch dialConfig.saslMechanism {
-	case sarama.SASLTypeSCRAMSHA256, sarama.SASLTypeSCRAMSHA512, sarama.SASLTypeOAuth, sarama.SASLTypePlaintext:
-	default:
-		return kafkaDialConfig{}, errors.Errorf(`param %s must be one of %s, %s, %s, or %s`,
-			changefeedbase.SinkParamSASLMechanism,
-			sarama.SASLTypeSCRAMSHA256, sarama.SASLTypeSCRAMSHA512, sarama.SASLTypeOAuth, sarama.SASLTypePlaintext)
-	}
-
-	var requiredSASLParams []string
-	if dialConfig.saslMechanism == sarama.SASLTypeOAuth {
-		requiredSASLParams = []string{changefeedbase.SinkParamSASLClientID, changefeedbase.SinkParamSASLClientSecret,
-			changefeedbase.SinkParamSASLTokenURL}
-	} else {
-		requiredSASLParams = []string{changefeedbase.SinkParamSASLUser, changefeedbase.SinkParamSASLPassword}
-	}
-	for _, param := range requiredSASLParams {
-		if dialConfig.saslEnabled {
-			if len(u.q[param]) == 0 {
-				errStr := fmt.Sprintf(`%s must be provided when SASL is enabled`, param)
-				if dialConfig.saslMechanism != sarama.SASLTypePlaintext {
-					errStr += fmt.Sprintf(` using mechanism %s`, dialConfig.saslMechanism)
-				}
-				return kafkaDialConfig{}, errors.Errorf("%s", errStr)
-			}
-		} else {
-			if len(u.q[param]) > 0 {
-				return kafkaDialConfig{}, errors.Errorf(`%s must be enabled if %s is provided`,
-					changefeedbase.SinkParamSASLEnabled, param)
-			}
-		}
-	}
-
-	if dialConfig.saslMechanism != sarama.SASLTypeOAuth {
-		oauthParams := []string{changefeedbase.SinkParamSASLClientID, changefeedbase.SinkParamSASLClientSecret,
-			changefeedbase.SinkParamSASLTokenURL, changefeedbase.SinkParamSASLGrantType,
-			changefeedbase.SinkParamSASLScopes}
-		for _, param := range oauthParams {
-			if len(u.q[param]) > 0 {
-				return kafkaDialConfig{}, errors.Errorf(`%s is only a valid parameter for %s=%s`, param,
-					changefeedbase.SinkParamSASLMechanism, sarama.SASLTypeOAuth)
-			}
-		}
-	}
-
-	dialConfig.saslUser = u.consumeParam(changefeedbase.SinkParamSASLUser)
-	dialConfig.saslPassword = u.consumeParam(changefeedbase.SinkParamSASLPassword)
-	dialConfig.saslTokenURL = u.consumeParam(changefeedbase.SinkParamSASLTokenURL)
-	dialConfig.saslClientID = u.consumeParam(changefeedbase.SinkParamSASLClientID)
-	dialConfig.saslScopes = u.Query()[changefeedbase.SinkParamSASLScopes]
-	dialConfig.saslGrantType = u.consumeParam(changefeedbase.SinkParamSASLGrantType)
-
-	var decodedClientSecret []byte
-	if err := u.decodeBase64(changefeedbase.SinkParamSASLClientSecret, &decodedClientSecret); err != nil {
+	authMechanism, ok, err := kafkaauth.Pick(u)
+	if err != nil {
 		return kafkaDialConfig{}, err
 	}
-	dialConfig.saslClientSecret = string(decodedClientSecret)
+	if ok {
+		dialConfig.authMechanism = authMechanism
+	}
 
 	return dialConfig, nil
 }
@@ -1034,9 +916,11 @@ func newUnsupportedValueForParameterError(
 
 // validateAndConsumeParams consumes and validates if the given sinkURL contains
 // any unsupported values for the parameters using paramsWithAcceptedValues.
-func validateAndConsumeParamsIfSet(u *sinkURL, paramsWithAcceptedValues map[string]string) error {
+func validateAndConsumeParamsIfSet(
+	u *changefeedbase.SinkURL, paramsWithAcceptedValues map[string]string,
+) error {
 	for param, allowedValue := range paramsWithAcceptedValues {
-		if v := u.consumeParam(param); v != "" && v != allowedValue {
+		if v := u.ConsumeParam(param); v != "" && v != allowedValue {
 			return newUnsupportedValueForParameterError(param, /*param*/
 				v /*unsupportedValue*/, allowedValue /*allowedBoolValue*/)
 		}
@@ -1046,10 +930,12 @@ func validateAndConsumeParamsIfSet(u *sinkURL, paramsWithAcceptedValues map[stri
 
 // validateAndConsumeBoolParamsIfSet mirrors validateAndConsumeParamsIfSet but
 // specifically for boolean parameters.
-func validateAndConsumeBoolParamsIfSet(u *sinkURL, paramsWithAcceptedValues map[string]bool) error {
+func validateAndConsumeBoolParamsIfSet(
+	u *changefeedbase.SinkURL, paramsWithAcceptedValues map[string]bool,
+) error {
 	for param, allowedBoolValue := range paramsWithAcceptedValues {
 		var dest bool
-		wasSet, err := u.consumeBool(param, &dest)
+		wasSet, err := u.ConsumeBool(param, &dest)
 		if err != nil {
 			return err
 		}
@@ -1066,7 +952,7 @@ func validateAndConsumeBoolParamsIfSet(u *sinkURL, paramsWithAcceptedValues map[
 // parameters from the sinkURL. Additionally, it validates options based on the
 // given sinkURL and returns an error for unsupported values.
 func setDefaultParametersForConfluentAndAzure(
-	u *sinkURL, dialConfig kafkaDialConfig,
+	u *changefeedbase.SinkURL, dialConfig kafkaDialConfig,
 ) (kafkaDialConfig, error) {
 	// Check required values for parameters.
 	boolParamsWithRequiredValues := map[string]bool{
@@ -1086,9 +972,10 @@ func setDefaultParametersForConfluentAndAzure(
 
 	// Set values.
 	dialConfig.tlsEnabled = true
-	dialConfig.saslHandshake = true
-	dialConfig.saslEnabled = true
-	dialConfig.saslMechanism = sarama.SASLTypePlaintext
+	// These will be consumed by the kafka auth mechanism.
+	u.SetParam(changefeedbase.SinkParamSASLHandshake, "true")
+	u.SetParam(changefeedbase.SinkParamSASLEnabled, "true")
+	u.SetParam(changefeedbase.SinkParamSASLMechanism, sarama.SASLTypePlaintext)
 
 	// Ignore all other configurations.
 	return dialConfig, nil
@@ -1103,27 +990,39 @@ func setDefaultParametersForConfluentAndAzure(
 // information on how to connect to confluent cloud kafka. There are also
 // instructions when you go to the `Clients` page of the cluster in confluent
 // cloud.
-func buildConfluentKafkaConfig(u sinkURL) (kafkaDialConfig, error) {
+func buildConfluentKafkaConfig(u *changefeedbase.SinkURL) (kafkaDialConfig, error) {
 	dialConfig := kafkaDialConfig{}
 	// Check for api_key and api_secret.
-	if dialConfig.saslUser = u.consumeParam(changefeedbase.SinkParamConfluentAPIKey); dialConfig.saslUser == "" {
+	var saslUser, saslPassword string
+	if saslUser = u.ConsumeParam(changefeedbase.SinkParamConfluentAPIKey); saslUser == "" {
 		return kafkaDialConfig{},
 			newMissingParameterError(u.Scheme /*scheme*/, changefeedbase.SinkParamConfluentAPIKey /*param*/)
 	}
-	if dialConfig.saslPassword = u.consumeParam(changefeedbase.SinkParamConfluentAPISecret); dialConfig.saslPassword == "" {
+	if saslPassword = u.ConsumeParam(changefeedbase.SinkParamConfluentAPISecret); saslPassword == "" {
 		return kafkaDialConfig{},
 			newMissingParameterError(u.Scheme /*scheme*/, changefeedbase.SinkParamConfluentAPISecret /*param*/)
 	}
 
-	dialConfig, err := setDefaultParametersForConfluentAndAzure(&u, dialConfig)
+	u.SetParam(changefeedbase.SinkParamSASLUser, saslUser)
+	u.SetParam(changefeedbase.SinkParamSASLPassword, saslPassword)
+
+	dialConfig, err := setDefaultParametersForConfluentAndAzure(u, dialConfig)
 	if err != nil {
 		return kafkaDialConfig{}, err
 	}
-	if _, err := u.consumeBool(changefeedbase.SinkParamSkipTLSVerify, &dialConfig.tlsSkipVerify); err != nil {
+	if _, err := u.ConsumeBool(changefeedbase.SinkParamSkipTLSVerify, &dialConfig.tlsSkipVerify); err != nil {
 		return kafkaDialConfig{}, err
 	}
 
-	remaining := u.remainingQueryParams()
+	authMechanism, ok, err := kafkaauth.Pick(u)
+	if err != nil {
+		return kafkaDialConfig{}, err
+	}
+	if ok {
+		dialConfig.authMechanism = authMechanism
+	}
+
+	remaining := u.RemainingQueryParams()
 	if len(remaining) > 0 {
 		return kafkaDialConfig{}, newInvalidParameterError(u.Scheme, /*scheme*/
 			fmt.Sprintf("%v", remaining) /*invalidParams*/)
@@ -1143,31 +1042,39 @@ func buildConfluentKafkaConfig(u sinkURL) (kafkaDialConfig, error) {
 // See
 // https://learn.microsoft.com/en-us/azure/event-hubs/azure-event-hubs-kafka-overview
 // on how to connect to azure event hub kafka protocol.
-func buildAzureKafkaConfig(u sinkURL) (dialConfig kafkaDialConfig, _ error) {
+func buildAzureKafkaConfig(u *changefeedbase.SinkURL) (dialConfig kafkaDialConfig, _ error) {
 	hostName := u.Hostname()
 	// saslUser="$ConnectionString"
 	// saslPassword="Endpoint=sb://<NamespaceName>.servicebus.windows.net/;SharedAccessKeyName=<KeyName>;SharedAccessKey=<KeyValue>;
-	sharedAccessKeyName := u.consumeParam(changefeedbase.SinkParamAzureAccessKeyName)
+	sharedAccessKeyName := u.ConsumeParam(changefeedbase.SinkParamAzureAccessKeyName)
 	if sharedAccessKeyName == `` {
 		return kafkaDialConfig{},
 			newMissingParameterError(u.Scheme /*scheme*/, changefeedbase.SinkParamAzureAccessKeyName /*param*/)
 	}
-	sharedAccessKey := u.consumeParam(changefeedbase.SinkParamAzureAccessKey)
+	sharedAccessKey := u.ConsumeParam(changefeedbase.SinkParamAzureAccessKey)
 	if sharedAccessKey == `` {
 		return kafkaDialConfig{},
 			newMissingParameterError(u.Scheme /*scheme*/, changefeedbase.SinkParamAzureAccessKey /*param*/)
 	}
 
-	dialConfig.saslUser = "$ConnectionString"
-	dialConfig.saslPassword = fmt.Sprintf(
-		"Endpoint=sb://%s/;SharedAccessKeyName=%s;SharedAccessKey=%s",
-		hostName, sharedAccessKeyName, sharedAccessKey)
-	dialConfig, err := setDefaultParametersForConfluentAndAzure(&u, dialConfig)
+	u.SetParam(changefeedbase.SinkParamSASLUser, "$ConnectionString")
+	u.SetParam(changefeedbase.SinkParamSASLPassword,
+		fmt.Sprintf("Endpoint=sb://%s/;SharedAccessKeyName=%s;SharedAccessKey=%s",
+			hostName, sharedAccessKeyName, sharedAccessKey))
+	dialConfig, err := setDefaultParametersForConfluentAndAzure(u, dialConfig)
 	if err != nil {
 		return kafkaDialConfig{}, err
 	}
 
-	remaining := u.remainingQueryParams()
+	authMechanism, ok, err := kafkaauth.Pick(u)
+	if err != nil {
+		return kafkaDialConfig{}, err
+	}
+	if ok {
+		dialConfig.authMechanism = authMechanism
+	}
+
+	remaining := u.RemainingQueryParams()
 	if len(remaining) > 0 {
 		return kafkaDialConfig{}, newInvalidParameterError(u.Scheme, /*scheme*/
 			fmt.Sprintf("%v", remaining) /*invalidParams*/)
@@ -1177,9 +1084,10 @@ func buildAzureKafkaConfig(u sinkURL) (dialConfig kafkaDialConfig, _ error) {
 
 func buildKafkaConfig(
 	ctx context.Context,
-	u sinkURL,
+	u *changefeedbase.SinkURL,
 	jsonStr changefeedbase.SinkSpecificJSONConfig,
 	kafkaThrottlingMetrics metrics.Histogram,
+	netMetrics *cidr.NetMetrics,
 ) (*sarama.Config, error) {
 	dialConfig, err := buildDialConfig(u)
 	if err != nil {
@@ -1226,24 +1134,11 @@ func buildKafkaConfig(
 		}
 	}
 
-	if dialConfig.saslEnabled {
-		config.Net.SASL.Enable = true
-		config.Net.SASL.Handshake = dialConfig.saslHandshake
-		config.Net.SASL.User = dialConfig.saslUser
-		config.Net.SASL.Password = dialConfig.saslPassword
-		config.Net.SASL.Mechanism = sarama.SASLMechanism(dialConfig.saslMechanism)
-		switch config.Net.SASL.Mechanism {
-		case sarama.SASLTypeSCRAMSHA512:
-			config.Net.SASL.SCRAMClientGeneratorFunc = sha512ClientGenerator
-		case sarama.SASLTypeSCRAMSHA256:
-			config.Net.SASL.SCRAMClientGeneratorFunc = sha256ClientGenerator
-		case sarama.SASLTypeOAuth:
-			var err error
-			config.Net.SASL.TokenProvider, err = newTokenProvider(ctx, dialConfig)
-			if err != nil {
-				return nil, err
-			}
+	if dialConfig.authMechanism != nil {
+		if err := dialConfig.authMechanism.ApplySarama(ctx, config); err != nil {
+			return nil, err
 		}
+		log.VInfof(ctx, 2, "applied kafka auth mechanism: %+#v\n", dialConfig.authMechanism)
 	}
 
 	// Apply statement level overrides.
@@ -1252,6 +1147,16 @@ func buildKafkaConfig(
 		return nil, errors.Wrapf(err,
 			"failed to parse sarama config; check %s option", changefeedbase.OptKafkaSinkConfig)
 	}
+
+	// Leverage sarama's proxy support to slip in our net metrics
+	config.Net.Proxy.Enable = true
+	// This is how sarama constructs its Dialer. See (*Config).getDialer() in sarama.
+	dialer := &net.Dialer{
+		Timeout:   config.Net.DialTimeout,
+		KeepAlive: config.Net.KeepAlive,
+		LocalAddr: config.Net.LocalAddr,
+	}
+	config.Net.Proxy.Dialer = netMetrics.WrapDialer(dialer, "kafka")
 
 	// Note that the sarama.Config.Validate() below only logs an error in some
 	// cases, so we explicitly validate sarama config from our side.
@@ -1271,29 +1176,30 @@ func buildKafkaConfig(
 	return config, nil
 }
 
+// Deprecated: use makeKafkaSinkV2 instead.
 func makeKafkaSink(
 	ctx context.Context,
-	u sinkURL,
+	u *changefeedbase.SinkURL,
 	targets changefeedbase.Targets,
 	jsonStr changefeedbase.SinkSpecificJSONConfig,
 	settings *cluster.Settings,
 	mb metricsRecorderBuilder,
 ) (Sink, error) {
-	kafkaTopicPrefix := u.consumeParam(changefeedbase.SinkParamTopicPrefix)
-	kafkaTopicName := u.consumeParam(changefeedbase.SinkParamTopicName)
-	if schemaTopic := u.consumeParam(changefeedbase.SinkParamSchemaTopic); schemaTopic != `` {
+	kafkaTopicPrefix := u.ConsumeParam(changefeedbase.SinkParamTopicPrefix)
+	kafkaTopicName := u.ConsumeParam(changefeedbase.SinkParamTopicName)
+	if schemaTopic := u.ConsumeParam(changefeedbase.SinkParamSchemaTopic); schemaTopic != `` {
 		return nil, errors.Errorf(`%s is not yet supported`, changefeedbase.SinkParamSchemaTopic)
 	}
 
 	m := mb(requiresResourceAccounting)
-	config, err := buildKafkaConfig(ctx, u, jsonStr, m.getKafkaThrottlingMetrics(settings))
+	config, err := buildKafkaConfig(ctx, u, jsonStr, m.getKafkaThrottlingMetrics(settings), m.netMetrics())
 	if err != nil {
 		return nil, err
 	}
 
 	topics, err := MakeTopicNamer(
 		targets,
-		WithPrefix(kafkaTopicPrefix), WithSingleName(kafkaTopicName), WithSanitizeFn(SQLNameToKafkaName))
+		WithPrefix(kafkaTopicPrefix), WithSingleName(kafkaTopicName), WithSanitizeFn(changefeedbase.SQLNameToKafkaName))
 
 	if err != nil {
 		return nil, err
@@ -1310,7 +1216,7 @@ func makeKafkaSink(
 		disableInternalRetry: !internalRetryEnabled,
 	}
 
-	if unknownParams := u.remainingQueryParams(); len(unknownParams) > 0 {
+	if unknownParams := u.RemainingQueryParams(); len(unknownParams) > 0 {
 		return nil, errors.Errorf(
 			`unknown kafka sink query parameters: %s`, strings.Join(unknownParams, ", "))
 	}

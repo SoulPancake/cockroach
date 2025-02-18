@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage_test
 
@@ -48,6 +43,7 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/sstable"
+	"github.com/cockroachdb/pebble/sstable/block"
 	"github.com/cockroachdb/pebble/vfs"
 	"github.com/cockroachdb/redact"
 	"github.com/stretchr/testify/require"
@@ -59,10 +55,10 @@ var (
 	cmdDeleteRangeTombstoneKnownStats = metamorphic.ConstantWithTestBool(
 		"mvcc-histories-deleterange-tombstome-known-stats", false)
 	mvccHistoriesReader = metamorphic.ConstantWithTestChoice("mvcc-histories-reader",
-		"engine", "readonly", "batch", "snapshot", "efos").(string)
+		"engine", "readonly", "batch", "snapshot", "efos")
 	mvccHistoriesUseBatch   = metamorphic.ConstantWithTestBool("mvcc-histories-use-batch", false)
 	mvccHistoriesPeekBounds = metamorphic.ConstantWithTestChoice("mvcc-histories-peek-bounds",
-		"none", "left", "right", "both").(string)
+		"none", "left", "right", "both")
 	sstIterVerify           = metamorphic.ConstantWithTestBool("mvcc-histories-sst-iter-verify", false)
 	metamorphicIteratorSeed = metamorphic.ConstantWithTestRange("mvcc-metamorphic-iterator-seed", 0, 0, 100000) // 0 = disabled
 	separateEngineBlocks    = metamorphic.ConstantWithTestBool("mvcc-histories-separate-engine-blocks", false)
@@ -99,7 +95,7 @@ var (
 // increment      [t=<name>] [ts=<int>[,<int>]] [localTs=<int>[,<int>]] [resolve [status=<txnstatus>]] [ambiguousReplay] [maxLockConflicts=<int>] [targetLockConflictBytes=<int>] k=<key> [inc=<val>]
 // initput        [t=<name>] [ts=<int>[,<int>]] [resolve [status=<txnstatus>]] [ambiguousReplay] [maxLockConflicts=<int>] k=<key> v=<string> [raw] [failOnTombstones]
 // put            [t=<name>] [ts=<int>[,<int>]] [localTs=<int>[,<int>]] [resolve [status=<txnstatus>]] [ambiguousReplay] [maxLockConflicts=<int>] k=<key> v=<string> [raw]
-// put_rangekey   ts=<int>[,<int>] [localTs=<int>[,<int>]] k=<key> end=<key>
+// put_rangekey   ts=<int>[,<int>] [localTs=<int>[,<int>]] k=<key> end=<key> [syntheticBit]
 // put_blind_inline	k=<key> v=<string> [prev=<string>]
 // get            [t=<name>] [ts=<int>[,<int>]]                         [resolve [status=<txnstatus>]] k=<key> [inconsistent] [skipLocked] [tombstones] [failOnMoreRecent] [localUncertaintyLimit=<int>[,<int>]] [globalUncertaintyLimit=<int>[,<int>]] [maxKeys=<int>] [targetBytes=<int>] [allowEmpty]
 // scan           [t=<name>] [ts=<int>[,<int>]]                         [resolve [status=<txnstatus>]] k=<key> [end=<key>] [inconsistent] [skipLocked] [tombstones] [reverse] [failOnMoreRecent] [localUncertaintyLimit=<int>[,<int>]] [globalUncertaintyLimit=<int>[,<int>]] [max=<max>] [targetbytes=<target>] [wholeRows[=<int>]] [allowEmpty]
@@ -267,11 +263,13 @@ func TestMVCCHistories(t *testing.T) {
 		// SST iterator in order to accurately represent the raw SST data.
 		reportSSTEntries := func(buf *redact.StringBuilder, name string, sst []byte) error {
 			r, err := sstable.NewMemReader(sst, sstable.ReaderOptions{
-				Comparer: storage.EngineComparer,
+				Comparer:   &storage.EngineComparer,
+				KeySchemas: sstable.MakeKeySchemas(storage.KeySchemas...),
 			})
 			if err != nil {
 				return err
 			}
+			defer func() { _ = r.Close() }()
 			buf.Printf(">> %s:\n", name)
 
 			// Dump point keys.
@@ -280,7 +278,7 @@ func TestMVCCHistories(t *testing.T) {
 				return err
 			}
 			defer func() { _ = iter.Close() }()
-			for kv := iter.SeekGE(nil, 0); kv != nil; kv = iter.Next() {
+			for kv := iter.First(); kv != nil; kv = iter.Next() {
 				if err := iter.Error(); err != nil {
 					return err
 				}
@@ -300,7 +298,7 @@ func TestMVCCHistories(t *testing.T) {
 			}
 
 			// Dump rangedels.
-			if rdIter, err := r.NewRawRangeDelIter(sstable.NoTransforms); err != nil {
+			if rdIter, err := r.NewRawRangeDelIter(context.Background(), block.NoFragmentTransforms, block.NoReadEnv); err != nil {
 				return err
 			} else if rdIter != nil {
 				defer rdIter.Close()
@@ -325,7 +323,7 @@ func TestMVCCHistories(t *testing.T) {
 			}
 
 			// Dump range keys.
-			if rkIter, err := r.NewRawRangeKeyIter(sstable.NoTransforms); err != nil {
+			if rkIter, err := r.NewRawRangeKeyIter(context.Background(), block.NoFragmentTransforms, block.NoReadEnv); err != nil {
 				return err
 			} else if rkIter != nil {
 				defer rkIter.Close()
@@ -342,7 +340,7 @@ func TestMVCCHistories(t *testing.T) {
 					for _, k := range s.Keys {
 						buf.Printf("%s: %s", strings.ToLower(k.Kind().String()),
 							roachpb.Span{Key: start.Key, EndKey: end.Key})
-						if k.Suffix != nil {
+						if len(k.Suffix) > 0 {
 							ts, err := storage.DecodeMVCCTimestampSuffix(k.Suffix)
 							if err != nil {
 								return err
@@ -1185,7 +1183,13 @@ func cmdAcquireLock(e *evalCtx) error {
 		str := e.getStrength()
 		maxLockConflicts := e.getMaxLockConflicts()
 		targetLockConflictBytes := e.getTargetLockConflictBytes()
-		return storage.MVCCAcquireLock(e.ctx, rw, txn, str, key, e.ms, maxLockConflicts, targetLockConflictBytes)
+		var txnMeta *enginepb.TxnMeta
+		var ignoredSeq []enginepb.IgnoredSeqNumRange
+		if txn != nil {
+			txnMeta = &txn.TxnMeta
+			ignoredSeq = txn.IgnoredSeqNums
+		}
+		return storage.MVCCAcquireLock(e.ctx, rw, txnMeta, ignoredSeq, str, key, e.ms, maxLockConflicts, targetLockConflictBytes)
 	})
 }
 
@@ -1301,17 +1305,27 @@ func cmdCPut(e *evalCtx) error {
 	if e.hasArg("allow_missing") {
 		behavior = storage.CPutAllowIfMissing
 	}
+
+	originTimestamp := hlc.Timestamp{}
+	if e.hasArg("origin_ts") {
+		originTimestamp = e.getTsWithName("origin_ts")
+	}
+
 	resolve, resolveStatus := e.getResolve()
 
 	return e.withWriter("cput", func(rw storage.ReadWriter) error {
-		opts := storage.MVCCWriteOptions{
-			Txn:                            txn,
-			LocalTimestamp:                 localTs,
-			Stats:                          e.ms,
-			ReplayWriteTimestampProtection: e.getAmbiguousReplay(),
-			MaxLockConflicts:               e.getMaxLockConflicts(),
+		opts := storage.ConditionalPutWriteOptions{
+			MVCCWriteOptions: storage.MVCCWriteOptions{
+				Txn:                            txn,
+				LocalTimestamp:                 localTs,
+				Stats:                          e.ms,
+				ReplayWriteTimestampProtection: e.getAmbiguousReplay(),
+				MaxLockConflicts:               e.getMaxLockConflicts(),
+			},
+			AllowIfDoesNotExist: behavior,
+			OriginTimestamp:     originTimestamp,
 		}
-		acq, err := storage.MVCCConditionalPut(e.ctx, rw, key, ts, val, expVal, behavior, opts)
+		acq, err := storage.MVCCConditionalPut(e.ctx, rw, key, ts, val, expVal, opts)
 		if err != nil {
 			return err
 		}
@@ -1916,6 +1930,24 @@ func cmdPutRangeKey(e *evalCtx) error {
 	rangeKey.Timestamp = e.getTs(nil)
 	var value storage.MVCCValue
 	value.MVCCValueHeader.LocalTimestamp = hlc.ClockTimestamp(e.getTsWithName("localTs"))
+
+	// If the syntheticBit arg is present, manually construct a MVCC timestamp
+	// that includes the synthetic bit. Cockroach stopped writing these keys
+	// beginning in version 24.1. It's not possible to commit such a key through
+	// the PutMVCCRangeKey API, so we also need to manually encode the MVCC
+	// value and use PutEngineRangeKey. We keep the non-synthetic-bit case
+	// as-is, using PutMVCCRangeKey, since that's the codepath ordinary MVCC
+	// range key writes will use and we want to exercise it. See #129592.
+	if e.hasArg("syntheticBit") {
+		return e.withWriter("put_rangekey", func(rw storage.ReadWriter) error {
+			suffix := storage.EncodeMVCCTimestampSuffixWithSyntheticBitForTesting(rangeKey.Timestamp)
+			valueRaw, err := storage.EncodeMVCCValue(value)
+			if err != nil {
+				return errors.Wrapf(err, "failed to encode MVCC value for range key %s", rangeKey)
+			}
+			return rw.PutEngineRangeKey(rangeKey.StartKey, rangeKey.EndKey, suffix, valueRaw)
+		})
+	}
 
 	return e.withWriter("put_rangekey", func(rw storage.ReadWriter) error {
 		return rw.PutMVCCRangeKey(rangeKey, value)
@@ -2706,6 +2738,9 @@ func (e *evalCtx) getValInternal(argName string) roachpb.Value {
 	if e.hasArg("raw") {
 		val.RawBytes = []byte(value)
 	} else {
+		if value == "<tombstone>" {
+			return val
+		}
 		val.SetString(value)
 	}
 	return val

@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -23,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/benignerror"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
@@ -113,7 +107,6 @@ func makeTestBaseQueue(name string, impl queueImpl, store *Store, cfg queueConfi
 	}
 	cfg.successes = metric.NewCounter(metric.Metadata{Name: "processed"})
 	cfg.failures = metric.NewCounter(metric.Metadata{Name: "failures"})
-	cfg.storeFailures = metric.NewCounter(metric.Metadata{Name: "store_failures"})
 	cfg.pending = metric.NewGauge(metric.Metadata{Name: "pending"})
 	cfg.processingNanos = metric.NewCounter(metric.Metadata{Name: "processingnanos"})
 	cfg.purgatory = metric.NewGauge(metric.Metadata{Name: "purgatory"})
@@ -1564,18 +1557,4 @@ func TestBaseQueueRequeue(t *testing.T) {
 	bq.maybeAdd(ctx, r1, hlc.ClockTimestamp{})
 	assertShouldQueueCount(6)
 	assertProcessedAndProcessing(2, 0)
-
-	// Reset shouldQueueCount so we actually process the replica. Then return
-	// a StoreBenign error. It should requeue the replica.
-	atomic.StoreInt64(&shouldQueueCount, 0)
-	pQueue.err = benignerror.NewStoreBenign(errors.New("test"))
-	bq.maybeAdd(ctx, r1, hlc.ClockTimestamp{})
-	assertShouldQueueCount(1)
-	assertProcessedAndProcessing(2, 1)
-	// Let the first processing attempt finish. It should requeue.
-	pQueue.processBlocker <- struct{}{}
-	assertProcessedAndProcessing(3, 1)
-	pQueue.err = nil
-	pQueue.processBlocker <- struct{}{}
-	assertProcessedAndProcessing(4, 0)
 }

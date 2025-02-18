@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -204,7 +199,6 @@ func newMVCCGCQueue(store *Store) *mvccGCQueue {
 			},
 			successes:       store.metrics.MVCCGCQueueSuccesses,
 			failures:        store.metrics.MVCCGCQueueFailures,
-			storeFailures:   store.metrics.StoreFailures,
 			pending:         store.metrics.MVCCGCQueuePending,
 			processingNanos: store.metrics.MVCCGCQueueProcessingNanos,
 			disabledConfig:  kvserverbase.MVCCGCQueueEnabled,
@@ -300,8 +294,8 @@ func makeMVCCGCQueueScore(
 	canAdvanceGCThreshold bool,
 ) mvccGCQueueScore {
 	repl.mu.RLock()
-	ms := *repl.mu.state.Stats
-	hint := *repl.mu.state.GCHint
+	ms := *repl.shMu.state.Stats
+	hint := *repl.shMu.state.GCHint
 	repl.mu.RUnlock()
 
 	if repl.store.cfg.TestingKnobs.DisableLastProcessedCheck {
@@ -598,7 +592,7 @@ func (r *replicaGCer) template() kvpb.GCRequest {
 
 func (r *replicaGCer) send(ctx context.Context, req kvpb.GCRequest) error {
 	n := atomic.AddInt32(&r.count, 1)
-	log.Eventf(ctx, "sending batch %d (%d keys)", n, len(req.Keys))
+	log.Eventf(ctx, "sending batch %d (%d keys, %d rangekeys)", n, len(req.Keys), len(req.RangeKeys))
 
 	ba := &kvpb.BatchRequest{}
 	// Technically not needed since we're talking directly to the Replica.
@@ -846,6 +840,7 @@ func updateStoreMetricsWithGCInfo(metrics *StoreMetrics, info gc.Info) {
 	metrics.GCTransactionSpanGCCommitted.Inc(int64(info.TransactionSpanGCCommitted))
 	metrics.GCTransactionSpanGCStaging.Inc(int64(info.TransactionSpanGCStaging))
 	metrics.GCTransactionSpanGCPending.Inc(int64(info.TransactionSpanGCPending))
+	metrics.GCTransactionSpanGCPrepared.Inc(int64(info.TransactionSpanGCPrepared))
 	metrics.GCAbortSpanScanned.Inc(int64(info.AbortSpanTotal))
 	metrics.GCAbortSpanConsidered.Inc(int64(info.AbortSpanConsidered))
 	metrics.GCAbortSpanGCNum.Inc(int64(info.AbortSpanGCNum))

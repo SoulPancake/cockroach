@@ -1,16 +1,8 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
-import moment from "moment-timezone";
-import { createSelector } from "reselect";
 import {
   calculateXAxisDomain,
   calculateYAxisDomain,
@@ -24,15 +16,20 @@ import {
   TimeWindow,
   WithTimezone,
 } from "@cockroachlabs/cluster-ui";
+import { Tooltip } from "antd";
+import filter from "lodash/filter";
+import flatMap from "lodash/flatMap";
+import Long from "long";
+import moment from "moment-timezone";
+import React from "react";
+import { createSelector } from "reselect";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
-import Long from "long";
-import { Tooltip } from "antd";
-import flatMap from "lodash/flatMap";
-import filter from "lodash/filter";
 
 import * as protos from "src/js/protos";
 import { hoverOff, hoverOn, HoverState } from "src/redux/hover";
+import { isSecondaryTenant } from "src/redux/tenants";
+import { unique } from "src/util/arrays";
 import { findChildrenOfType } from "src/util/find";
 import {
   canShowMetric,
@@ -40,6 +37,7 @@ import {
   formatMetricData,
   formattedSeries,
 } from "src/views/cluster/util/graphs";
+import { MonitoringIcon } from "src/views/shared/components/icons/monitoring";
 import {
   Axis,
   AxisProps,
@@ -48,9 +46,6 @@ import {
   MetricsDataComponentProps,
   QueryTimeInfo,
 } from "src/views/shared/components/metricQuery";
-import { isSecondaryTenant } from "src/redux/tenants";
-import { MonitoringIcon } from "src/views/shared/components/icons/monitoring";
-import { unique } from "src/util/arrays";
 
 import "./linegraph.styl";
 
@@ -67,7 +62,6 @@ export interface OwnProps extends MetricsDataComponentProps {
   hoverOff?: typeof hoverOff;
   hoverState?: HoverState;
   preCalcGraphSize?: boolean;
-  legendAsTooltip?: boolean;
   showMetricsInTooltip?: boolean;
 }
 
@@ -359,7 +353,6 @@ export class InternalLineGraph extends React.Component<LineGraphProps, {}> {
         this.setNewTimeRange,
         () => this.xAxisDomain,
         () => this.yAxisDomain,
-        this.props.legendAsTooltip,
       );
 
       if (this.u) {
@@ -384,7 +377,6 @@ export class InternalLineGraph extends React.Component<LineGraphProps, {}> {
       data,
       tenantSource,
       preCalcGraphSize,
-      legendAsTooltip,
       showMetricsInTooltip,
     } = this.props;
     let tt = tooltip;
@@ -439,7 +431,6 @@ export class InternalLineGraph extends React.Component<LineGraphProps, {}> {
         </div>
       );
     }
-    const legendClassName = legendAsTooltip ? "linegraph-tooltip" : "linegraph";
     return (
       <Visualization
         title={title}
@@ -448,7 +439,7 @@ export class InternalLineGraph extends React.Component<LineGraphProps, {}> {
         loading={!data}
         preCalcGraphSize={preCalcGraphSize}
       >
-        <div className={legendClassName}>
+        <div className="linegraph">
           <div ref={this.el} />
         </div>
       </Visualization>

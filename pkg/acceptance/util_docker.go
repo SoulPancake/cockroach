@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package acceptance
 
@@ -14,6 +9,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"io/fs"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -175,7 +171,7 @@ func testDocker(
 // so the files can be used inside a docker container. The caller function is responsible for cleaning up.
 // This function doesn't copy the original file permissions and uses 755 for directories and files.
 func copyRunfiles(source, destination string) error {
-	return filepath.WalkDir(source, func(path string, dirEntry os.DirEntry, walkErr error) error {
+	return filepath.WalkDir(source, func(path string, dirEntry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}

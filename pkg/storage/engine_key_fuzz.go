@@ -1,12 +1,7 @@
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
@@ -59,8 +54,8 @@ func FuzzEngineKeysInvariants(f *testing.F) {
 	}
 
 	compareEngineKeys := func(t *testing.T, a, b []byte) int {
-		cmp := EngineKeyCompare(a, b)
-		eq := EngineKeyEqual(a, b)
+		cmp := EngineComparer.Compare(a, b)
+		eq := EngineComparer.Equal(a, b)
 		// Invariant: Iff EngineKeyCompare(a, b) == 0, EngineKeyEqual(a, b)
 		if eq != (cmp == 0) {
 			t.Errorf("EngineKeyEqual(0x%x, 0x%x) = %t; EngineKeyCompare(0x%x, 0x%x) = %d",
@@ -90,8 +85,19 @@ func FuzzEngineKeysInvariants(f *testing.F) {
 		return ek, ok1
 	}
 
-	f.Fuzz(func(t *testing.T, a, b []byte) {
+	f.Fuzz(func(t *testing.T, a []byte, b []byte) {
 		t.Logf("a = 0x%x; b = 0x%x", a, b)
+		// We can only pass valid keys to the comparer.
+		ekA, okA := decodeEngineKey(t, a)
+		ekB, okB := decodeEngineKey(t, b)
+		if !okA || !okB {
+			return
+		}
+		errA := ekA.Validate()
+		errB := ekB.Validate()
+		if errA != nil || errB != nil {
+			return
+		}
 		cmp := compareEngineKeys(t, a, b)
 		if cmp == 0 {
 			return
@@ -115,17 +121,6 @@ func FuzzEngineKeysInvariants(f *testing.F) {
 		if cmp = compareEngineKeys(t, sep, b); cmp >= 0 {
 			t.Errorf("Separator(0x%x, 0x%x) = 0x%x; but EngineKeyCompare(0x%x, 0x%x) = %d",
 				a, b, sep, sep, b, cmp)
-		}
-		ekA, okA := decodeEngineKey(t, a)
-		ekB, okB := decodeEngineKey(t, b)
-		if !okA || !okB {
-			return
-		}
-		errA := ekA.Validate()
-		errB := ekB.Validate()
-		// The below invariants only apply for valid keys.
-		if errA != nil || errB != nil {
-			return
 		}
 		t.Logf("ekA = %s (Key: 0x%x, Version: 0x%x); ekB = %s (Key: 0x%x, Version: 0x%x)",
 			ekA, ekA.Key, ekA.Version, ekB, ekB.Key, ekB.Version)

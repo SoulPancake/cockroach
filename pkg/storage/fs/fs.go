@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package fs
 
@@ -21,6 +16,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/cli/exit"
 	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/storage/disk"
+	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/errors"
@@ -67,12 +64,12 @@ func InitEnvsFromStoreSpecs(
 	specs []base.StoreSpec,
 	rw RWMode,
 	stickyRegistry StickyRegistry,
-	statsCollector *vfs.DiskWriteStatsCollector,
+	diskWriteStats disk.WriteStatsManager,
 ) (Envs, error) {
 	envs := make(Envs, len(specs))
 	for i := range specs {
 		var err error
-		envs[i], err = InitEnvFromStoreSpec(ctx, specs[i], rw, stickyRegistry, statsCollector)
+		envs[i], err = InitEnvFromStoreSpec(ctx, specs[i], rw, stickyRegistry, diskWriteStats)
 		if err != nil {
 			envs.CloseAll()
 			return nil, err
@@ -102,7 +99,7 @@ func InitEnvFromStoreSpec(
 	spec base.StoreSpec,
 	rw RWMode,
 	stickyRegistry StickyRegistry,
-	statsCollector *vfs.DiskWriteStatsCollector,
+	diskWriteStats disk.WriteStatsManager,
 ) (*Env, error) {
 	fs := vfs.Default
 	dir := spec.Path
@@ -119,13 +116,13 @@ func InitEnvFromStoreSpec(
 	return InitEnv(ctx, fs, dir, EnvConfig{
 		RW:                rw,
 		EncryptionOptions: spec.EncryptionOptions,
-	}, statsCollector)
+	}, diskWriteStats)
 }
 
 // EnvConfig provides additional configuration settings for Envs.
 type EnvConfig struct {
 	RW                RWMode
-	EncryptionOptions []byte
+	EncryptionOptions *storagepb.EncryptionOptions
 }
 
 // InitEnv initializes a new virtual filesystem environment.
@@ -133,11 +130,7 @@ type EnvConfig struct {
 // If successful the returned Env is returned with 1 reference. It must be
 // closed to avoid leaking goroutines and other resources.
 func InitEnv(
-	ctx context.Context,
-	fs vfs.FS,
-	dir string,
-	cfg EnvConfig,
-	statsCollector *vfs.DiskWriteStatsCollector,
+	ctx context.Context, fs vfs.FS, dir string, cfg EnvConfig, diskWriteStats disk.WriteStatsManager,
 ) (*Env, error) {
 	e := &Env{Dir: dir, UnencryptedFS: fs, rw: cfg.RW}
 	e.refs.Store(1)
@@ -169,6 +162,24 @@ func InitEnv(
 		diskHealthCheckInterval = maxSyncDurationDefault
 	}
 
+	// Create the directory if it doesn't already exist. We need to acquire a
+	// database lock down below, which requires the directory already exist.
+	if cfg.RW == ReadWrite {
+		if err := e.UnencryptedFS.MkdirAll(dir, os.ModePerm); err != nil {
+			return nil, err
+		}
+	}
+
+	// Create the stats collector. This has to be done after the directory has
+	// been created above.
+	var statsCollector *vfs.DiskWriteStatsCollector
+	var err error
+	if diskWriteStats != nil && dir != "" {
+		if statsCollector, err = diskWriteStats.GetOrCreateCollector(dir); err != nil {
+			return nil, errors.Wrap(err, "retrieving stats collector")
+		}
+	}
+
 	// Instantiate a file system with disk health checking enabled. This FS
 	// wraps the filesystem with a layer that times all write-oriented
 	// operations. When a slow disk operation occurs, Env.onDiskSlow is invoked
@@ -180,19 +191,10 @@ func InitEnv(
 		exit.WithCode(exit.DiskFull())
 	})
 
-	// Create the directory if it doesn't already exist. We need to acquire a
-	// database lock down below, which requires the directory already exist.
-	if cfg.RW == ReadWrite {
-		if err := e.UnencryptedFS.MkdirAll(dir, os.ModePerm); err != nil {
-			return nil, err
-		}
-	}
-
 	// Acquire the database lock in the store directory to ensure that no other
 	// process is simultaneously accessing the same store. We manually acquire
 	// the database lock here (rather than allowing Pebble to acquire the lock)
 	// so that we hold the lock when we initialize encryption-at-rest subsystem.
-	var err error
 	e.DirectoryLock, err = pebble.LockDirectory(dir, e.UnencryptedFS)
 	if err != nil {
 		return nil, err
@@ -300,6 +302,12 @@ func (e *Env) Close() {
 	}
 }
 
+// Unwrap is part of the vfs.FS interface.
+func (e *Env) Unwrap() vfs.FS {
+	// We don't want to expose the unencrypted FS.
+	return nil
+}
+
 func (e *Env) onDiskSlow(info vfs.DiskSlowInfo) {
 	if fn := e.onDiskSlowFunc.Load(); fn != nil {
 		(*fn)(info)
@@ -308,7 +316,7 @@ func (e *Env) onDiskSlow(info vfs.DiskSlowInfo) {
 
 // InMemory constructs a new in-memory environment.
 func InMemory() *Env {
-	e, err := InitEnv(context.Background(), vfs.NewMem(), "" /* dir */, EnvConfig{}, nil /* statsCollector */)
+	e, err := InitEnv(context.Background(), vfs.NewMem(), "" /* dir */, EnvConfig{}, nil /* diskWriteStats */)
 	// In practice InitEnv is infallible with this configuration.
 	if err != nil {
 		panic(err)
@@ -321,7 +329,7 @@ func InMemory() *Env {
 // encryption-at-rest. Since this function ignores the possibility of
 // encryption-at-rest, it should only be used as a testing convenience.
 func MustInitPhysicalTestingEnv(dir string) *Env {
-	e, err := InitEnv(context.Background(), vfs.Default, dir, EnvConfig{}, nil /* statsCollector */)
+	e, err := InitEnv(context.Background(), vfs.Default, dir, EnvConfig{}, nil /* diskWriteStats */)
 	if err != nil {
 		panic(err)
 	}
@@ -452,7 +460,7 @@ func (e *Env) List(dir string) ([]string, error) {
 }
 
 // Stat returns an os.FileInfo describing the named file.
-func (e *Env) Stat(name string) (os.FileInfo, error) {
+func (e *Env) Stat(name string) (vfs.FileInfo, error) {
 	return e.defaultFS.Stat(name)
 }
 

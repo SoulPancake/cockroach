@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvpb
 
@@ -1654,6 +1649,19 @@ func NewPutInline(key roachpb.Key, value roachpb.Value) Request {
 	}
 }
 
+// NewPutMustAcquireExclusiveLock returns a Request initialized to put the value
+// at key. It also sets the MustAcquireExclusiveLock flag.
+func NewPutMustAcquireExclusiveLock(key roachpb.Key, value roachpb.Value) Request {
+	value.InitChecksum(key)
+	return &PutRequest{
+		RequestHeader: RequestHeader{
+			Key: key,
+		},
+		Value:                    value,
+		MustAcquireExclusiveLock: true,
+	}
+}
+
 // NewConditionalPut returns a Request initialized to put value at key if the
 // existing value at key equals expValue.
 //
@@ -1695,28 +1703,13 @@ func NewConditionalPutInline(
 	}
 }
 
-// NewInitPut returns a Request initialized to put the value at key, as long as
-// the key doesn't exist, returning a ConditionFailedError if the key exists and
-// the existing value is different from value. If failOnTombstones is set to
-// true, tombstones count as mismatched values and will cause a
-// ConditionFailedError.
-func NewInitPut(key roachpb.Key, value roachpb.Value, failOnTombstones bool) Request {
-	value.InitChecksum(key)
-	return &InitPutRequest{
-		RequestHeader: RequestHeader{
-			Key: key,
-		},
-		Value:            value,
-		FailOnTombstones: failOnTombstones,
-	}
-}
-
 // NewDelete returns a Request initialized to delete the value at key.
-func NewDelete(key roachpb.Key) Request {
+func NewDelete(key roachpb.Key, mustAcquireExclusiveLock bool) Request {
 	return &DeleteRequest{
 		RequestHeader: RequestHeader{
 			Key: key,
 		},
+		MustAcquireExclusiveLock: mustAcquireExclusiveLock,
 	}
 }
 
@@ -2118,7 +2111,7 @@ func (r *RefreshRangeRequest) flags() flag {
 	return isRead | isTxn | isRange | updatesTSCache
 }
 
-func (*SubsumeRequest) flags() flag    { return isRead | isAlone | updatesTSCache }
+func (*SubsumeRequest) flags() flag    { return isWrite | isAlone | updatesTSCache }
 func (*RangeStatsRequest) flags() flag { return isRead }
 func (*QueryResolvedTimestampRequest) flags() flag {
 	return isRead | isRange | requiresClosedTSOlderThanStorageSnapshot
@@ -2525,15 +2518,13 @@ func (s *ScanStats) String() string {
 
 // RangeFeedEventSink is an interface for sending a single rangefeed event.
 type RangeFeedEventSink interface {
-	// Context returns the context for this stream.
-	Context() context.Context
-	// Send blocks until it sends the RangeFeedEvent, the stream is done, or the
-	// stream breaks. Send must be safe to call on the same stream in different
-	// goroutines.
-	Send(*RangeFeedEvent) error
-	// SendIsThreadSafe is a no-op declaration method. It is a contract that the
-	// interface has a thread-safe Send method.
-	SendIsThreadSafe()
+	// SendUnbuffered blocks until it sends the RangeFeedEvent, the stream is
+	// done, or the stream breaks. Send must be safe to call on the same stream in
+	// different goroutines.
+	SendUnbuffered(*RangeFeedEvent) error
+	// SendUnbufferedIsThreadSafe is a no-op declaration method. It is a contract
+	// that the interface has a thread-safe Send method.
+	SendUnbufferedIsThreadSafe()
 }
 
 // RangeFeedEventProducer is an adapter for receiving rangefeed events with either
@@ -2552,4 +2543,20 @@ func (writeOptions *WriteOptions) GetOriginID() uint32 {
 		return 0
 	}
 	return writeOptions.OriginID
+}
+
+func (writeOptions *WriteOptions) GetOriginTimestamp() hlc.Timestamp {
+	if writeOptions == nil {
+		return hlc.Timestamp{}
+	}
+	return writeOptions.OriginTimestamp
+}
+
+func (r *ConditionalPutRequest) Validate() error {
+	if !r.OriginTimestamp.IsEmpty() {
+		if r.AllowIfDoesNotExist {
+			return errors.AssertionFailedf("invalid ConditionalPutRequest: AllowIfDoesNotExist and non-empty OriginTimestamp are incompatible")
+		}
+	}
+	return nil
 }

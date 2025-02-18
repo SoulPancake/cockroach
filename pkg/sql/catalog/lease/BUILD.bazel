@@ -1,5 +1,4 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
-load("//build:STRINGER.bzl", "stringer")
 
 go_library(
     name = "lease",
@@ -14,7 +13,6 @@ go_library(
         "name_cache.go",
         "storage.go",
         "testutils.go",
-        ":gen-lease-mode-stringer",  # keep
     ],
     importpath = "github.com/cockroachdb/cockroach/pkg/sql/catalog/lease",
     visibility = ["//visibility:public"],
@@ -27,7 +25,6 @@ go_library(
         "//pkg/kv/kvpb",
         "//pkg/multitenant",
         "//pkg/roachpb",
-        "//pkg/server/serverpb",
         "//pkg/server/settingswatcher",
         "//pkg/settings",
         "//pkg/settings/cluster",
@@ -51,6 +48,7 @@ go_library(
         "//pkg/sql/sqlliveness",
         "//pkg/sql/sqlliveness/slbase",
         "//pkg/storage",
+        "//pkg/util/buildutil",
         "//pkg/util/grpcutil",
         "//pkg/util/hlc",
         "//pkg/util/log",
@@ -70,12 +68,6 @@ go_library(
         "@com_github_cockroachdb_logtags//:logtags",
         "@com_github_cockroachdb_redact//:redact",
     ],
-)
-
-stringer(
-    name = "gen-lease-mode-stringer",
-    src = "lease.go",
-    typ = "SessionBasedLeasingMode",
 )
 
 go_test(
@@ -122,15 +114,21 @@ go_test(
         "//pkg/sql/enum",
         "//pkg/sql/isql",
         "//pkg/sql/pgwire/pgcode",
+        "//pkg/sql/pgwire/pgerror",
         "//pkg/sql/regions",
         "//pkg/sql/rowenc/keyside",
         "//pkg/sql/rowenc/valueside",
+        "//pkg/sql/schemachanger/scexec",
+        "//pkg/sql/schemachanger/scop",
+        "//pkg/sql/schemachanger/scplan",
         "//pkg/sql/sem/tree",
         "//pkg/sql/sessiondata",
         "//pkg/sql/sqlinstance/instancestorage",
         "//pkg/sql/sqlliveness",
         "//pkg/sql/sqlliveness/slbase",
         "//pkg/sql/sqlliveness/slprovider",
+        "//pkg/sql/sqltestutils",
+        "//pkg/sql/stats",
         "//pkg/sql/types",
         "//pkg/storage",
         "//pkg/testutils",
@@ -139,7 +137,9 @@ go_test(
         "//pkg/testutils/sqlutils",
         "//pkg/testutils/testcluster",
         "//pkg/util/admission",
+        "//pkg/util/allstacks",
         "//pkg/util/ctxgroup",
+        "//pkg/util/debugutil",
         "//pkg/util/encoding",
         "//pkg/util/hlc",
         "//pkg/util/leaktest",

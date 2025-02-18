@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -28,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
+	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/pgtest"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -209,7 +205,9 @@ CREATE TABLE users(id UUID DEFAULT gen_random_uuid() PRIMARY KEY, promo_id INT R
 			{"intervalstyle", "iso_8601"},
 			{"large_full_scan_rows", "2000"},
 			{"locality_optimized_partitioned_index_scan", "off"},
-			{"null_ordered_last", "on"},
+			// TODO(#129956): Enable this once non-default NULLS ordering with
+			// subqueries is allowed in tests.
+			// {"null_ordered_last", "on"},
 			{"on_update_rehome_row_enabled", "off"},
 			{"opt_split_scan_limit", "1000"},
 			{"optimizer_use_histograms", "off"},
@@ -225,6 +223,7 @@ CREATE TABLE users(id UUID DEFAULT gen_random_uuid() PRIMARY KEY, promo_id INT R
 			{"testing_optimizer_random_seed", "123"},
 			{"timezone", "+8"},
 			{"unconstrained_non_covering_index_scan_enabled", "on"},
+			{"default_transaction_isolation", "'read committed'"},
 		}
 		for _, tc := range testcases {
 			t.Run(tc.sessionVar, func(t *testing.T) {
@@ -237,6 +236,9 @@ CREATE TABLE users(id UUID DEFAULT gen_random_uuid() PRIMARY KEY, promo_id INT R
 							reg := regexp.MustCompile(fmt.Sprintf("SET %s.*-- default value", tc.sessionVar))
 							if reg.FindString(contents) == "" {
 								return errors.Errorf("could not find 'SET %s' in env.sql", tc.sessionVar)
+							}
+							if _, err := parser.Parse(contents); err != nil {
+								return errors.Wrap(err, "could not parse env.sql")
 							}
 						}
 						return nil
@@ -279,28 +281,62 @@ CREATE TABLE users(id UUID DEFAULT gen_random_uuid() PRIMARY KEY, promo_id INT R
 	})
 
 	t.Run("foreign keys", func(t *testing.T) {
+		// All tables should be included in the stmt bundle, regardless of which
+		// one we query because all of them are considered "related" (even
+		// though we don't specify ON DELETE and ON UPDATE actions).
+		tableNames := []string{"parent", "child1", "child2", "grandchild1", "grandchild2"}
 		r.Exec(t, "CREATE TABLE parent (pk INT PRIMARY KEY, v INT);")
-		r.Exec(t, "CREATE TABLE child (pk INT PRIMARY KEY, fk INT REFERENCES parent(pk));")
+		r.Exec(t, "CREATE TABLE child1 (pk INT PRIMARY KEY, fk INT REFERENCES parent(pk));")
+		r.Exec(t, "CREATE TABLE child2 (pk INT PRIMARY KEY, fk INT REFERENCES parent(pk));")
+		r.Exec(t, "CREATE TABLE grandchild1 (pk INT PRIMARY KEY, fk INT REFERENCES child1(pk));")
+		r.Exec(t, "CREATE TABLE grandchild2 (pk INT PRIMARY KEY, fk INT REFERENCES child2(pk));")
 		contentCheck := func(name, contents string) error {
 			if name == "schema.sql" {
-				for _, tableName := range []string{"parent", "child"} {
-					if regexp.MustCompile("CREATE TABLE defaultdb.public."+tableName).FindString(contents) == "" {
+				for _, tableName := range tableNames {
+					if regexp.MustCompile("USE defaultdb;\nCREATE TABLE public."+tableName).FindString(contents) == "" {
 						return errors.Newf(
-							"could not find 'CREATE TABLE defaultdb.public.%s' in schema.sql:\n%s", tableName, contents)
+							"could not find 'USE defaultdb;\nCREATE TABLE public.%s' in schema.sql:\n%s", tableName, contents)
 					}
 				}
 			}
 			return nil
 		}
-		for _, tableName := range []string{"parent", "child"} {
+		for _, tableName := range tableNames {
 			rows := r.QueryStr(t, "EXPLAIN ANALYZE (DEBUG) SELECT * FROM "+tableName)
 			checkBundle(
 				t, fmt.Sprint(rows), "child", contentCheck, false, /* expectErrors */
-				base, plans, "stats-defaultdb.public.parent.sql", "stats-defaultdb.public.child.sql",
-				"distsql.html vec.txt vec-v.txt",
+				base, plans, "stats-defaultdb.public.parent.sql", "stats-defaultdb.public.child1.sql", "stats-defaultdb.public.child2.sql",
+				"stats-defaultdb.public.grandchild1.sql", "stats-defaultdb.public.grandchild2.sql", "distsql.html vec.txt vec-v.txt",
 			)
 		}
 	})
+
+	// getBundleThroughBuiltin is a helper function that returns an url to
+	// download a stmt bundle that was collected in response to a diagnostics
+	// request inserted by the builtin.
+	getBundleThroughBuiltin := func(fprint, query, planGist string, redacted bool) string {
+		// Delete all old diagnostics to make this test easier.
+		r.Exec(t, "DELETE FROM system.statement_diagnostics WHERE true")
+
+		// Insert the diagnostics request via the builtin function.
+		row := r.QueryRow(t, `SELECT crdb_internal.request_statement_bundle($1, $2, 0::FLOAT, 0::INTERVAL, 0::INTERVAL, $3);`, fprint, planGist, redacted)
+		var inserted bool
+		row.Scan(&inserted)
+		require.True(t, inserted)
+
+		// Now actually execute the query so that the bundle is collected.
+		r.Exec(t, query)
+
+		// Get ID of our bundle.
+		var id int
+		var bundleFingerprint string
+		row = r.QueryRow(t, "SELECT id, statement_fingerprint FROM system.statement_diagnostics LIMIT 1")
+		row.Scan(&id, &bundleFingerprint)
+		require.Equal(t, fprint, bundleFingerprint)
+
+		// We need to come up with the url to download the bundle from.
+		return findBundleDownloadURL(t, r, id)
+	}
 
 	t.Run("redact", func(t *testing.T) {
 		r.Exec(t, "CREATE TYPE plesiosaur AS ENUM ('pterodactyl', '5555555555554444');")
@@ -312,30 +348,11 @@ CREATE TABLE users(id UUID DEFAULT gen_random_uuid() PRIMARY KEY, promo_id INT R
 			t.Run(fmt.Sprintf("viaBuiltin=%t", viaBuiltin), func(t *testing.T) {
 				var url string
 				if viaBuiltin {
-					// Delete all old diagnostics to make this test easier.
-					r.Exec(t, "DELETE FROM system.statement_diagnostics WHERE true")
-
-					// Insert the diagnostics request via the builtin function.
-					fingerprint := "SELECT max(cardno), test_redact() FROM pterosaur WHERE cardholder = _"
-					row := r.QueryRow(t, `SELECT crdb_internal.request_statement_bundle($1, 0::FLOAT, 0::INTERVAL, 0::INTERVAL, true);`, fingerprint)
-					var inserted bool
-					row.Scan(&inserted)
-					require.True(t, inserted)
-
-					// Now actually execute the query so that the bundle is
-					// collected.
-					r.Exec(t, "SELECT max(cardno), test_redact() FROM pterosaur WHERE cardholder = 'pterodactyl';")
-
-					// Get ID of our bundle.
-					var id int
-					var bundleFingerprint string
-					row = r.QueryRow(t, "SELECT id, statement_fingerprint FROM system.statement_diagnostics LIMIT 1")
-					row.Scan(&id, &bundleFingerprint)
-					require.Equal(t, fingerprint, bundleFingerprint)
-
-					// We need to come up with the url to download the bundle
-					// from.
-					url = findBundleDownloadURL(t, r, id)
+					fprint := "SELECT max(cardno), test_redact() FROM pterosaur WHERE cardholder = _"
+					query := "SELECT max(cardno), test_redact() FROM pterosaur WHERE cardholder = 'pterodactyl';"
+					// Collect a bundle in response to a diagnostics request
+					// inserted by the builtin.
+					url = getBundleThroughBuiltin(fprint, query, "" /* planGist */, true /* redacted */)
 				} else {
 					rows := r.QueryStr(t,
 						"EXPLAIN ANALYZE (DEBUG, REDACT) SELECT max(cardno), test_redact() FROM pterosaur WHERE cardholder = 'pterodactyl'",
@@ -362,13 +379,21 @@ CREATE TABLE users(id UUID DEFAULT gen_random_uuid() PRIMARY KEY, promo_id INT R
 	t.Run("types", func(t *testing.T) {
 		r.Exec(t, "CREATE TYPE test_type1 AS ENUM ('hello','world');")
 		r.Exec(t, "CREATE TYPE test_type2 AS ENUM ('goodbye','earth');")
-		rows := r.QueryStr(t, "EXPLAIN ANALYZE (DEBUG) SELECT 1;")
+		rows := r.QueryStr(t, "EXPLAIN ANALYZE (DEBUG) SELECT 'hello'::test_type1;")
 		checkBundle(
-			t, fmt.Sprint(rows), "test_type1", nil, false, /* expectErrors */
-			base, plans, "distsql.html vec.txt vec-v.txt",
-		)
-		checkBundle(
-			t, fmt.Sprint(rows), "test_type2", nil, false, /* expectErrors */
+			t, fmt.Sprint(rows), "test_type1", func(name, contents string) error {
+				if name == "schema.sql" {
+					reg := regexp.MustCompile("test_type1")
+					if reg.FindString(contents) == "" {
+						return errors.Errorf("could not find definition for 'test_type1' type in schema.sql")
+					}
+					reg = regexp.MustCompile("test_type2")
+					if reg.FindString(contents) != "" {
+						return errors.Errorf("Found irrelevant user defined type 'test_type2' in schema.sql")
+					}
+				}
+				return nil
+			}, false, /* expectErrors */
 			base, plans, "distsql.html vec.txt vec-v.txt",
 		)
 	})
@@ -413,6 +438,68 @@ CREATE TABLE users(id UUID DEFAULT gen_random_uuid() PRIMARY KEY, promo_id INT R
 				return nil
 			}, false /* expectErrors */, base, plans,
 			"distsql.html vec-v.txt vec.txt")
+	})
+
+	t.Run("different schema UDF", func(t *testing.T) {
+		r.Exec(t, "CREATE FUNCTION foo() RETURNS INT LANGUAGE SQL AS 'SELECT count(*) FROM abc, s.a';")
+		r.Exec(t, "CREATE FUNCTION s.foo() RETURNS INT LANGUAGE SQL AS 'SELECT count(*) FROM abc, s.a';")
+		rows := r.QueryStr(t, "EXPLAIN ANALYZE (DEBUG) SELECT s.foo();")
+		checkBundle(
+			t, fmt.Sprint(rows), "s.foo", func(name, contents string) error {
+				if name == "schema.sql" {
+					reg := regexp.MustCompile(`s\.foo`)
+					if reg.FindString(contents) == "" {
+						return errors.Errorf("could not find definition for 's.foo' function in schema.sql")
+					}
+					reg = regexp.MustCompile(`^CREATE FUNCTION public\.foo`)
+					if reg.FindString(contents) != "" {
+						return errors.Errorf("found irrelevant function 'foo' in schema.sql")
+					}
+					reg = regexp.MustCompile(`s\.a`)
+					if reg.FindString(contents) == "" {
+						return errors.Errorf("could not find definition for relation 's.a' in schema.sql")
+					}
+					reg = regexp.MustCompile("abc")
+					if reg.FindString(contents) == "" {
+						return errors.Errorf("could not find definition for relation 'abc' in schema.sql")
+					}
+				}
+				return nil
+			},
+			false /* expectErrors */, base, plans,
+			"stats-defaultdb.public.abc.sql stats-defaultdb.s.a.sql distsql.html vec-v.txt vec.txt",
+		)
+	})
+
+	t.Run("different schema procedure", func(t *testing.T) {
+		r.Exec(t, "CREATE PROCEDURE bar() LANGUAGE SQL AS 'SELECT count(*) FROM abc, s.a';")
+		r.Exec(t, "CREATE PROCEDURE s.bar() LANGUAGE SQL AS 'SELECT count(*) FROM abc, s.a';")
+		rows := r.QueryStr(t, "EXPLAIN ANALYZE (DEBUG) CALL s.bar();")
+		checkBundle(
+			t, fmt.Sprint(rows), "s.bar", func(name, contents string) error {
+				if name == "schema.sql" {
+					reg := regexp.MustCompile(`s\.bar`)
+					if reg.FindString(contents) == "" {
+						return errors.Errorf("could not find definition for 's.bar' procedure in schema.sql")
+					}
+					reg = regexp.MustCompile(`^CREATE PROCEDURE public\.bar`)
+					if reg.FindString(contents) != "" {
+						return errors.Errorf("Found irrelevant procedure 'bar' in schema.sql")
+					}
+					reg = regexp.MustCompile(`s\.a`)
+					if reg.FindString(contents) == "" {
+						return errors.Errorf("could not find definition for relation 's.a' in schema.sql")
+					}
+					reg = regexp.MustCompile("abc")
+					if reg.FindString(contents) == "" {
+						return errors.Errorf("could not find definition for relation 'abc' in schema.sql")
+					}
+				}
+				return nil
+			},
+			false /* expectErrors */, base, plans,
+			"stats-defaultdb.public.abc.sql stats-defaultdb.s.a.sql distsql.html vec-v.txt vec.txt",
+		)
 	})
 
 	t.Run("permission error", func(t *testing.T) {
@@ -481,12 +568,67 @@ CREATE TABLE users(id UUID DEFAULT gen_random_uuid() PRIMARY KEY, promo_id INT R
 		r.Exec(t, "CREATE TABLE db2.s2.t2 (pk INT PRIMARY KEY);")
 		rows := r.QueryStr(t, "EXPLAIN ANALYZE (DEBUG) SELECT * FROM db1.t1, db2.s2.t2;")
 		checkBundle(
-			t, fmt.Sprint(rows), "db1.public.t1", nil, false, /* expectErrors */
+			t, fmt.Sprint(rows), "public.t1", nil, false, /* expectErrors */
 			base, plans, "distsql.html vec.txt vec-v.txt stats-db1.public.t1.sql stats-db2.s2.t2.sql",
 		)
 		checkBundle(
-			t, fmt.Sprint(rows), "db2.s2.t2", nil, false, /* expectErrors */
+			t, fmt.Sprint(rows), "s2.t2", nil, false, /* expectErrors */
 			base, plans, "distsql.html vec.txt vec-v.txt stats-db1.public.t1.sql stats-db2.s2.t2.sql",
+		)
+	})
+
+	t.Run("multiple databases and special characters", func(t *testing.T) {
+		r.Exec(t, `CREATE DATABASE "db.name";`)
+		r.Exec(t, `CREATE DATABASE "db'name";`)
+		r.Exec(t, `CREATE SCHEMA "db.name"."sc.name"`)
+		r.Exec(t, `CREATE SCHEMA "db'name"."sc'name"`)
+		r.Exec(t, `CREATE TABLE "db.name"."sc.name".t (pk INT PRIMARY KEY);`)
+		r.Exec(t, `CREATE TABLE "db'name"."sc'name".t (pk INT PRIMARY KEY);`)
+		rows := r.QueryStr(t, `EXPLAIN ANALYZE (DEBUG) SELECT * FROM "db.name"."sc.name".t, "db'name"."sc'name".t;`)
+		checkBundle(
+			t, fmt.Sprint(rows), `"sc.name".t`, nil, false, /* expectErrors */
+			base, plans, `distsql.html vec.txt vec-v.txt stats-"db.name"."sc.name".t.sql stats-"db'name"."sc'name".t.sql`,
+		)
+		checkBundle(
+			t, fmt.Sprint(rows), `"sc'name".t`, nil, false, /* expectErrors */
+			base, plans, `distsql.html vec.txt vec-v.txt stats-"db.name"."sc.name".t.sql stats-"db'name"."sc'name".t.sql`,
+		)
+	})
+
+	t.Run("plan-gist matching", func(t *testing.T) {
+		r.Exec(t, "CREATE TABLE gist (k INT PRIMARY KEY);")
+		r.Exec(t, "INSERT INTO gist SELECT generate_series(1, 10)")
+		const fprint = `SELECT * FROM gist`
+
+		// Come up with a target gist.
+		row := r.QueryRow(t, "EXPLAIN (GIST) "+fprint)
+		var gist string
+		row.Scan(&gist)
+
+		url := getBundleThroughBuiltin(fprint, fprint, gist, false /* redacted */)
+		checkBundleContents(
+			t, url, "gist", func(name, contents string) error {
+				if name != "plan.txt" {
+					return nil
+				}
+				// We don't hard-code the full expected output here so that it
+				// doesn't need an update every time we change EXPLAIN ANALYZE
+				// output format. Instead, we only assert that a few lines are
+				// present in the output.
+				for _, expectedLine := range []string{
+					"• scan",
+					"  sql nodes: n1",
+					"  actual row count: 10",
+					"  table: gist@gist_pkey",
+					"  spans: FULL SCAN",
+				} {
+					if !strings.Contains(contents, expectedLine) {
+						return errors.Newf("didn't find %q in the output: %v", expectedLine, contents)
+					}
+				}
+				return nil
+			}, false, /* expectErrors */
+			base, plans, "distsql.html vec.txt vec-v.txt stats-defaultdb.public.gist.sql",
 		)
 	})
 }
@@ -555,8 +697,8 @@ func readUnzippedFile(t *testing.T, f *zip.File) string {
 // arbitrary number of strings; each string contains one or more filenames
 // separated by a space.
 // - tableName: if non-empty, checkBundle asserts that the substring equal to
-// tableName is present in schema.sql. It doesn't have to be a fully qualified
-// name, but that is encouraged.
+// tableName is present in schema.sql. It is expected to be either
+// schema-qualified or just the table name.
 // - expectErrors: if set, indicates that non-critical errors might have
 // occurred during the bundle collection and shouldn't fail the test.
 func checkBundle(
@@ -811,7 +953,7 @@ func TestExplainBundleEnv(t *testing.T) {
 		_, err := sqlDB.ExecContext(ctx, line)
 		if err != nil {
 			words := strings.Split(line, " ")
-			t.Fatalf("%v: probably need to add %q into 'sessionVarNeedsQuotes' map", err, words[1])
+			t.Fatalf("%s\n%v: probably need to add %q into 'sessionVarNeedsEscaping' map", line, err, words[1])
 		}
 	}
 

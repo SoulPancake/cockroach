@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord
 
@@ -15,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"slices"
-	"sync"
 	"time"
 	"unsafe"
 
@@ -32,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/limit"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
-	"github.com/cockroachdb/cockroach/pkg/util/span"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
@@ -63,13 +56,18 @@ var catchupStartupRate = settings.RegisterIntSetting(
 // ForEachRangeFn is used to execute `fn` over each range in a rangefeed.
 type ForEachRangeFn func(fn ActiveRangeFeedIterFn) error
 
+// A RangeObserver is a function that observes the ranges in a rangefeed
+// by polling fn.
+type RangeObserver func(fn ForEachRangeFn)
+
 type rangeFeedConfig struct {
 	overSystemTable       bool
 	withDiff              bool
 	withFiltering         bool
 	withMetadata          bool
 	withMatchingOriginIDs []uint32
-	rangeObserver         func(ForEachRangeFn)
+	rangeObserver         RangeObserver
+	consumerID            int64
 
 	knobs struct {
 		// onRangefeedEvent invoked on each rangefeed event.
@@ -129,7 +127,7 @@ func WithMatchingOriginIDs(originIDs ...uint32) RangeFeedOption {
 
 // WithRangeObserver is called when the rangefeed starts with a function that
 // can be used to iterate over all the ranges.
-func WithRangeObserver(observer func(ForEachRangeFn)) RangeFeedOption {
+func WithRangeObserver(observer RangeObserver) RangeFeedOption {
 	return optionFunc(func(c *rangeFeedConfig) {
 		c.rangeObserver = observer
 	})
@@ -139,6 +137,24 @@ func WithMetadata() RangeFeedOption {
 	return optionFunc(func(c *rangeFeedConfig) {
 		c.withMetadata = true
 	})
+}
+
+func WithConsumerID(cid int64) RangeFeedOption {
+	return optionFunc(func(c *rangeFeedConfig) {
+		c.consumerID = cid
+	})
+}
+
+// SpanTimePair is a pair of span along with its starting time. The starting
+// time is exclusive, i.e. the first possible emitted event (including catchup
+// scans) will be at startAfter.Next().
+type SpanTimePair struct {
+	Span       roachpb.Span
+	StartAfter hlc.Timestamp // exclusive
+}
+
+func (p SpanTimePair) String() string {
+	return fmt.Sprintf("%s@%s", p.Span, p.StartAfter)
 }
 
 // RangeFeed divides a RangeFeed request on range boundaries and establishes a
@@ -155,59 +171,6 @@ func WithMetadata() RangeFeedOption {
 // NB: the given startAfter timestamp is exclusive, i.e. the first possible
 // emitted event (including catchup scans) will be at startAfter.Next().
 func (ds *DistSender) RangeFeed(
-	ctx context.Context,
-	spans []roachpb.Span,
-	startAfter hlc.Timestamp, // exclusive
-	eventCh chan<- RangeFeedMessage,
-	opts ...RangeFeedOption,
-) error {
-	timedSpans := make([]SpanTimePair, 0, len(spans))
-	for _, sp := range spans {
-		timedSpans = append(timedSpans, SpanTimePair{
-			Span:       sp,
-			StartAfter: startAfter,
-		})
-	}
-	return ds.RangeFeedSpans(ctx, timedSpans, eventCh, opts...)
-}
-
-// RangeFeedFromFrontier is similar to RangeFeed but can initialize each
-// rangefeed at the timestamp passed by the span frontier.
-func (ds *DistSender) RangeFeedFromFrontier(
-	ctx context.Context,
-	frontier span.Frontier,
-	eventCh chan<- RangeFeedMessage,
-	opts ...RangeFeedOption,
-) error {
-	timedSpans := make([]SpanTimePair, 0, frontier.Len())
-	frontier.Entries(
-		func(sp roachpb.Span, ts hlc.Timestamp) (done span.OpResult) {
-			timedSpans = append(timedSpans, SpanTimePair{
-				// Clone the span as the rangefeed progress tracker will manipulate the
-				// original frontier.
-				Span:       sp.Clone(),
-				StartAfter: ts,
-			})
-			return false
-		})
-	return ds.RangeFeedSpans(ctx, timedSpans, eventCh, opts...)
-}
-
-// SpanTimePair is a pair of span along with its starting time. The starting
-// time is exclusive, i.e. the first possible emitted event (including catchup
-// scans) will be at startAfter.Next().
-type SpanTimePair struct {
-	Span       roachpb.Span
-	StartAfter hlc.Timestamp // exclusive
-}
-
-func (p SpanTimePair) String() string {
-	return fmt.Sprintf("%s@%s", p.Span, p.StartAfter)
-}
-
-// RangeFeedSpans is similar to RangeFeed but allows specification of different
-// starting time for each span.
-func (ds *DistSender) RangeFeedSpans(
 	ctx context.Context,
 	spans []SpanTimePair,
 	eventCh chan<- RangeFeedMessage,
@@ -226,8 +189,8 @@ func (ds *DistSender) RangeFeedSpans(
 	defer sp.Finish()
 
 	rr := newRangeFeedRegistry(ctx, cfg.withDiff)
-	ds.activeRangeFeeds.Store(rr, nil)
-	defer ds.activeRangeFeeds.Delete(rr)
+	ds.activeRangeFeeds.Add(rr)
+	defer ds.activeRangeFeeds.Remove(rr)
 	if cfg.rangeObserver != nil {
 		cfg.rangeObserver(rr.ForEachPartialRangefeed)
 	}
@@ -308,8 +271,7 @@ const stopIter = false
 // iterutil.StopIteration can be returned by `fn` to stop iteration, and doing
 // so will not return this error.
 func (ds *DistSender) ForEachActiveRangeFeed(fn ActiveRangeFeedIterFn) (iterErr error) {
-	ds.activeRangeFeeds.Range(func(k, v interface{}) bool {
-		r := k.(*rangeFeedRegistry)
+	ds.activeRangeFeeds.Range(func(r *rangeFeedRegistry) bool {
 		iterErr = r.ForEachPartialRangefeed(fn)
 		return iterErr == nil
 	})
@@ -325,8 +287,7 @@ func (r *rangeFeedRegistry) ForEachPartialRangefeed(fn ActiveRangeFeedIterFn) (i
 		defer active.Unlock()
 		return active.PartialRangeFeed
 	}
-	r.ranges.Range(func(k, v interface{}) bool {
-		active := k.(*activeRangeFeed)
+	r.ranges.Range(func(active *activeRangeFeed) bool {
 		if err := fn(r.RangeFeedContext, partialRangeFeed(active)); err != nil {
 			iterErr = err
 			return stopIter
@@ -408,7 +369,7 @@ func (a *activeRangeFeed) setLastError(err error) {
 // range feeds.
 type rangeFeedRegistry struct {
 	RangeFeedContext
-	ranges sync.Map // map[*activeRangeFeed]nil
+	ranges syncutil.Set[*activeRangeFeed]
 }
 
 func newRangeFeedRegistry(ctx context.Context, withDiff bool) *rangeFeedRegistry {
@@ -500,6 +461,7 @@ func newActiveRangeFeed(
 	rr *rangeFeedRegistry,
 	metrics *DistSenderRangeFeedMetrics,
 	parentMetadata parentRangeFeedMetadata,
+	initialRangeID roachpb.RangeID,
 ) *activeRangeFeed {
 	// Register partial range feed with registry.
 	active := &activeRangeFeed{
@@ -508,19 +470,20 @@ func newActiveRangeFeed(
 			StartAfter:              startAfter,
 			ParentRangefeedMetadata: parentMetadata,
 			CreatedTime:             timeutil.Now(),
+			RangeID:                 initialRangeID,
 		},
 	}
 
 	active.release = func() {
 		active.releaseCatchupScan()
-		rr.ranges.Delete(active)
+		rr.ranges.Remove(active)
 		metrics.RangefeedRanges.Dec(1)
 		if active.localConnection {
 			metrics.RangefeedLocalRanges.Dec(1)
 		}
 	}
 
-	rr.ranges.Store(active, nil)
+	rr.ranges.Add(active)
 	metrics.RangefeedRanges.Inc(1)
 
 	return active
@@ -550,8 +513,6 @@ type rangefeedErrorInfo struct {
 func handleRangefeedError(
 	ctx context.Context, metrics *DistSenderRangeFeedMetrics, err error, spawnedFromManualSplit bool,
 ) (rangefeedErrorInfo, error) {
-	metrics.Errors.RangefeedRestartRanges.Inc(1)
-
 	if err == nil {
 		return rangefeedErrorInfo{}, nil
 	}
@@ -596,8 +557,9 @@ func handleRangefeedError(
 			kvpb.RangeFeedRetryError_REASON_LOGICAL_OPS_MISSING,
 			kvpb.RangeFeedRetryError_REASON_SLOW_CONSUMER,
 			kvpb.RangeFeedRetryError_REASON_RANGEFEED_CLOSED:
-			// Try again with same descriptor. These are transient
-			// errors that should not show up again.
+			// Try again with same descriptor. These are transient errors that should
+			// not show up again, or should be retried on another replica which will
+			// likely not have the same issue.
 			return rangefeedErrorInfo{}, nil
 		case kvpb.RangeFeedRetryError_REASON_RANGE_SPLIT,
 			kvpb.RangeFeedRetryError_REASON_RANGE_MERGED,
@@ -624,6 +586,9 @@ func (a catchupAlloc) Release() {
 func (a *activeRangeFeed) acquireCatchupScanQuota(
 	ctx context.Context, rl *catchupScanRateLimiter, metrics *DistSenderRangeFeedMetrics,
 ) error {
+	metrics.RangefeedCatchupRangesWaitingClientSide.Inc(1)
+	defer metrics.RangefeedCatchupRangesWaitingClientSide.Dec(1)
+
 	// Indicate catchup scan is starting.
 	alloc, err := rl.Pace(ctx)
 	if err != nil {
@@ -649,7 +614,7 @@ func newTransportForRange(
 	if err != nil {
 		return nil, err
 	}
-	replicas.OptimizeReplicaOrder(ds.st, ds.nodeIDGetter(), ds.healthFunc, ds.latencyFunc, ds.locality)
+	replicas.OptimizeReplicaOrder(ctx, ds.st, ds.nodeIDGetter(), ds.healthFunc, ds.latencyFunc, ds.locality)
 	opts := SendOptions{class: defRangefeedConnClass}
 	return ds.transportFactory(opts, replicas), nil
 }
@@ -666,6 +631,7 @@ func makeRangeFeedRequest(
 	withDiff bool,
 	withFiltering bool,
 	withMatchingOriginIDs []uint32,
+	consumerID int64,
 ) kvpb.RangeFeedRequest {
 	admissionPri := admissionpb.BulkNormalPri
 	if isSystemRange {
@@ -677,6 +643,7 @@ func makeRangeFeedRequest(
 			Timestamp: startAfter,
 			RangeID:   rangeID,
 		},
+		ConsumerID:            consumerID,
 		WithDiff:              withDiff,
 		WithFiltering:         withFiltering,
 		WithMatchingOriginIDs: withMatchingOriginIDs,

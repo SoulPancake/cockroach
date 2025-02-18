@@ -1,45 +1,38 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import { connect } from "react-redux";
 import { RouteComponentProps, withRouter } from "react-router-dom";
 import { Dispatch } from "redux";
-import { connect } from "react-redux";
-import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 
 import { actions as indexStatsActions } from "src/store/indexStats/indexStats.reducer";
 
 import { AppState, uiConfigActions } from "../store";
+import { actions as analyticsActions } from "../store/analytics";
 import {
   actions as nodesActions,
   nodeRegionsByIDSelector,
 } from "../store/nodes";
-import { TimeScale } from "../timeScaleDropdown";
 import { actions as sqlStatsActions } from "../store/sqlStats";
-import { actions as analyticsActions } from "../store/analytics";
-import {
-  databaseNameAttr,
-  generateTableID,
-  getMatchParamByName,
-  indexNameAttr,
-  longToInt,
-  schemaNameAttr,
-  tableNameAttr,
-  TimestampToMoment,
-} from "../util";
-import { BreadcrumbItem } from "../breadcrumbs";
 import {
   selectHasAdminRole,
   selectHasViewActivityRedactedRole,
   selectIsTenant,
 } from "../store/uiConfig";
 import { selectTimeScale } from "../store/utils/selectors";
+import { TimeScale } from "../timeScaleDropdown";
+import {
+  databaseNameAttr,
+  generateTableID,
+  getMatchParamByName,
+  indexNameAttr,
+  longToInt,
+  tableNameAttr,
+  TimestampToMoment,
+} from "../util";
 
 import {
   IndexDetailPageActions,
@@ -50,38 +43,11 @@ import {
 
 import RecommendationType = cockroach.sql.IndexRecommendation.RecommendationType;
 
-// Note: if the managed-service routes to the index detail or the previous
-// database pages change, the breadcrumbs displayed here need to be updated.
-// TODO(thomas): ensure callers are splitting schema/table name correctly
-function createManagedServiceBreadcrumbs(
-  database: string,
-  schema: string,
-  table: string,
-  index: string,
-): BreadcrumbItem[] {
-  return [
-    { link: "/databases", name: "Databases" },
-    {
-      link: `/databases/${database}`,
-      name: "Tables",
-    },
-    {
-      link: `/databases/${database}/${schema}/${table}`,
-      name: `Table: ${table}`,
-    },
-    {
-      link: `/databases/${database}/${schema}/${table}/${index}`,
-      name: `Index: ${index}`,
-    },
-  ];
-}
-
 const mapStateToProps = (
   state: AppState,
   props: RouteComponentProps,
 ): IndexDetailsPageData => {
   const databaseName = getMatchParamByName(props.match, databaseNameAttr);
-  const schemaName = getMatchParamByName(props.match, schemaNameAttr);
   const tableName = getMatchParamByName(props.match, tableNameAttr);
   const indexName = getMatchParamByName(props.match, indexNameAttr);
 
@@ -99,14 +65,7 @@ const mapStateToProps = (
       "Unknown") as RecType,
     reason: indexRec.reason,
   }));
-
   return {
-    breadcrumbItems: createManagedServiceBreadcrumbs(
-      databaseName,
-      schemaName,
-      tableName,
-      indexName,
-    ),
     databaseName,
     hasAdminRole: selectHasAdminRole(state),
     hasViewActivityRedactedRole: selectHasViewActivityRedactedRole(state),
@@ -125,6 +84,7 @@ const mapStateToProps = (
       lastRead: TimestampToMoment(details?.statistics?.stats?.last_read),
       lastReset: TimestampToMoment(stats?.data?.last_reset),
       indexRecommendations,
+      databaseID: stats?.data?.database_id,
     },
   };
 };

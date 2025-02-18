@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package settings
 
@@ -176,4 +171,23 @@ type internalSetting interface {
 	// setting to newVal. It does not change the current value. Validation checks
 	// are not run against the decoded value.
 	decodeAndSetDefaultOverride(ctx context.Context, sv *Values, encoded string) error
+}
+
+// TestingIsReportable is used in testing for reportability.
+func TestingIsReportable(s Setting) bool {
+	if _, ok := s.(*MaskedSetting); ok {
+		return false
+	}
+	if e, ok := s.(internalSetting); ok {
+		return e.isReportable()
+	}
+	return true
+}
+
+// TestingIsSensitive is used in testing for sensitivity.
+func TestingIsSensitive(s Setting) bool {
+	if e, ok := s.(internalSetting); ok {
+		return e.isSensitive()
+	}
+	return false
 }

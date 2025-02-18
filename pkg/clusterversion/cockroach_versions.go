@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package clusterversion
 
@@ -181,92 +176,54 @@ const (
 
 	VBootstrapMax
 
-	// V23_1 is CockroachDB v23.1. It's used for all v23.1.x patch releases.
-	V23_1
-
-	// V23_2 is CockroachDB v23.2. It's used for all v23.2.x patch releases.
-	V23_2
-
-	// V24_1Start demarcates the start of cluster versions stepped through during
-	// the process of upgrading from 23.2 to 24.1.
-	V24_1Start
-
-	// V24_1_DropPayloadAndProgressFromSystemJobsTable drop the unused payload and
-	// progress columns from system.jobs table.
-	V24_1_DropPayloadAndProgressFromSystemJobsTable
-
-	// V24_1_MigrateOldStylePTSRecords  migrate old-style PTS records
-	// to the new style.
-	V24_1_MigrateOldStylePTSRecords
-
-	// V24_1_SessionBasedLeasingDualWrite both session based and expiry based leases
-	// are written to the system.lease table under different primary indexes.
-	V24_1_SessionBasedLeasingDualWrite
-
-	// V24_1_SessionBasedLeasingDrain all leases are forcefully renewed, so that
-	// a session based equivalent exists.
-	V24_1_SessionBasedLeasingDrain
-
-	// V24_1_SessionBasedLeasingOnly only session based leases are written to
-	// system.lease.
-	V24_1_SessionBasedLeasingOnly
-
-	// V24_1_SessionBasedLeasingUpgradeDescriptor upgrades the leasing descriptor
-	// to be only session based.
-	V24_1_SessionBasedLeasingUpgradeDescriptor
-
-	// V24_1_PebbleFormatSyntheticPrefixSuffix upgrades Pebble's format major version to
-	// FormatSyntheticPrefixSuffix, allowing use of virtual sstables in Pebble.
-	V24_1_PebbleFormatSyntheticPrefixSuffix
-
-	// V24_1_SystemDatabaseSurvivability sets the survival goal for the system
-	// database to be SURVIVE ZONE.
-	V24_1_SystemDatabaseSurvivability
-
-	// V24_1_GossipMaximumIOOverload is the version at which stores begin
-	// populating the store capacity field IOThresholdMax. The field shouldn't be
-	// used for allocator decisions before then.
-	V24_1_GossipMaximumIOOverload
-
-	// V24_1_EstimatedMVCCStatsInSplit introduces MVCC stats estimates during range
-	// splits.
-	V24_1_EstimatedMVCCStatsInSplit
-
-	// V24_1_ReplicatedLockPipelining allows exclusive and shared replicated locks
-	// to be pipelined.
-	V24_1_ReplicatedLockPipelining
-
-	// V24_1_AddSpanCounts is the migration that added the span_counts table to
-	// the system tenant to ensure it is a superset of secondary tenants.
-	V24_1_AddSpanCounts
-
 	// V24_1 is CockroachDB v24.1. It's used for all v24.1.x patch releases.
 	V24_1
 
-	// V24_2Start demarcates the start of cluster versions stepped through during
-	// the process of upgrading from 24.1 to 24.2.
-	V24_2Start
+	// V24_2 is CockroachDB v24.2. It's used for all v24.2.x patch releases.
+	V24_2
 
-	// V24_2_StmtDiagRedacted is the migration to add `redacted` column to the
-	// system.statement_diagnostics_requests table.
-	V24_2_StmtDiagRedacted
+	// V24_3 is CockroachDB v24.3. It's used for all v24.3.x patch releases.
+	V24_3
 
-	// V24_2_TenantSystemTables is the migration that creates the system tables
-	// in app tenants that were previously missing due to only being present in
-	// the system tenant.
-	V24_2_TenantSystemTables
+	V25_1_Start
 
-	// V24_2_TenantRates is the migration to add the `current_rates` and
-	// `next_rates` consumption rate columns to the system.tenant_usage table.
-	V24_2_TenantRates
+	// V25_1_AddJobsTables added new jobs tables.
+	V25_1_AddJobsTables
 
-	// V24_2_DeleteTenantSettingsVersion is the migration that deletes
-	// the `system.tenant_settings` row for the `version` setting.
-	V24_2_DeleteTenantSettingsVersion
+	// V25_1_MoveRaftTruncatedState moves the RaftTruncatedState in eval result
+	// from ReplicaState to its own field.
+	V25_1_MoveRaftTruncatedState
 
-	// V24_2_LeaseMinTimestamp is the earlier version which supports the lease
-	// minimum timestamp field.
-	V24_2_LeaseMinTimestamp
+	// V25_1_AddRangeForceFlushKey adds the RangeForceFlushKey, a replicated
+	// range-ID local key, which is written below raft.
+	V25_1_AddRangeForceFlushKey
+
+	// V25_1_BatchStreamRPC adds the BatchStream RPC, which allows for more
+	// efficient Batch unary RPCs.
+	V25_1_BatchStreamRPC
+
+	// V25_1_PreparedTransactionsTable adds the system.prepared_transactions
+	// table. The table is used to store information about prepared transaction
+	// that are part of the XA two-phase commit protocol.
+	V25_1_PreparedTransactionsTable
+
+	// V25_1_AddJobsColumns added new columns to system.jobs.
+	V25_1_AddJobsColumns
+
+	// V25_1_JobsWritesFence is an empty version that is used to add a "fence"
+	// between the column addition version and the backfill version. This allows
+	// the backfill version's upgrade step to make the assumption that all nodes
+	// will be writing to the new columns, since moving from fence to backfill can
+	// only start once no nodes are still on add-columnns.
+	V25_1_JobsWritesFence
+
+	// V25_1_JobsBackfill backfills the new jobs tables and columns.
+	V25_1_JobsBackfill
+
+	// V25_1 is CockroachDB v25.1. It's used for all v25.1.x patch releases.
+	V25_1
+
+	V25_2_Start
 
 	// *************************************************
 	// Step (1) Add new versions above this comment.
@@ -300,38 +257,26 @@ var versionTable = [numKeys]roachpb.Version{
 	VBootstrapTenant: {Major: 0, Minor: 0, Internal: 4},
 	VBootstrapMax:    {Major: 0, Minor: 0, Internal: 424242},
 
-	V23_1: {Major: 23, Minor: 1, Internal: 0},
-
-	V23_2: {Major: 23, Minor: 2, Internal: 0},
-
-	// v24.1 versions. Internal versions must be even.
-	V24_1Start: {Major: 23, Minor: 2, Internal: 2},
-
-	V24_1_DropPayloadAndProgressFromSystemJobsTable: {Major: 23, Minor: 2, Internal: 4},
-
-	V24_1_MigrateOldStylePTSRecords: {Major: 23, Minor: 2, Internal: 6},
-
-	V24_1_SessionBasedLeasingDualWrite:         {Major: 23, Minor: 2, Internal: 8},
-	V24_1_SessionBasedLeasingDrain:             {Major: 23, Minor: 2, Internal: 10},
-	V24_1_SessionBasedLeasingOnly:              {Major: 23, Minor: 2, Internal: 12},
-	V24_1_SessionBasedLeasingUpgradeDescriptor: {Major: 23, Minor: 2, Internal: 14},
-	V24_1_PebbleFormatSyntheticPrefixSuffix:    {Major: 23, Minor: 2, Internal: 16},
-	V24_1_SystemDatabaseSurvivability:          {Major: 23, Minor: 2, Internal: 18},
-	V24_1_GossipMaximumIOOverload:              {Major: 23, Minor: 2, Internal: 20},
-	V24_1_EstimatedMVCCStatsInSplit:            {Major: 23, Minor: 2, Internal: 22},
-	V24_1_ReplicatedLockPipelining:             {Major: 23, Minor: 2, Internal: 24},
-	V24_1_AddSpanCounts:                        {Major: 23, Minor: 2, Internal: 26},
-
 	V24_1: {Major: 24, Minor: 1, Internal: 0},
+	V24_2: {Major: 24, Minor: 2, Internal: 0},
+	V24_3: {Major: 24, Minor: 3, Internal: 0},
 
-	// v24.2 versions. Internal versions must be even.
-	V24_2Start: {Major: 24, Minor: 1, Internal: 2},
+	// v25.1 versions. Internal versions must be even.
+	V25_1_Start: {Major: 24, Minor: 3, Internal: 2},
 
-	V24_2_StmtDiagRedacted:            {Major: 24, Minor: 1, Internal: 4},
-	V24_2_TenantSystemTables:          {Major: 24, Minor: 1, Internal: 6},
-	V24_2_TenantRates:                 {Major: 24, Minor: 1, Internal: 8},
-	V24_2_DeleteTenantSettingsVersion: {Major: 24, Minor: 1, Internal: 10},
-	V24_2_LeaseMinTimestamp:           {Major: 24, Minor: 1, Internal: 12},
+	V25_1_AddJobsTables:             {Major: 24, Minor: 3, Internal: 4},
+	V25_1_MoveRaftTruncatedState:    {Major: 24, Minor: 3, Internal: 6},
+	V25_1_AddRangeForceFlushKey:     {Major: 24, Minor: 3, Internal: 8},
+	V25_1_BatchStreamRPC:            {Major: 24, Minor: 3, Internal: 10},
+	V25_1_PreparedTransactionsTable: {Major: 24, Minor: 3, Internal: 12},
+	V25_1_AddJobsColumns:            {Major: 24, Minor: 3, Internal: 14},
+	V25_1_JobsWritesFence:           {Major: 24, Minor: 3, Internal: 16},
+	V25_1_JobsBackfill:              {Major: 24, Minor: 3, Internal: 18},
+
+	V25_1: {Major: 25, Minor: 1, Internal: 0},
+
+	// v25.2 versions. Internal versions must be even.
+	V25_2_Start: {Major: 25, Minor: 1, Internal: 2},
 
 	// *************************************************
 	// Step (2): Add new versions above this comment.
@@ -344,21 +289,19 @@ var versionTable = [numKeys]roachpb.Version{
 const Latest Key = numKeys - 1
 
 // MinSupported is the minimum logical cluster version supported by this branch.
-const MinSupported Key = V23_2
+const MinSupported Key = V24_3
 
-// PreviousRelease is the logical cluster version of the previous release.
-//
-// Note: this is always the last element of SupportedPreviousReleases(); it is
-// also provided as a constant for convenience.
-const PreviousRelease Key = V24_1
+// PreviousRelease is the logical cluster version of the previous release (which must
+// have at least an RC build published).
+const PreviousRelease Key = V24_3
 
-// V24_2 is a placeholder that will eventually be replaced by the actual 24.2
+// V25_2 is a placeholder that will eventually be replaced by the actual 25.2
 // version Key, but in the meantime it points to the latest Key. The placeholder
 // is defined so that it can be referenced in code that simply wants to check if
-// a cluster is running 24.2 and has completed all associated migrations; most
+// a cluster is running 24.3 and has completed all associated migrations; most
 // version gates can use this instead of defining their own version key if they
-// only need to check that the cluster has upgraded to 24.2.
-const V24_2 = Latest
+// only need to check that the cluster has upgraded to 25.2.
+const V25_2 = Latest
 
 // DevelopmentBranch must be true on the main development branch but should be
 // set to false on a release branch once the set of versions becomes append-only
@@ -379,20 +322,23 @@ const DevelopmentBranch = true
 // TestFinalVersion).
 const finalVersion Key = -1
 
+// TestingExtraVersions may be set to true by packages of tests which will
+// intentionally use Keys greater than Latest, which otherwise would crash
+// and/or cause errors. This should only be done in packages of tests
+// specifically focused on upgrade infrastructure, as it may make mistaken use
+// of Keys greater than latest, which would likely cause odd behavior, harder to
+// notice and debug.
+var TestingExtraVersions = false
+
 // Version returns the roachpb.Version corresponding to a key.
 func (k Key) Version() roachpb.Version {
+	if TestingExtraVersions && k > Latest {
+		v := versionTable[Latest]
+		v.Internal += int32(k-Latest) * 2
+		return maybeApplyDevOffset(k, v)
+	}
 	version := versionTable[k]
 	return maybeApplyDevOffset(k, version)
-}
-
-// FenceVersion is the fence version -- the internal immediately prior -- for
-// the named version, if it is Internal.
-func (k Key) FenceVersion() roachpb.Version {
-	v := k.Version()
-	if v.Internal > 0 {
-		v.Internal -= 1
-	}
-	return v
 }
 
 // IsFinal returns true if the key corresponds to a final version (as opposed to
@@ -427,7 +373,7 @@ func (k Key) String() string {
 // cluster).
 func SupportedPreviousReleases() []Key {
 	res := make([]Key, 0, 2)
-	for k := MinSupported; k < Latest; k++ {
+	for k := MinSupported; k <= PreviousRelease; k++ {
 		if k.IsFinal() {
 			res = append(res, k)
 		}

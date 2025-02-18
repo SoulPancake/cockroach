@@ -1,15 +1,9 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 //go:build lint
-// +build lint
 
 package lint
 
@@ -43,32 +37,15 @@ import (
 
 // Various copyright file headers we lint on.
 var (
-	bslHeader = regexp.MustCompile(`// Copyright 20\d\d The Cockroach Authors.
+	cslHeader = regexp.MustCompile(`// Copyright 20\d\d The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 `)
-	cclHeader = regexp.MustCompile(`// Copyright 20\d\d The Cockroach Authors.
-//
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License \(the "License"\); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
-`)
-
-	apacheHeader = regexp.MustCompile(`// Copyright 20\d\d The Cockroach Authors.
-//
-// Licensed under the Apache License, Version 2.0 \(the "License"\);
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
+	cslHeaderHash = regexp.MustCompile(`# Copyright 20\d\d The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
 `)
 	// etcdApacheHeader is the header of pkg/raft at the time it was imported.
 	etcdApacheHeader = regexp.MustCompile(`// Copyright 20\d\d The etcd Authors
@@ -88,8 +65,8 @@ var (
 	// cockroachModifiedCopyright is a header that's required to be added any
 	// time a file with etcdApacheHeader is modified by authors from CRL.
 	cockroachModifiedCopyright = regexp.MustCompile(
-		`// This code has been modified from its original form by Cockroach Labs, Inc.
-// All modifications are Copyright 20\d\d Cockroach Labs, Inc.`)
+		`// This code has been modified from its original form by The Cockroach Authors.
+// All modifications are Copyright 20\d\d The Cockroach Authors.`)
 )
 
 const cockroachDB = "github.com/cockroachdb/cockroach"
@@ -220,6 +197,31 @@ func TestLint(t *testing.T) {
 		t.Error(err)
 	}
 
+	// Things that are package scoped are below here.
+	pkgScope := pkgVar
+	if !pkgSpecified {
+		pkgScope = "./pkg/..."
+	}
+
+	// Load packages for top-level forbidden import tests.
+	pkgPath := filepath.Join(cockroachDB, pkgScope)
+	pkgs, err := packages.Load(
+		&packages.Config{
+			Mode: packages.NeedImports | packages.NeedName,
+			Dir:  crdbDir,
+		},
+		pkgPath,
+	)
+	if err != nil {
+		t.Fatal(errors.Wrapf(err, "error loading package %s", pkgPath))
+	}
+	// NB: if no packages were found, this API confusingly
+	// returns no error, so we need to explicitly check that
+	// something was returned.
+	if len(pkgs) == 0 {
+		t.Fatalf("could not list packages under %s", pkgPath)
+	}
+
 	t.Run("TestLowercaseFunctionNames", func(t *testing.T) {
 		skip.UnderShort(t)
 		t.Parallel()
@@ -280,15 +282,20 @@ func TestLint(t *testing.T) {
 		}
 	})
 
-	t.Run("TestCopyrightHeaders", func(t *testing.T) {
+	t.Run("TestCopyrightHeadersWithSlash", func(t *testing.T) {
 		t.Parallel()
 
 		// These extensions identify source files that should have copyright headers.
 		extensions := []string{
-			"*.go", "*.cc", "*.h", "*.js", "*.ts", "*.tsx", "*.s", "*.S", "*.styl", "*.proto", "*.rl",
+			"*.go", "*.cc", "*.h", "*.js", "*.ts", "*.tsx", "*.s", "*.S", "*.scss", "*.styl", "*.proto", "*.rl",
+		}
+		fullExtensions := make([]string, len(extensions)*2)
+		for i, extension := range extensions {
+			fullExtensions[i*2] = "build/**/" + extension
+			fullExtensions[i*2+1] = "pkg/**/" + extension
 		}
 
-		cmd, stderr, filter, err := dirCmd(pkgDir, "git", append([]string{"ls-files"}, extensions...)...)
+		cmd, stderr, filter, err := dirCmd(crdbDir, "git", append([]string{"ls-files"}, fullExtensions...)...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -307,17 +314,14 @@ func TestLint(t *testing.T) {
 			stream.GrepNot(`/embedded.go`),
 			stream.GrepNot(`geo/geographiclib/geodesic\.c$`),
 			stream.GrepNot(`geo/geographiclib/geodesic\.h$`),
-			// The opentelemetry-proto files are copied from otel with their own
-			// license.
-			stream.GrepNot(`opentelemetry-proto/.*.proto$`),
 			// These files are copied from bazel upstream with its own license.
 			stream.GrepNot(`build/bazel/bes/.*.proto$`),
 			// These files are copied from raft upstream with its own license.
-			stream.GrepNot(`^raft/.*`),
+			stream.GrepNot(`^pkg/raft/.*`),
 			// Generated files for plpgsql.
 			stream.GrepNot(`sql/plpgsql/parser/plpgsqllexbase/.*.go`),
 		), func(filename string) {
-			file, err := os.Open(filepath.Join(pkgDir, filename))
+			file, err := os.Open(filepath.Join(crdbDir, filename))
 			if err != nil {
 				t.Error(err)
 				return
@@ -330,21 +334,55 @@ func TestLint(t *testing.T) {
 			}
 			data = data[0:n]
 
-			isCCL := strings.Contains(filename, "ccl/")
-			isApache := strings.HasPrefix(filename, "obsservice")
-			switch {
-			case isCCL:
-				if cclHeader.Find(data) == nil {
-					t.Errorf("did not find expected CCL license header in %s", filename)
-				}
-			case isApache:
-				if apacheHeader.Find(data) == nil {
-					t.Errorf("did not find expected Apache license header in %s", filename)
-				}
-			default:
-				if bslHeader.Find(data) == nil {
-					t.Errorf("did not find expected BSL license header in %s", filename)
-				}
+			if cslHeader.Find(data) == nil {
+				t.Errorf("did not find expected CSL license header in %s", filename)
+			}
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := cmd.Wait(); err != nil {
+			if out := stderr.String(); len(out) > 0 {
+				t.Fatalf("err=%s, stderr=%s", err, out)
+			}
+		}
+	})
+
+	t.Run("TestCopyrightHeadersWithHash", func(t *testing.T) {
+		t.Parallel()
+
+		// These extensions identify source files that should have copyright headers.
+		extensions := []string{"GNUmakefile", "Makefile", "*.py", "*.sh"}
+
+		cmd, stderr, filter, err := dirCmd(crdbDir, "git", append([]string{"ls-files"}, extensions...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := stream.ForEach(stream.Sequence(filter,
+			stream.GrepNot(`^c-deps/.*`),
+			// These files are copied from raft upstream with its own license.
+			stream.GrepNot(`^raft/.*`),
+		), func(filename string) {
+			file, err := os.Open(filepath.Join(crdbDir, filename))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer file.Close()
+			data := make([]byte, 1024)
+			n, err := file.Read(data)
+			if err != nil {
+				t.Errorf("reading start of %s: %s", filename, err)
+			}
+			data = data[0:n]
+
+			if cslHeaderHash.Find(data) == nil {
+				t.Errorf("did not find expected CSL license header in %s", filename)
 			}
 		}); err != nil {
 			t.Fatal(err)
@@ -418,14 +456,15 @@ func TestLint(t *testing.T) {
 			data = data[0:n]
 			if _, ok := added[filename]; ok {
 				// Typically, any new file that is added will include a
-				// Cockroach BSL header. However, if most of it isn't new code,
-				// and is moved from an existing etcd forked file, the author
-				// may consider it as modified; the linter is liberal enough to
-				// allow either of these.
-				assert.True(t, (bslHeader.Find(data) != nil) ||
+				// CockroachDB Software Licens header. However, if most of it isn't
+				// new code, and is moved from an existing etcd forked file, the
+				// author may consider it as modified; the linter is liberal enough
+				// to allow either of these.
+				assert.True(t, (cslHeader.Find(data) != nil) ||
 					(etcdApacheHeader.Find(data) != nil && cockroachModifiedCopyright.Find(data) != nil),
-					"did not find expected either Cockroach BSL license header or Apache "+
-						"license header and Cockroach copyright header in %s", filename)
+					"did not find expected a) CockroachDB Software License header or b) "+
+						"Apache license header and Cockroach copyright header in %s",
+					filename)
 			} else {
 				assert.NotNilf(t, etcdApacheHeader.Find(data),
 					"did not find expected Apache license header in %s", filename)
@@ -632,9 +671,9 @@ func TestLint(t *testing.T) {
 					":!acceptance",
 					":!build/bazel",
 					":!ccl/acceptanceccl/backup_test.go",
-					":!ccl/backupccl/backup_cloud_test.go",
+					":!backup/backup_cloud_test.go",
 					// KMS requires AWS credentials from environment variables.
-					":!ccl/backupccl/backup_test.go",
+					":!backup/backup_test.go",
 					":!ccl/changefeedccl/helpers_test.go",
 					":!ccl/cloudccl",
 					":!cloud",
@@ -664,6 +703,7 @@ func TestLint(t *testing.T) {
 					":!acceptance/test_acceptance.go",           // For COCKROACH_RUN_ACCEPTANCE
 					":!compose/compare/compare/compare_test.go", // For COCKROACH_RUN_COMPOSE_COMPARE
 					":!compose/compose_test.go",                 // For COCKROACH_RUN_COMPOSE
+					":!testutils/sideeye/sideeye.go",            // For SIDE_EYE_API_TOKEN
 				},
 			},
 		} {
@@ -707,16 +747,19 @@ func TestLint(t *testing.T) {
 			"git",
 			"grep",
 			"-nE",
-			`\bsync\.(RW)?Mutex`,
+			`\bsync\.((RW)?Mutex|Map)`,
 			"--",
 			"*.go",
 			":!*/doc.go",
 			":!raft/*.go",
 			":!util/syncutil/mutex_sync.go",
 			":!util/syncutil/mutex_sync_race.go",
+			":!testutils/lint/lint_test.go",
 			":!testutils/lint/passes/deferunlockcheck/testdata/src/github.com/cockroachdb/cockroach/pkg/util/syncutil/mutex_sync.go",
 			// Exception needed for goroutineStalledStates.
 			":!kv/kvserver/concurrency/concurrency_manager_test.go",
+			// See comment in inMemoryLock class.
+			":!sql/vecindex/vecstore/in_memory_lock.go",
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -727,7 +770,18 @@ func TestLint(t *testing.T) {
 		}
 
 		if err := stream.ForEach(filter, func(s string) {
-			t.Errorf("\n%s <- forbidden; use 'syncutil.{,RW}Mutex' instead", s)
+			var fix string
+			switch {
+			case strings.Contains(s, "sync.Mutex"):
+				fix = "syncutil.Mutex"
+			case strings.Contains(s, "sync.RWMutex"):
+				fix = "syncutil.RWMutex"
+			case strings.Contains(s, "sync.Map"):
+				fix = "syncutil.Map"
+			default:
+				t.Fatalf("unexpected sync reference: %s", s)
+			}
+			t.Errorf("\n%s <- forbidden; use '%s' instead", s, fix)
 		}); err != nil {
 			t.Error(err)
 		}
@@ -1195,8 +1249,6 @@ func TestLint(t *testing.T) {
 			":!ccl/sqlproxyccl/tenantdirsvr/test_directory_svr.go",
 			":!ccl/sqlproxyccl/tenantdirsvr/test_simple_directory_svr.go",
 			":!ccl/sqlproxyccl/tenantdirsvr/test_static_directory_svr.go",
-			":!obsservice/cmd/obsservice/main.go",
-			":!obsservice/obslib/ingest/ingest_test.go",
 			":!cmd/bazci/*.go",
 		)
 		if err != nil {
@@ -1433,9 +1485,11 @@ func TestLint(t *testing.T) {
 			":!util/protoutil/marshaler.go",
 			":!util/encoding/encoding.go",
 			":!util/hlc/timestamp.go",
+			":!kv/kvserver/raftlog/encoding.go",
 			":!rpc/codec.go",
 			":!rpc/codec_test.go",
 			":!storage/mvcc_value.go",
+			":!roachpb/data.go",
 			":!sql/types/types_jsonpb.go",
 		)
 		if err != nil {
@@ -1449,6 +1503,7 @@ func TestLint(t *testing.T) {
 		if err := stream.ForEach(stream.Sequence(
 			filter,
 			stream.GrepNot(`(json|jsonpb|yaml|xml|protoutil|toml|Codec|ewkb|wkb|wkt|asn1)\.Unmarshal\(`),
+			stream.GrepNot(`nolint:protounmarshal`),
 		), func(s string) {
 			t.Errorf("\n%s <- forbidden; use 'protoutil.Unmarshal' instead", s)
 		}); err != nil {
@@ -1628,7 +1683,11 @@ func TestLint(t *testing.T) {
 
 	t.Run("TestImportNames", func(t *testing.T) {
 		t.Parallel()
-		cmd, stderr, filter, err := dirCmd(pkgDir, "git", "grep", "-nE", `^(import|\s+)(\w+ )?"database/sql"$`, "--", "*.go")
+		cmd, stderr, filter, err := dirCmd(
+			pkgDir, "git", "grep", "-nE",
+			`^(import|\s+)(\w+ )?"database/sql"$`, "--",
+			"*.go", ":!*_generated_test.go", ":!*_generated.go",
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1773,12 +1832,6 @@ func TestLint(t *testing.T) {
 		}
 	})
 
-	// Things that are packaged scoped are below here.
-	pkgScope := pkgVar
-	if !pkgSpecified {
-		pkgScope = "./pkg/..."
-	}
-
 	t.Run("TestForbiddenImports", func(t *testing.T) {
 		t.Parallel()
 
@@ -1819,16 +1872,6 @@ func TestLint(t *testing.T) {
 		grepBuf.WriteString(")$")
 
 		filter := stream.FilterFunc(func(arg stream.Arg) error {
-			pkgPath := filepath.Join(cockroachDB, pkgScope)
-			pkgs, err := packages.Load(
-				&packages.Config{
-					Mode: packages.NeedImports | packages.NeedName,
-				},
-				pkgPath,
-			)
-			if err != nil {
-				return errors.Wrapf(err, "error loading package %s", pkgPath)
-			}
 			for _, pkg := range pkgs {
 				for _, s := range pkg.Imports {
 					arg.Out <- pkg.PkgPath + ": " + s.PkgPath
@@ -1848,6 +1891,7 @@ func TestLint(t *testing.T) {
 			stream.GrepNot(`cockroach/pkg/util/sysutil: syscall$`),
 			stream.GrepNot(`cockroachdb/cockroach/pkg/build/bazel/util/tinystringer: errors$`),
 			stream.GrepNot(`cockroachdb/cockroach/pkg/build/engflow: github\.com/golang/protobuf/proto$`),
+			stream.GrepNot(`cockroachdb/cockroach/pkg/build/engflow: log$`),
 			stream.GrepNot(`cockroachdb/cockroach/pkg/util/grpcutil: github\.com/cockroachdb\/errors\/errbase$`),
 			stream.GrepNot(`cockroachdb/cockroach/pkg/util/future: github\.com/cockroachdb\/errors\/errbase$`),
 			stream.GrepNot(`cockroach/pkg/roachprod/install: syscall$`), // TODO: switch to sysutil
@@ -1861,6 +1905,10 @@ func TestLint(t *testing.T) {
 			stream.GrepNot(`cockroachdb/cockroach/pkg/kv/kvpb/gen: log$`),
 			stream.GrepNot(`cockroachdb/cockroach/pkg/util/log/gen: log$`),
 			stream.GrepNot(`cockroach/pkg/util/uuid: github\.com/satori/go\.uuid$`),
+			// See #132262.
+			stream.GrepNot(`github.com/cockroachdb/cockroach/pkg/raft/raftlogger: log$`),
+			stream.GrepNot(`github.com/cockroachdb/cockroach/pkg/raft/rafttest: log$`),
+			stream.GrepNot(`github.com/cockroachdb/cockroach/pkg/workload/debug: log$`),
 		), func(s string) {
 			pkgStr := strings.Split(s, ": ")
 			importingPkg, importedPkg := pkgStr[0], pkgStr[1]
@@ -2463,14 +2511,14 @@ func TestLint(t *testing.T) {
 			`base\.TODOTestTenantDisabled`,
 			"--",
 			"*",
-			":!ccl/backupccl/backup_test.go",
-			":!ccl/backupccl/backuprand/backup_rand_test.go",
-			":!ccl/backupccl/backuptestutils/testutils.go",
-			":!ccl/backupccl/create_scheduled_backup_test.go",
-			":!ccl/backupccl/datadriven_test.go",
-			":!ccl/backupccl/full_cluster_backup_restore_test.go",
-			":!ccl/backupccl/restore_old_versions_test.go",
-			":!ccl/backupccl/utils_test.go",
+			":!backup/backup_test.go",
+			":!backup/backuprand/backup_rand_test.go",
+			":!backup/backuptestutils/testutils.go",
+			":!backup/create_scheduled_backup_test.go",
+			":!backup/datadriven_test.go",
+			":!backup/full_cluster_backup_restore_test.go",
+			":!backup/restore_old_versions_test.go",
+			":!backup/utils_test.go",
 			":!ccl/changefeedccl/alter_changefeed_test.go",
 			":!ccl/changefeedccl/changefeed_test.go",
 			":!ccl/changefeedccl/helpers_test.go",
@@ -2489,13 +2537,13 @@ func TestLint(t *testing.T) {
 			":!ccl/partitionccl/partition_test.go",
 			":!ccl/partitionccl/zone_test.go",
 			":!ccl/serverccl/admin_test.go",
-			":!ccl/crosscluster/replicationtestutils/testutils.go",
-			":!ccl/crosscluster/streamclient/partitioned_stream_client_test.go",
-			":!ccl/crosscluster/physical/replication_random_client_test.go",
-			":!ccl/crosscluster/physical/stream_ingestion_job_test.go",
-			":!ccl/crosscluster/physical/stream_ingestion_processor_test.go",
-			":!ccl/crosscluster/producer/producer_job_test.go",
-			":!ccl/crosscluster/producer/replication_stream_test.go",
+			":!crosscluster/replicationtestutils/testutils.go",
+			":!crosscluster/streamclient/partitioned_stream_client_test.go",
+			":!crosscluster/physical/replication_random_client_test.go",
+			":!crosscluster/physical/stream_ingestion_job_test.go",
+			":!crosscluster/physical/stream_ingestion_processor_test.go",
+			":!crosscluster/producer/producer_job_test.go",
+			":!crosscluster/producer/replication_stream_test.go",
 			":!ccl/workloadccl/allccl/all_test.go",
 			":!cli/democluster/demo_cluster.go",
 			":!cli/democluster/demo_cluster_test.go",
@@ -2743,6 +2791,230 @@ func TestLint(t *testing.T) {
 				}
 			}); err != nil {
 			t.Error(err)
+		}
+
+		if err := cmd.Wait(); err != nil {
+			if out := stderr.String(); len(out) > 0 {
+				t.Fatalf("err=%s, stderr=%s", err, out)
+			}
+		}
+	})
+
+	t.Run("TestNoEnumeratingAllTables", func(t *testing.T) {
+		t.Parallel()
+		const (
+			// sysTableExample and virtTableExample are the names of a system and
+			// virtual tables respectively, that have been chosen to serve as
+			// indicators, if they are detected in a test, that that test may be
+			// enumerating *all* system or virtual tables which is generally
+			// undesirable outside of a few specific allow-listed cases. There is
+			// nothing special about these two tables other than that they are not
+			// directly referenced in tests other than those deliberately enumerating
+			// all tables, so they're well-suited for this purpose. We could add
+			// others here as well if needed, and add exemptions if one of these is
+			// intentionally used in a test.
+			sysTableExample  = "span_stats_buckets"
+			virtTableExample = "logical_replication_node_processors"
+		)
+		cmd, stderr, filter, err := dirCmd(
+			pkgDir,
+			"git",
+			"grep",
+			"-nE",
+			"-e", sysTableExample,
+			"-e", virtTableExample,
+			"--",
+			"**testdata**",
+			"**/*_test.go",
+			":!testutils/lint/lint_test.go",     // false-positive: the lint itself.
+			":!sql/tests/testdata/initial_keys", // exempt: deliberate test of bootstrap catalog
+			":!sql/catalog/systemschema_test/testdata/bootstrap*",  // exempt: deliberate test of bootstrap catalog.
+			":!sql/catalog/internal/catkv/testdata/",               // TODO(foundations): #137029.
+			":!cli/testdata/doctor/",                               // TODO(foundations): #137030.
+			":!cmd/roachtest/testdata/regression.diffs",            // TODO(queries): #137026.
+			":!cli/testdata/zip/file-filters/testzip_file_filters", // exempt: deliberate test to fetch all tables in debug zip.
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := stream.ForEach(filter, func(s string) {
+			t.Errorf("\n%s <- is this test enumerating all system or internal tables? see https://go.crdb.dev/p/overly-broad-test", s)
+		}); err != nil {
+			t.Error(err)
+		}
+
+		if err := cmd.Wait(); err != nil {
+			if out := stderr.String(); len(out) > 0 {
+				t.Fatalf("err=%s, stderr=%s", err, out)
+			}
+		}
+	})
+
+	// Test forbidden roachtest imports.
+	t.Run("TestRoachtestForbiddenImports", func(t *testing.T) {
+		t.Parallel()
+
+		roachprodLoggerPkg := "github.com/cockroachdb/cockroach/pkg/roachprod/logger"
+		roachtestTaskPkg := "github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/task"
+		// forbiddenImportPkg -> permittedReplacementPkg
+		forbiddenImports := map[string]string{
+			"github.com/cockroachdb/cockroach/pkg/util/log": roachprodLoggerPkg,
+			"log": roachprodLoggerPkg,
+			"github.com/cockroachdb/cockroach/pkg/util/ctxgroup": roachtestTaskPkg,
+			"golang.org/x/sync/errgroup":                         roachtestTaskPkg,
+		}
+
+		// grepBuf creates a grep string that matches any forbidden import pkgs.
+		var grepBuf bytes.Buffer
+		grepBuf.WriteByte('(')
+		for forbiddenPkg := range forbiddenImports {
+			grepBuf.WriteByte('|')
+			grepBuf.WriteString(regexp.QuoteMeta(forbiddenPkg))
+		}
+		grepBuf.WriteString(")$")
+
+		filter := stream.FilterFunc(func(arg stream.Arg) error {
+			for _, pkg := range pkgs {
+				for _, s := range pkg.Imports {
+					arg.Out <- pkg.PkgPath + ": " + s.PkgPath
+				}
+			}
+			return nil
+		})
+		numAnalyzed := 0
+		if err := stream.ForEach(stream.Sequence(
+			filter,
+			stream.Sort(),
+			stream.Uniq(),
+			stream.Grep(`cockroach/pkg/cmd/roachtest/(tests|operations): `),
+		), func(s string) {
+			pkgStr := strings.Split(s, ": ")
+			_, importedPkg := pkgStr[0], pkgStr[1]
+			numAnalyzed++
+
+			// Test that a disallowed package is not imported.
+			if replPkg, ok := forbiddenImports[importedPkg]; ok {
+				t.Errorf("\n%s <- please use %q instead of %q", s, replPkg, importedPkg)
+			}
+		}); err != nil {
+			t.Error(err)
+		}
+		if numAnalyzed == 0 {
+			t.Errorf("Empty input! Please check the linter.")
+		}
+	})
+
+	t.Run("TestRedactUnsafe", func(t *testing.T) {
+		t.Parallel()
+		cmd, stderr, filter, err := dirCmd(
+			pkgDir,
+			"git",
+			"grep",
+			"-nE",
+			`\redact\.Unsafe\(`,
+			"--",
+			"*.go",
+			":!util/encoding/encoding.go",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := stream.ForEach(filter, func(s string) {
+			t.Errorf("\n%s <- forbidden; use 'encoding.Unsafe()' instead", s)
+		}); err != nil {
+			t.Error(err)
+		}
+
+		if err := cmd.Wait(); err != nil {
+			if out := stderr.String(); len(out) > 0 {
+				t.Fatalf("err=%s, stderr=%s", err, out)
+			}
+		}
+	})
+
+	t.Run("TestDebugStack", func(t *testing.T) {
+		t.Parallel()
+
+		excludeFiles := []string{
+			":!util/debugutil/debugutil.go",
+			":!server/debug/goroutineui/dump_test.go",
+		}
+
+		cmd, stderr, filter, err := dirCmd(pkgDir, "git", append([]string{
+			"grep", "-nE", `debug\.Stack\(`, "--", "*.go",
+		}, excludeFiles...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := stream.ForEach(filter, func(s string) {
+			t.Errorf("\n%s <- forbidden; use 'debugutil.Stack()' instead", s)
+		}); err != nil {
+			t.Error(err)
+		}
+
+		if err := cmd.Wait(); err != nil {
+			if out := stderr.String(); len(out) > 0 {
+				t.Fatalf("err=%s, stderr=%s", err, out)
+			}
+		}
+	})
+
+	// This test verifies that all version-specific tests in pkg/upgrade/upgrades
+	// contain a clusterversion.SkipWhenMinSupportedVersionIsAtLeast() check. This
+	// check makes it easier to bump the minimum supported version (specifically
+	// it allows cleaning up the deprecated upgrades in a separate PR).
+	t.Run("TestUpgradesTestsCheckVersion", func(t *testing.T) {
+		t.Parallel()
+		cmd, stderr, filter, err := dirCmd(
+			pkgDir,
+			"git",
+			"grep",
+			"-oEh",
+			`^func Test[^(]*|clusterversion.SkipWhenMinSupportedVersionIsAtLeast`,
+			"--",
+			"upgrade/upgrades/v[0-9]*_test.go",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+
+		testExpectingSkip := ""
+		if err := stream.ForEach(filter, func(s string) {
+			if strings.HasPrefix(s, "func Test") {
+				if testExpectingSkip != "" {
+					t.Errorf("\n%s is missing a clusterversion.SkipWhenMinSupportedVersionIsAtLeast() check", testExpectingSkip)
+				}
+				testExpectingSkip = strings.TrimPrefix(s, "func ")
+			} else {
+				if !strings.Contains(s, "clusterversion.SkipWhenMinSupportedVersionIsAtLeast") {
+					panic("unexpected line: " + s)
+				}
+				testExpectingSkip = ""
+			}
+		}); err != nil {
+			t.Error(err)
+		}
+		if testExpectingSkip != "" {
+			t.Errorf("\n%s is missing a clusterversion.SkipWhenMinSupportedVersionIsAtLeast() check", testExpectingSkip)
 		}
 
 		if err := cmd.Wait(); err != nil {

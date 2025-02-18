@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tenantcostserver
 
@@ -108,20 +105,12 @@ type instanceState struct {
 type sysTableHelper struct {
 	ctx      context.Context
 	tenantID roachpb.TenantID
-
-	// ratesAvailable is true if the current_rates and next_rates columns have
-	// been added to the tenant_usage table by the migration.
-	// TODO(andyk): Remove this after 24.3.
-	ratesAvailable bool
 }
 
-func makeSysTableHelper(
-	ctx context.Context, tenantID roachpb.TenantID, ratesAvailable bool,
-) sysTableHelper {
+func makeSysTableHelper(ctx context.Context, tenantID roachpb.TenantID) sysTableHelper {
 	return sysTableHelper{
-		ctx:            ctx,
-		tenantID:       tenantID,
-		ratesAvailable: ratesAvailable,
+		ctx:      ctx,
+		tenantID: tenantID,
 	}
 }
 
@@ -151,12 +140,7 @@ func (h *sysTableHelper) readTenantAndInstanceState(
 
 	// Read the two rows for the per-tenant state (instance_id = 0) and the
 	// per-instance state.
-	// The rates columns are only available once migration is complete.
-	rateCols := "NULL, NULL"
-	if h.ratesAvailable {
-		rateCols = "current_rates, next_rates"
-	}
-	query := fmt.Sprintf(`SELECT
+	query := `SELECT
 		instance_id,               /* 0 */
 		next_instance_id,          /* 1 */
 		last_update,               /* 2 */
@@ -165,11 +149,12 @@ func (h *sysTableHelper) readTenantAndInstanceState(
 		ru_current,                /* 5 */
 		current_share_sum,         /* 6 */
 		total_consumption,         /* 7 */
-		%s,                        /* 8, 9 */
+		current_rates,             /* 8 */
+		next_rates,                /* 9 */
 		instance_lease,            /* 10 */
 		instance_seq               /* 11 */
 	 FROM system.tenant_usage
-	 WHERE tenant_id = $1 AND instance_id IN (0, $2)`, rateCols)
+	 WHERE tenant_id = $1 AND instance_id IN (0, $2)`
 
 	unmarshal := func(datum tree.Datum, pb protoutil.Message) error {
 		// Column can be null because of a tenant_usage table migration.
@@ -245,17 +230,7 @@ func (h *sysTableHelper) updateTenantAndInstanceState(
 		return err
 	}
 
-	// The rates columns are only available once migration is complete.
-	ratesCols := ""
-	ratesPlaceholders := ""
-	nullVals := ""
-	if h.ratesAvailable {
-		ratesCols = "current_rates, next_rates,"
-		ratesPlaceholders = "$9, $10,"
-		nullVals = "NULL, NULL,"
-	}
-
-	query := fmt.Sprintf(`UPSERT INTO system.tenant_usage(
+	query := `UPSERT INTO system.tenant_usage(
 		tenant_id,
 		instance_id,
 		next_instance_id,
@@ -265,12 +240,12 @@ func (h *sysTableHelper) updateTenantAndInstanceState(
 		ru_current,
 		current_share_sum,
 		total_consumption,
-		%s
+		current_rates,
+		next_rates,
 		instance_lease,
 		instance_seq,
 		instance_shares
-	) VALUES ($1, 0, $2, $3, $4, $5, $6, $7, $8, %s NULL, NULL, NULL)
-	`, ratesCols, ratesPlaceholders)
+	) VALUES ($1, 0, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, NULL, NULL)`
 
 	args := []interface{}{
 		h.tenantID.ToUint64(),                     // $1
@@ -287,9 +262,7 @@ func (h *sysTableHelper) updateTenantAndInstanceState(
 
 	if instance != nil {
 		// Insert an extra row for the instance.
-		query += fmt.Sprintf(
-			`, ($1, $11, $12, $13, NULL, NULL, NULL, NULL, NULL, %s $14, $15, 0.0)`,
-			nullVals)
+		query += `, ($1, $11, $12, $13, NULL, NULL, NULL, NULL, NULL, NULL, NULL, $14, $15, 0.0)`
 
 		args = append(args,
 			int64(instance.ID),           // $11
@@ -557,7 +530,7 @@ func (h *sysTableHelper) checkInvariants(txn isql.Txn) error {
 func InspectTenantMetadata(
 	ctx context.Context, txn isql.Txn, tenantID roachpb.TenantID, timeFormat string,
 ) (string, error) {
-	h := makeSysTableHelper(ctx, tenantID, true /* ratesAvailable */)
+	h := makeSysTableHelper(ctx, tenantID)
 	tenant, err := h.readTenantState(txn)
 	if err != nil {
 		return "", err

@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 // Routers are used by processors to direct outgoing rows to (potentially)
 // multiple streams; see docs/RFCS/distributed_sql.md
@@ -52,7 +47,7 @@ type router interface {
 func makeRouter(
 	spec *execinfrapb.OutputRouterSpec,
 	streams []execinfra.RowReceiver,
-	memoryMonitors, diskMonitors []*mon.BytesMonitor,
+	memoryMonitors, unlimitedMemMonitors, diskMonitors []*mon.BytesMonitor,
 ) (router, error) {
 	if len(streams) == 0 {
 		return nil, errors.Errorf("no streams in router")
@@ -65,7 +60,7 @@ func makeRouter(
 	}
 
 	var rb routerBase
-	rb.setupStreams(spec, streams, memoryMonitors, diskMonitors)
+	rb.setupStreams(spec, streams, memoryMonitors, unlimitedMemMonitors, diskMonitors)
 
 	switch spec.Type {
 	case execinfrapb.OutputRouterSpec_BY_HASH:
@@ -114,8 +109,9 @@ type routerOutput struct {
 
 	stats execinfrapb.ComponentStats
 
-	// memoryMonitor and diskMonitor are mu.rowContainer's monitors.
-	memoryMonitor, diskMonitor *mon.BytesMonitor
+	// memoryMonitor, unlimitedMemMonitor, and diskMonitor are mu.rowContainer's
+	// monitors.
+	memoryMonitor, unlimitedMemMonitor, diskMonitor *mon.BytesMonitor
 
 	rowAlloc            rowenc.EncDatumRowAlloc
 	rowBufToPushFrom    [routerRowBufSize]rowenc.EncDatumRow
@@ -249,7 +245,7 @@ func (rb *routerBase) aggStatus() execinfra.ConsumerStatus {
 func (rb *routerBase) setupStreams(
 	spec *execinfrapb.OutputRouterSpec,
 	streams []execinfra.RowReceiver,
-	memoryMonitors, diskMonitors []*mon.BytesMonitor,
+	memoryMonitors, unlimitedMemMonitors, diskMonitors []*mon.BytesMonitor,
 ) {
 	rb.numNonDrainingStreams = int32(len(streams))
 	n := len(streams)
@@ -269,6 +265,7 @@ func (rb *routerBase) setupStreams(
 		ro.mu.cond = sync.NewCond(&ro.mu.Mutex)
 		ro.mu.streamStatus = execinfra.NeedMoreRows
 		ro.memoryMonitor = memoryMonitors[i]
+		ro.unlimitedMemMonitor = unlimitedMemMonitors[i]
 		ro.diskMonitor = diskMonitors[i]
 	}
 }
@@ -298,6 +295,7 @@ func (rb *routerBase) init(
 			flowCtx.EvalCtx,
 			flowCtx.Cfg.TempStorage,
 			rb.outputs[i].memoryMonitor,
+			rb.outputs[i].unlimitedMemMonitor,
 			rb.outputs[i].diskMonitor,
 		)
 
@@ -380,7 +378,7 @@ func (rb *routerBase) Start(ctx context.Context, wg *sync.WaitGroup, _ context.C
 				// No rows or metadata buffered; see if the producer is done.
 				if ro.mu.producerDone {
 					if rb.statsCollectionEnabled {
-						ro.stats.Exec.MaxAllocatedMem.Set(uint64(ro.memoryMonitor.MaximumBytes()))
+						ro.stats.Exec.MaxAllocatedMem.Set(uint64(ro.memoryMonitor.MaximumBytes() + ro.unlimitedMemMonitor.MaximumBytes()))
 						ro.stats.Exec.MaxAllocatedDisk.Set(uint64(ro.diskMonitor.MaximumBytes()))
 						span.RecordStructured(&ro.stats)
 						if meta := execinfra.GetTraceDataAsMetadata(rb.flowCtx, span); meta != nil {

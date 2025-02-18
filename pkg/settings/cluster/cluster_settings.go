@@ -1,18 +1,12 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cluster
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
@@ -20,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
 )
 
@@ -37,8 +32,6 @@ type Settings struct {
 	// overwriting the default of a single setting.
 	Manual atomic.Value // bool
 
-	ExternalIODir string
-
 	// Tracks whether a CPU profile is going on and if so, which kind. See
 	// CPUProfileType().
 	// This is used so that we can enable "non-cheap" instrumentation only when it
@@ -53,7 +46,7 @@ type Settings struct {
 
 	// Cache can be used for arbitrary caching, e.g. to cache decoded
 	// enterprises licenses for utilccl.CheckEnterpriseEnabled().
-	Cache sync.Map
+	Cache syncutil.Map[any, any]
 
 	// OverridesInformer can be nil.
 	OverridesInformer OverridesInformer
@@ -179,9 +172,7 @@ func MakeTestingClusterSettingsWithVersions(
 // be used for settings objects that are passed as initial parameters for test
 // clusters; the given Settings object should not be in use by any server.
 func TestingCloneClusterSettings(st *Settings) *Settings {
-	result := &Settings{
-		ExternalIODir: st.ExternalIODir,
-	}
+	result := &Settings{}
 	result.Version = clusterversion.MakeVersionHandle(
 		&result.SV, st.Version.LatestVersion(), st.Version.MinSupportedVersion(),
 	)

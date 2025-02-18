@@ -1,24 +1,19 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import React from "react";
 import { Link } from "react-router-dom";
 
-import { tabAttr, viewAttr } from "src/util";
 import { commonStyles } from "src/common";
+import { tabAttr, viewAttr } from "src/util";
 
-import { EmptyTable, EmptyTableProps } from "../empty";
 import { Anchor } from "../anchor";
-import { transactionsTable } from "../util";
-import magnifyingGlassImg from "../assets/emptyState/magnifying-glass.svg";
 import emptyTableResultsImg from "../assets/emptyState/empty-table-results.svg";
+import magnifyingGlassImg from "../assets/emptyState/magnifying-glass.svg";
+import { EmptyTable, EmptyTableProps } from "../empty";
+import { transactionsTable } from "../util";
 
 import { TransactionViewType } from "./transactionsPageTypes";
 

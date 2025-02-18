@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -24,21 +19,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/DataDog/datadog-go/statsd"
+	"github.com/DataDog/datadog-api-client-go/v2/api/datadog"
+	"github.com/DataDog/datadog-api-client-go/v2/api/datadogV1"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestflags"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/operations"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/roachprod"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/cockroach/pkg/util/allstacks"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logconfig"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/version"
 	"github.com/cockroachdb/errors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
@@ -95,19 +88,49 @@ func runTests(register func(registry.Registry), filter *registry.TestFilter) err
 		}
 	}
 
+	specs, err := testsToRun(r, filter, roachtestflags.RunSkipped, roachtestflags.SelectProbability, true)
+	if err != nil {
+		return err
+	}
+
+	n := len(specs)
+	if n*roachtestflags.Count < parallelism {
+		// Don't spin up more workers than necessary. This has particular
+		// implications for the common case of running a single test once: if
+		// parallelism is set to 1, we'll use teeToStdout below to get logs to
+		// stdout/stderr.
+		parallelism = n * roachtestflags.Count
+	}
+
+	artifactsDir := roachtestflags.ArtifactsDir
+	literalArtifactsDir := roachtestflags.LiteralArtifactsDir
+	if literalArtifactsDir == "" {
+		literalArtifactsDir = artifactsDir
+	}
+	redirectLogger := redirectCRDBLogger(context.Background(), filepath.Join(artifactsDir, "roachtest.crdb.log"))
+	logger.InitCRDBLogConfig(redirectLogger)
+	runnerDir := filepath.Join(artifactsDir, runnerLogsDir)
+	runnerLogPath := filepath.Join(
+		runnerDir, fmt.Sprintf("test_runner-%d.log", timeutil.Now().Unix()))
+	l, tee := testRunnerLogger(context.Background(), parallelism, runnerLogPath)
+	roachprod.ClearClusterCache = roachtestflags.ClearClusterCache
+
 	if runtime.GOOS == "darwin" {
 		// This will suppress the annoying "Allow incoming network connections" popup from
 		// OSX when running a roachtest
 		bindTo = "localhost"
 	}
 
+	sideEyeToken := runner.maybeInitSideEyeClient(context.Background(), l)
+
 	opt := clustersOpt{
 		typ:         clusterType,
 		clusterName: roachtestflags.ClusterNames,
 		// Precedence for resolving the user: cli arg, env.ROACHPROD_USER, current user.
-		user:      getUser(roachtestflags.Username),
-		cpuQuota:  roachtestflags.CPUQuota,
-		clusterID: roachtestflags.ClusterID,
+		user:         getUser(roachtestflags.Username),
+		cpuQuota:     roachtestflags.CPUQuota,
+		clusterID:    roachtestflags.ClusterID,
+		sideEyeToken: sideEyeToken,
 	}
 	switch {
 	case roachtestflags.DebugAlways:
@@ -122,36 +145,10 @@ func runTests(register func(registry.Registry), filter *registry.TestFilter) err
 		return err
 	}
 
-	specs, err := testsToRun(r, filter, roachtestflags.RunSkipped, roachtestflags.SelectProbability, true)
-	if err != nil {
-		return err
-	}
-
-	n := len(specs)
-	if n*roachtestflags.Count < parallelism {
-		// Don't spin up more workers than necessary. This has particular
-		// implications for the common case of running a single test once: if
-		// parallelism is set to 1, we'll use teeToStdout below to get logs to
-		// stdout/stderr.
-		parallelism = n * roachtestflags.Count
-	}
 	if opt.debugMode == DebugKeepAlways && n > 1 {
 		return errors.Newf("--debug-always is only allowed when running a single test")
 	}
 
-	artifactsDir := roachtestflags.ArtifactsDir
-	literalArtifactsDir := roachtestflags.LiteralArtifactsDir
-	if literalArtifactsDir == "" {
-		literalArtifactsDir = artifactsDir
-	}
-
-	roachprod.ClearClusterCache = roachtestflags.ClearClusterCache
-
-	setLogConfig(artifactsDir)
-	runnerDir := filepath.Join(artifactsDir, runnerLogsDir)
-	runnerLogPath := filepath.Join(
-		runnerDir, fmt.Sprintf("test_runner-%d.log", timeutil.Now().Unix()))
-	l, tee := testRunnerLogger(context.Background(), parallelism, runnerLogPath)
 	lopt := loggingOpt{
 		l:                   l,
 		tee:                 tee,
@@ -196,6 +193,7 @@ func runTests(register func(registry.Registry), filter *registry.TestFilter) err
 			versionsBinaryOverride: roachtestflags.VersionsBinaryOverride,
 			skipInit:               roachtestflags.SkipInit,
 			goCoverEnabled:         roachtestflags.GoCoverEnabled,
+			exportOpenMetrics:      roachtestflags.ExportOpenmetrics,
 		},
 		lopt)
 
@@ -208,7 +206,7 @@ func runTests(register func(registry.Registry), filter *registry.TestFilter) err
 
 	if roachtestflags.TeamCity {
 		// Collect the runner logs.
-		fmt.Printf("##teamcity[publishArtifacts '%s']\n", filepath.Join(literalArtifactsDir, runnerLogsDir))
+		fmt.Printf("##teamcity[publishArtifacts '%s' => '%s']\n", filepath.Join(literalArtifactsDir, runnerLogsDir), runnerLogsDir)
 	}
 
 	if summaryErr := maybeDumpSummaryMarkdown(runner); summaryErr != nil {
@@ -216,20 +214,6 @@ func runTests(register func(registry.Registry), filter *registry.TestFilter) err
 	}
 
 	return err
-}
-
-// This diverts all the default non-fatal logging to a file in `baseDir`. This is particularly
-// useful in CI, where without this, stderr/stdout are cluttered with logs from various
-// packages used in roachtest like sarama and testutils.
-func setLogConfig(baseDir string) {
-	logConf := logconfig.DefaultStderrConfig()
-	logConf.Sinks.Stderr.Filter = logpb.Severity_FATAL
-	if err := logConf.Validate(&baseDir); err != nil {
-		panic(err)
-	}
-	if _, err := log.ApplyConfig(logConf, log.FileSinkMetrics{}, nil /* fatalOnLogStall */); err != nil {
-		panic(err)
-	}
 }
 
 // getUser takes the value passed on the command line and comes up with the
@@ -266,6 +250,9 @@ func initRunFlagsBinariesAndLibraries(cmd *cobra.Command) error {
 	if !(0 <= roachtestflags.FIPSProbability && roachtestflags.FIPSProbability <= 1) {
 		return fmt.Errorf("'metamorphic-fips-probability' must be in [0,1]")
 	}
+	if !(0 <= roachtestflags.CockroachEAProbability && roachtestflags.CockroachEAProbability <= 1) {
+		return fmt.Errorf("'metamorphic-cockroach-ea-probability' must be in [0,1]")
+	}
 	if roachtestflags.ARM64Probability == 1 && roachtestflags.FIPSProbability != 0 {
 		return fmt.Errorf("'metamorphic-fips-probability' must be 0 when 'metamorphic-arm64-probability' is 1")
 	}
@@ -299,6 +286,12 @@ func initRunFlagsBinariesAndLibraries(cmd *cobra.Command) error {
 	if roachtestflags.SelectProbability > 0 && roachtestflags.SelectProbability < 1 {
 		fmt.Printf("Matching tests will be selected with probability %.2f\n", roachtestflags.SelectProbability)
 	}
+
+	for override := range roachtestflags.VersionsBinaryOverride {
+		if _, err := version.Parse(override); err != nil {
+			return errors.Wrapf(err, "binary version override %s is not a valid version", override)
+		}
+	}
 	return nil
 }
 
@@ -313,7 +306,11 @@ func CtrlC(ctx context.Context, l *logger.Logger, cancel func(), cr *clusterRegi
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)
 	go func() {
-		<-sig
+		select {
+		case <-sig:
+		case <-ctx.Done():
+			return
+		}
 		shout(ctx, l, os.Stderr,
 			"Signaled received. Canceling workers and waiting up to 5s for them.")
 		// Signal runner.Run() to stop.
@@ -377,6 +374,17 @@ func testRunnerLogger(
 	}
 	shout(ctx, l, os.Stdout, "test runner logs in: %s", runnerLogPath)
 	return l, teeOpt
+}
+
+func redirectCRDBLogger(ctx context.Context, path string) *logger.Logger {
+	verboseCfg := logger.Config{}
+	var err error
+	l, err := verboseCfg.NewLogger(path)
+	if err != nil {
+		panic(err)
+	}
+	shout(ctx, l, os.Stdout, "fallback runner logs in: %s", path)
+	return l
 }
 
 func maybeDumpSummaryMarkdown(r *testRunner) error {
@@ -458,176 +466,124 @@ func maybeDumpSummaryMarkdown(r *testRunner) error {
 	return nil
 }
 
-// maybeEmitDatadogEvent emits a datadog event if a non-nil statsd client is passed in.
+// maybeEmitDatadogEvent sends an event to Datadog if the passed in ctx has the
+// necessary values to communicate with Datadog.
 func maybeEmitDatadogEvent(
-	client *statsd.Client,
+	ctx context.Context,
+	datadogEventsAPI *datadogV1.EventsApi,
 	opSpec *registry.OperationSpec,
 	clusterName string,
 	eventType ddEventType,
 	operationID uint64,
+	datadogTags []string,
 ) {
-	if client == nil {
+	// The passed in context is not configured to communicate with Datadog.
+	_, hasAPIKeys := ctx.Value(datadog.ContextAPIKeys).(map[string]datadog.APIKey)
+	_, hasServerVariables := ctx.Value(datadog.ContextServerVariables).(map[string]string)
+	if !hasAPIKeys || !hasServerVariables {
 		return
 	}
+
 	status := "started"
+	alertType := datadogV1.EVENTALERTTYPE_INFO
 
 	switch eventType {
 	case eventOpStarted:
 		status = "started"
+		alertType = datadogV1.EVENTALERTTYPE_INFO
 	case eventOpRan:
 		status = "finished running; waiting for cleanup"
+		alertType = datadogV1.EVENTALERTTYPE_SUCCESS
 	case eventOpFinishedCleanup:
 		status = "cleaned up its state"
+		alertType = datadogV1.EVENTALERTTYPE_INFO
 	case eventOpError:
 		status = "ran with an error"
-	}
-	details := fmt.Sprintf("cluster: %s\n", clusterName)
-	ev := statsd.NewEvent(fmt.Sprintf("op %s %s", opSpec.Name, status), details)
-
-	ev.AggregationKey = fmt.Sprintf("operation-%d", operationID)
-	switch eventType {
-	case eventOpStarted:
-		ev.AlertType = statsd.Info
-	case eventOpRan:
-		ev.AlertType = statsd.Success
-	case eventOpFinishedCleanup:
-		ev.AlertType = statsd.Info
-	case eventOpError:
-		ev.AlertType = statsd.Error
+		alertType = datadogV1.EVENTALERTTYPE_ERROR
 	}
 
-	_ = client.Event(ev)
+	title := fmt.Sprintf("op %s %s", opSpec.Name, status)
+	hostname, _ := os.Hostname()
+
+	// We're within a best effort function so we ignore return values.
+	_, _, _ = datadogEventsAPI.CreateEvent(ctx, datadogV1.EventCreateRequest{
+		AggregationKey: datadog.PtrString(fmt.Sprintf("operation-%d", operationID)),
+		AlertType:      &alertType,
+		DateHappened:   datadog.PtrInt64(timeutil.Now().Unix()),
+		Host:           &hostname,
+		SourceTypeName: datadog.PtrString("roachtest"),
+		Tags: append(datadogTags,
+			fmt.Sprintf("operation-name:%s", opSpec.Name),
+			fmt.Sprintf("operation-status:%s", status),
+		),
+		Text:  fmt.Sprintf("cluster: %s\n", clusterName),
+		Title: title,
+	})
 }
 
-// runOperation sequentially runs one operation matched by the passed-in filter.
-func runOperation(register func(registry.Registry), filter string, clusterName string) error {
-	//lint:ignore SA1019 deprecated
-	rand.Seed(roachtestflags.GlobalSeed)
-	r := makeTestRegistry()
-	// NB: root logger with no path always tees to Stdout.
-	l, err := logger.RootLogger("", logger.NoTee)
-	if err != nil {
-		return err
-	}
-	// Install goroutine leak checker and run it at the end of the entire operation
-	// run. This is good hygiene for operations, as operations can one day be
-	// called from roachtests as well.
-	defer leaktest.AfterTest(l)()
-
-	register(&r)
-	ctx := context.Background()
-
-	var statsdClient *statsd.Client
-	if roachtestflags.DogstatsdAddr != "" {
-		var err error
-		statsdClient, err = statsd.New(roachtestflags.DogstatsdAddr)
-		if err != nil {
-			return errors.Wrap(err, "failed to create statsd client")
-		}
+// newDatadogContext adds values to the passed in ctx to configure it to
+// communicate with Datadog. If the necessary values to communicate with
+// Datadog are not present the context is returned without values added to it.
+func newDatadogContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
-	// TODO(bilal): This is excessive for just getting the number of nodes in the
-	// cluster. We should expose a roachprod.Nodes method or so.
-	nodes, err := roachprod.PgURL(ctx, l, clusterName, roachtestflags.CertsDir, roachprod.PGURLOptions{})
-	if err != nil {
-		return errors.Wrap(err, "roachtest: run-operation: error when getting number of nodes")
+	datadogSite := roachtestflags.DatadogSite
+	if datadogSite == "" {
+		datadogSite = os.Getenv("DD_SITE")
 	}
 
-	cSpec := spec.ClusterSpec{NodeCount: len(nodes)}
-	op := &operationImpl{
-		cockroach: roachtestflags.CockroachBinaryPath,
-		l:         l,
+	datadogAPIKey := roachtestflags.DatadogAPIKey
+	if datadogAPIKey == "" {
+		datadogAPIKey = os.Getenv("DD_API_KEY")
 	}
-	c := &clusterImpl{
-		name:       clusterName,
-		cloud:      roachtestflags.Cloud,
-		spec:       cSpec,
-		f:          op,
-		l:          l,
-		expiration: cSpec.Expiration(),
-		destroyState: destroyState{
-			owned: false,
+
+	datadogApplicationKey := roachtestflags.DatadogApplicationKey
+	if datadogApplicationKey == "" {
+		datadogApplicationKey = os.Getenv("DD_APP_KEY")
+	}
+
+	// There isn't enough information to configure the context to communicate
+	// with Datadog.
+	if datadogSite == "" || datadogAPIKey == "" || datadogApplicationKey == "" {
+		return ctx
+	}
+
+	ctx = context.WithValue(
+		ctx,
+		datadog.ContextAPIKeys,
+		map[string]datadog.APIKey{
+			"apiKeyAuth": {
+				Key: datadogAPIKey,
+			},
+			"appKeyAuth": {
+				Key: datadogApplicationKey,
+			},
 		},
-		localCertsDir: roachtestflags.CertsDir,
+	)
+
+	ctx = context.WithValue(ctx,
+		datadog.ContextServerVariables,
+		map[string]string{
+			"site": datadogSite,
+		},
+	)
+
+	return ctx
+}
+
+// getDatadogTags retrieves the Datadog tags from the datadog-tags CLI
+// argument, falling back to the DD_TAGS environment variable if empty.
+func getDatadogTags() []string {
+	rawTags := roachtestflags.DatadogTags
+	if rawTags == "" {
+		rawTags = os.Getenv("DD_TAGS")
 	}
 
-	specs, err := opsToRun(r, filter)
-	if err != nil {
-		return err
-	}
-	var opSpec *registry.OperationSpec
-	if len(specs) > 1 {
-		opSpec = &specs[rand.Intn(len(specs))]
-		l.Printf("more than one operation found for filter %s, randomly selected %s to run", filter, opSpec.Name)
-	} else if len(specs) == 1 {
-		opSpec = &specs[0]
-	} else {
-		return errors.Errorf("no operations found for filter %s", filter)
-	}
-	op.spec = opSpec
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	// Cancel this context if we get an interrupt.
-	CtrlC(ctx, l, cancel, nil /* registry */)
-
-	op.mu.cancel = cancel
-	op.Status(fmt.Sprintf("checking if operation %s dependencies are met", opSpec.Name))
-
-	if roachtestflags.SkipDependencyCheck {
-		op.Status("skipping dependency check")
-	} else if ok, err := operations.CheckDependencies(ctx, c, l, opSpec); !ok || err != nil {
-		if err != nil {
-			op.Fatalf("error checking dependencies: %s", err)
-		}
-		op.Status("operation dependencies not met. Use --skip-dependency-check to skip this check.")
-		return nil
+	if rawTags == "" {
+		return []string{}
 	}
 
-	// operationRunID is used for datadog event aggregation and logging.
-	operationRunID := rand.Uint64()
-	maybeEmitDatadogEvent(statsdClient, opSpec, clusterName, eventOpStarted, operationRunID)
-	op.Status(fmt.Sprintf("running operation %s with run id %d", opSpec.Name, operationRunID))
-	var cleanup registry.OperationCleanup
-	func() {
-		ctx, cancel := context.WithTimeout(ctx, opSpec.Timeout)
-		defer cancel()
-
-		cleanup = opSpec.Run(ctx, op, c)
-	}()
-	if op.Failed() {
-		op.Status("operation failed")
-		maybeEmitDatadogEvent(statsdClient, opSpec, clusterName, eventOpError, operationRunID)
-		return op.mu.failures[0]
-	}
-
-	maybeEmitDatadogEvent(statsdClient, opSpec, clusterName, eventOpRan, operationRunID)
-	if cleanup == nil {
-		op.Status("operation ran successfully")
-		return nil
-	}
-
-	op.Status(fmt.Sprintf("operation ran successfully; waiting %s before cleanup", roachtestflags.WaitBeforeCleanup))
-	select {
-	// Don't exit if the context is done due to a Ctrl-C, instead still run the
-	// cleanup code.
-	case <-ctx.Done():
-	case <-time.After(roachtestflags.WaitBeforeCleanup):
-	}
-	op.Status("running cleanup")
-	func() {
-		ctx, cancel := context.WithTimeout(context.Background(), opSpec.Timeout)
-		defer cancel()
-
-		cleanup.Cleanup(ctx, op, c)
-	}()
-
-	if op.Failed() {
-		op.Status("operation cleanup failed")
-		maybeEmitDatadogEvent(statsdClient, opSpec, clusterName, eventOpError, operationRunID)
-		return op.mu.failures[0]
-	}
-	maybeEmitDatadogEvent(statsdClient, opSpec, clusterName, eventOpFinishedCleanup, operationRunID)
-
-	return nil
+	return strings.Split(rawTags, ",")
 }

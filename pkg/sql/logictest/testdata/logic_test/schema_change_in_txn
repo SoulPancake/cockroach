@@ -1,10 +1,11 @@
-# This test is skipped under local-read-committed, since it uses the
-# autocommit_before_ddl setting, which makes it impossible to test schema
-# changes in transactions.
-
 # Skip the rest of the test if a retry occurs. They can happen and are fine
 # but there's no way to encapsulate that in logictests.
 skip_on_retry
+
+# This test file is focused specifically on testing schema changes in
+# transactions, so we disable autocommit behavior.
+statement ok
+SET autocommit_before_ddl = false
 
 subtest create_and_add_fk_in_same_txn
 
@@ -723,10 +724,10 @@ statement ok
 CREATE UNIQUE INDEX n_idx ON customers (n)
 
 # Validate that pending jobs show within a transactions before its committed.
-query TTT
-SELECT status, started, job_type FROM crdb_internal.jobs WHERE status='pending'
+query TT
+SELECT status, job_type FROM crdb_internal.jobs WHERE status='pending'
 ----
-pending    NULL                                    SCHEMA CHANGE
+pending    SCHEMA CHANGE
 
 statement error pgcode XXA00 violates unique constraint
 COMMIT
@@ -746,12 +747,12 @@ SELECT status,
 ----
 failed  ALTER TABLE test.public.customers ADD COLUMN i INT8 DEFAULT … ers (n)
 
-query TT
-SELECT status,
+query BT
+SELECT status ~ '(running)|(succeeded)',
        regexp_replace(description, 'ROLL BACK JOB \d+.*', 'ROLL BACK JOB') as descr
   FROM [SHOW JOBS] WHERE job_type = 'SCHEMA CHANGE GC' AND description LIKE 'GC for ROLL%' ORDER BY job_id DESC LIMIT 1
 ----
-running  GC for ROLLBACK of ALTER TABLE test.public.customers ADD CO … ers (n)
+true  GC for ROLLBACK of ALTER TABLE test.public.customers ADD CO … ers (n)
 
 subtest add_multiple_computed_elements
 
@@ -1607,11 +1608,9 @@ BEGIN
 statement ok
 ALTER TABLE t ALTER COLUMN a DROP NOT NULL
 
-# Since the non-null constraint is dropped in the schema changer after the
-# transaction commits, it's still enforced during the rest of the transaction.
-# The error is about a check constraint because we generate a check constraint
-# when dropping not-null constraints in the schema changer.
-statement error failed to satisfy CHECK constraint \(a IS NOT NULL\)
+# Since the non-null constraint is dropped with in the txn, it will no
+# long be enforced now.
+statement ok
 INSERT INTO t VALUES (NULL)
 
 statement ok
@@ -2014,13 +2013,13 @@ statement ok
 BEGIN;
 SELECT 1;
 
-skipif config local-read-committed
+skipif config weak-iso-level-configs
 query T noticetrace
 ALTER TABLE t1 ADD COLUMN c INT DEFAULT 1
 ----
 NOTICE: auto-committing transaction before processing DDL due to autocommit_before_ddl setting
 
-onlyif config local-read-committed
+onlyif config weak-iso-level-configs
 query T noticetrace
 ALTER TABLE t1 ADD COLUMN c INT DEFAULT 1
 ----

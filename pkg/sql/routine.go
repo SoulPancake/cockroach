@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -15,6 +10,7 @@ import (
 	"strconv"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
@@ -22,7 +18,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
@@ -31,6 +29,7 @@ import (
 
 // A callNode executes a procedure.
 type callNode struct {
+	zeroInputPlanNode
 	proc *tree.RoutineExpr
 	r    tree.Datums
 }
@@ -138,6 +137,24 @@ func (p *planner) EvalRoutineExpr(
 		}
 	}
 
+	if expr.TriggerFunc {
+		// In cyclical reference situations, the number of nested trigger actions
+		// can be arbitrarily large. To avoid OOM, we enforce a limit on the depth
+		// of nested triggers. This is also a safeguard in case we have a bug that
+		// results in an infinite trigger loop.
+		var triggerDepth int
+		if triggerDepthValue := ctx.Value(triggerDepthKey{}); triggerDepthValue != nil {
+			triggerDepth = triggerDepthValue.(int)
+		}
+		if limit := int(p.SessionData().RecursionDepthLimit); triggerDepth > limit {
+			telemetry.Inc(sqltelemetry.RecursionDepthLimitReached)
+			err = pgerror.Newf(pgcode.TriggeredActionException,
+				"trigger reached recursion depth limit: %d", limit)
+			return nil, err
+		}
+		ctx = context.WithValue(ctx, triggerDepthKey{}, triggerDepth+1)
+	}
+
 	var g routineGenerator
 	g.init(p, expr, args)
 	defer g.Close(ctx)
@@ -172,6 +189,8 @@ func (p *planner) EvalRoutineExpr(
 	}
 	return res, nil
 }
+
+type triggerDepthKey struct{}
 
 // RoutineExprGenerator returns an eval.ValueGenerator that produces the results
 // of a routine.
@@ -228,11 +247,26 @@ func (g *routineGenerator) ResolvedType() *types.T {
 
 // Start is part of the eval.ValueGenerator interface.
 func (g *routineGenerator) Start(ctx context.Context, txn *kv.Txn) (err error) {
+	enabledStepping := false
+	var prevSteppingMode kv.SteppingMode
+	var prevSeqNum enginepb.TxnSeq
 	for {
+		if g.expr.EnableStepping && !enabledStepping {
+			prevSteppingMode = txn.ConfigureStepping(ctx, kv.SteppingEnabled)
+			prevSeqNum = txn.GetReadSeqNum()
+			enabledStepping = true
+		}
 		err = g.startInternal(ctx, txn)
-		if err != nil || g.deferredRoutine.expr == nil {
-			// No tail-call optimization.
+		if err != nil {
 			return err
+		}
+		if g.deferredRoutine.expr == nil {
+			// No tail-call optimization.
+			if enabledStepping {
+				_ = txn.ConfigureStepping(ctx, prevSteppingMode)
+				return txn.SetReadSeqNum(prevSeqNum)
+			}
+			return nil
 		}
 		// A nested routine in tail-call position deferred its execution until now.
 		// Since it's in tail-call position, evaluating it will give the result of
@@ -265,22 +299,6 @@ func (g *routineGenerator) startInternal(ctx context.Context, txn *kv.Txn) (err 
 	err = g.maybeInitBlockState(ctx)
 	if err != nil {
 		return err
-	}
-
-	// Configure stepping for volatile routines so that mutations made by the
-	// invoking statement are visible to the routine.
-	if g.expr.EnableStepping {
-		prevSteppingMode := txn.ConfigureStepping(ctx, kv.SteppingEnabled)
-		prevSeqNum := txn.GetReadSeqNum()
-		defer func() {
-			// If the routine errored, the transaction should be aborted, so
-			// there is no need to reconfigure stepping or revert to the
-			// original sequence number.
-			if err == nil {
-				_ = txn.ConfigureStepping(ctx, prevSteppingMode)
-				err = txn.SetReadSeqNum(prevSeqNum)
-			}
-		}()
 	}
 
 	// Execute each statement in the routine sequentially.
@@ -413,11 +431,25 @@ func (g *routineGenerator) handleException(ctx context.Context, err error) error
 			args := g.args[:blockState.VariableCount]
 			g.reset(ctx, g.p, branch, args)
 
+			// Configure stepping for volatile routines so that mutations made by the
+			// invoking statement are visible to the routine.
+			var prevSteppingMode kv.SteppingMode
+			var prevSeqNum enginepb.TxnSeq
+			txn := g.p.Txn()
+			if g.expr.EnableStepping {
+				prevSteppingMode = txn.ConfigureStepping(ctx, kv.SteppingEnabled)
+				prevSeqNum = txn.GetReadSeqNum()
+			}
+
 			// If handling the exception results in another error, that error can in
 			// turn be caught by a parent exception handler. Otherwise, the exception
 			// was handled, so just return.
-			err = g.startInternal(ctx, g.p.Txn())
+			err = g.startInternal(ctx, txn)
 			if err == nil {
+				if g.expr.EnableStepping {
+					_ = txn.ConfigureStepping(ctx, prevSteppingMode)
+					return txn.SetReadSeqNum(prevSeqNum)
+				}
 				return nil
 			}
 		}
@@ -525,30 +557,6 @@ func (g *routineGenerator) CanOptimizeTailCall(nestedRoutine *tree.RoutineExpr) 
 func (g *routineGenerator) SendDeferredRoutine(nestedRoutine *tree.RoutineExpr, args tree.Datums) {
 	g.deferredRoutine.expr = nestedRoutine
 	g.deferredRoutine.args = args
-}
-
-// droppingResultWriter drops all rows that are added to it. It only tracks
-// errors with the SetError and Err functions.
-type droppingResultWriter struct {
-	err error
-}
-
-// AddRow is part of the rowResultWriter interface.
-func (d *droppingResultWriter) AddRow(ctx context.Context, row tree.Datums) error {
-	return nil
-}
-
-// SetRowsAffected is part of the rowResultWriter interface.
-func (d *droppingResultWriter) SetRowsAffected(ctx context.Context, n int) {}
-
-// SetError is part of the rowResultWriter interface.
-func (d *droppingResultWriter) SetError(err error) {
-	d.err = err
-}
-
-// Err is part of the rowResultWriter interface.
-func (d *droppingResultWriter) Err() error {
-	return d.err
 }
 
 func (g *routineGenerator) newCursorHelper(plan *planComponents) (*plpgsqlCursorHelper, error) {

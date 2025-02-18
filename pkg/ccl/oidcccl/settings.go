@@ -1,15 +1,13 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package oidcccl
 
 import (
 	"bytes"
+	"crypto/x509"
 	"encoding/json"
 	"net/url"
 	"regexp"
@@ -40,6 +38,7 @@ const (
 	OIDCGenerateClusterSSOTokenSQLHostSettingName  = baseOIDCSettingName + "generate_cluster_sso_token.sql_host"
 	OIDCGenerateClusterSSOTokenSQLPortSettingName  = baseOIDCSettingName + "generate_cluster_sso_token.sql_port"
 	oidcAuthClientTimeoutSettingName               = baseOIDCSettingName + "client.timeout"
+	oidcProviderCustomCASettingName                = baseOIDCSettingName + "provider.custom_ca"
 )
 
 // OIDCEnabled enables or disabled OIDC login for the DB Console.
@@ -81,7 +80,7 @@ var OIDCAuthClientTimeout = settings.RegisterDurationSetting(
 	oidcAuthClientTimeoutSettingName,
 	"sets the client timeout for external calls made during OIDC authentication "+
 		"(e.g. authorization code flow, etc.)",
-	30*time.Second,
+	15*time.Second,
 	settings.NonNegativeDuration,
 	settings.WithPublic,
 )
@@ -330,3 +329,26 @@ var OIDCGenerateClusterSSOTokenSQLPort = settings.RegisterIntSetting(
 	26257,
 	settings.NonNegativeIntWithMaximum(65535),
 )
+
+// OIDCProviderCustomCA is the custom root CA for verifying certificates while
+// authenticating through the OIDC provider.
+var OIDCProviderCustomCA = settings.RegisterStringSetting(
+	settings.ApplicationLevel,
+	oidcProviderCustomCASettingName,
+	"sets the PEM encoded custom root CA for verifying certificates while authenticating "+
+		"through the OIDC provider",
+	"",
+	settings.WithReportable(false),
+	settings.Sensitive,
+	settings.WithValidateString(validateOIDCProviderCACert),
+	settings.WithPublic,
+)
+
+func validateOIDCProviderCACert(values *settings.Values, s string) error {
+	if len(s) != 0 {
+		if ok := x509.NewCertPool().AppendCertsFromPEM([]byte(s)); !ok {
+			return errors.Newf("OIDC provider custom CA certificate not valid")
+		}
+	}
+	return nil
+}

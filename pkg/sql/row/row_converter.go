@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package row
 
@@ -22,7 +17,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowinfra"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins/builtinconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/transform"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -31,15 +25,22 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
+	"github.com/cockroachdb/cockroach/pkg/util/unique"
 	"github.com/cockroachdb/errors"
 )
 
-// KVInserter implements the putter interface.
+// KVInserter implements the row.Putter interface.
 type KVInserter func(roachpb.KeyValue)
 
-// CPut is not implmented.
+// CPut implements the row.Putter interface.
 func (i KVInserter) CPut(key, value interface{}, expValue []byte) {
-	panic("unimplemented")
+	if expValue != nil {
+		panic(errors.AssertionFailedf("unexpected non-nil expValue in CPut in KVInserter: %v", expValue))
+	}
+	i(roachpb.KeyValue{
+		Key:   *key.(*roachpb.Key),
+		Value: *value.(*roachpb.Value),
+	})
 }
 
 // Del is not implemented.
@@ -58,7 +59,7 @@ func (i KVInserter) Del(key ...interface{}) {
 	// empty).
 }
 
-// Put method of the putter interface.
+// Put method of the row.Putter interface.
 func (i KVInserter) Put(key, value interface{}) {
 	i(roachpb.KeyValue{
 		Key:   *key.(*roachpb.Key),
@@ -66,20 +67,16 @@ func (i KVInserter) Put(key, value interface{}) {
 	})
 }
 
-// InitPut method of the putter interface.
-func (i KVInserter) InitPut(key, value interface{}, failOnTombstones bool) {
-	i(roachpb.KeyValue{
-		Key:   *key.(*roachpb.Key),
-		Value: *value.(*roachpb.Value),
-	})
+func (c KVInserter) PutMustAcquireExclusiveLock(key, value interface{}) {}
+func (c KVInserter) CPutWithOriginTimestamp(
+	key, value interface{}, expValue []byte, ts hlc.Timestamp, shouldWinTie bool,
+) {
 }
-
+func (c KVInserter) CPutBytesEmpty(kys []roachpb.Key, values [][]byte)         {}
 func (c KVInserter) CPutTuplesEmpty(kys []roachpb.Key, values [][]byte)        {}
 func (c KVInserter) CPutValuesEmpty(kys []roachpb.Key, values []roachpb.Value) {}
 func (c KVInserter) PutBytes(kys []roachpb.Key, values [][]byte)               {}
-func (c KVInserter) InitPutBytes(kys []roachpb.Key, values [][]byte)           {}
 func (c KVInserter) PutTuples(kys []roachpb.Key, values [][]byte)              {}
-func (c KVInserter) InitPutTuples(kys []roachpb.Key, values [][]byte)          {}
 
 // GenerateInsertRow prepares a row tuple for insertion. It fills in default
 // expressions, verifies non-nullable columns, and checks column widths.
@@ -231,6 +228,7 @@ type DatumRowConverter struct {
 	// FractionFn is used to set the progress header in KVBatches.
 	CompletedRowFn func() int64
 	FractionFn     func() float32
+	kvInserter     KVInserter
 
 	db *kv.DB
 }
@@ -285,7 +283,7 @@ func (c *DatumRowConverter) getSequenceAnnotation(
 		if err := txn.SetFixedTimestamp(ctx, hlc.Timestamp{WallTime: evalCtx.TxnTimestamp.UnixNano()}); err != nil {
 			return err
 		}
-		seqs, err := descsCol.ByID(txn).Get().Descs(ctx, sequenceIDs.Ordered())
+		seqs, err := descsCol.ByIDWithoutLeased(txn).Get().Descs(ctx, sequenceIDs.Ordered())
 		if err != nil {
 			return err
 		}
@@ -325,6 +323,11 @@ func NewDatumRowConverter(
 		// that they don't make a redundant copy of the eval context.
 		EvalCtx: evalCtx.Copy(),
 		db:      db,
+	}
+	c.kvInserter = func(kv roachpb.KeyValue) {
+		kv.Value.InitChecksum(kv.Key)
+		c.KvBatch.KVs = append(c.KvBatch.KVs, kv)
+		c.KvBatch.MemSize += int64(cap(kv.Key) + cap(kv.Value.RawBytes))
 	}
 
 	var targetCols []catalog.Column
@@ -367,6 +370,7 @@ func NewDatumRowConverter(
 		nil, /* txn */
 		evalCtx.Codec,
 		tableDesc,
+		nil, /* uniqueWithTombstoneIndexes */
 		cols,
 		&tree.DatumAlloc{},
 		&evalCtx.Settings.SV,
@@ -495,7 +499,7 @@ func NewDatumRowConverter(
 	return c, nil
 }
 
-const rowIDBits = 64 - builtinconstants.UniqueIntNodeIDBits
+const rowIDBits = 64 - unique.UniqueIntNodeIDBits
 
 // Row inserts kv operations into the current kv batch, and triggers a SendBatch
 // if necessary.
@@ -558,14 +562,11 @@ func (c *DatumRowConverter) Row(ctx context.Context, sourceID int32, rowIndex in
 
 	if err := c.ri.InsertRow(
 		ctx,
-		KVInserter(func(kv roachpb.KeyValue) {
-			kv.Value.InitChecksum(kv.Key)
-			c.KvBatch.KVs = append(c.KvBatch.KVs, kv)
-			c.KvBatch.MemSize += int64(cap(kv.Key) + cap(kv.Value.RawBytes))
-		}),
+		c.kvInserter,
 		insertRow,
 		pm,
-		true,  /* ignoreConflicts */
+		nil, /* OriginTimestampCPutHelper */
+		PutOp,
 		false, /* traceKV */
 	); err != nil {
 		return errors.Wrap(err, "insert row")

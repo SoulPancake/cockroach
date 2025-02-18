@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package mixedversion
 
@@ -18,6 +13,9 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/clusterupgrade"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/task"
+	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
@@ -76,7 +74,7 @@ func Test_run(t *testing.T) {
 			},
 		}
 
-		initialVersion := parseVersions([]string{predecessorVersion})[0]
+		initialVersion := clusterupgrade.MustParseVersion(predecessorVersion)
 		return newSingleStep(
 			newInitialContext(initialVersion, nodes, nil),
 			step,
@@ -112,10 +110,14 @@ func Test_run(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			runner := testTestRunner()
-			// Set an artificially large `startClusterID` to stop the test
-			// runner from attempting to perform post-initialization tasks
-			// that wouldn't work in this limited test environment.
-			runner.plan = &TestPlan{initSteps: tc.steps, startClusterID: 9999}
+			runner.plan = &TestPlan{
+				setup:     testSetup{systemSetup: &serviceSetup{}},
+				initSteps: tc.steps,
+				// Set an artificially large `startSystemID` to stop the test
+				// runner from attempting to perform post-initialization tasks
+				// that wouldn't work in this limited test environment.
+				startSystemID: 9999,
+			}
 
 			runnerCh := make(chan error)
 			defer close(runnerCh)
@@ -150,14 +152,18 @@ func testAddAnnotation() error {
 func testTestRunner() *testRunner {
 	runnerCtx, cancel := context.WithCancel(ctx)
 	var ranUserHooks atomic.Bool
+	systemDescriptor := &ServiceDescriptor{
+		Name:  install.SystemInterfaceName,
+		Nodes: nodes,
+	}
 	return &testRunner{
 		ctx:            runnerCtx,
 		cancel:         cancel,
 		logger:         nilLogger,
-		crdbNodes:      nodes,
-		background:     newBackgroundRunner(runnerCtx, nilLogger),
-		seed:           seed,
+		systemService:  newServiceRuntime(systemDescriptor),
+		background:     task.NewManager(runnerCtx, nilLogger),
 		ranUserHooks:   &ranUserHooks,
+		plan:           &TestPlan{seed: seed},
 		_addAnnotation: testAddAnnotation,
 	}
 }
@@ -174,7 +180,7 @@ func (tss *testSingleStep) Run(_ context.Context, _ *logger.Logger, _ *rand.Rand
 }
 
 func newTestStep(f func() error) *singleStep {
-	initialVersion := parseVersions([]string{predecessorVersion})[0]
+	initialVersion := clusterupgrade.MustParseVersion(predecessorVersion)
 	return newSingleStep(
 		newInitialContext(initialVersion, nodes, nil),
 		&testSingleStep{runFunc: f},

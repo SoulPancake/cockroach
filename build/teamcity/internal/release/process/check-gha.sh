@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+# Copyright 2024 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 set -exuo pipefail
 
 dir="$(dirname $(dirname $(dirname $(dirname $(dirname "${0}")))))"
@@ -7,8 +13,8 @@ source "$dir/release/teamcity-support.sh"
 source "$dir/teamcity-bazel-support.sh"  # for run_bazel
 
 BAZEL_SUPPORT_EXTRA_DOCKER_ARGS="-e sha=$BUILD_VCS_NUMBER" run_bazel << 'EOF'
-bazel build --config ci //pkg/cmd/github-action-poller
-BAZEL_BIN=$(bazel info bazel-bin --config ci)
+bazel build //pkg/cmd/github-action-poller
+BAZEL_BIN=$(bazel info bazel-bin)
 $BAZEL_BIN/pkg/cmd/github-action-poller/github-action-poller_/github-action-poller \
   --owner cockroachdb \
   --repo cockroach \
@@ -22,11 +28,7 @@ $BAZEL_BIN/pkg/cmd/github-action-poller/github-action-poller_/github-action-poll
   lint \
   linux_amd64_build \
   linux_amd64_fips_build \
-  linux_arm64_build \
   local_roachtest \
   local_roachtest_fips \
-  macos_amd64_build \
-  macos_arm64_build \
-  unit_tests \
-  windows_build
+  unit_tests
 EOF

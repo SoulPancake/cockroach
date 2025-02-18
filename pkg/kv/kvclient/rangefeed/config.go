@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rangefeed
 
@@ -44,6 +39,7 @@ type config struct {
 	withDiff              bool
 	withFiltering         bool
 	withMatchingOriginIDs []uint32
+	consumerID            int64
 	onUnrecoverableError  OnUnrecoverableError
 	onCheckpoint          OnCheckpoint
 	frontierQuantize      time.Duration
@@ -164,6 +160,12 @@ func WithOriginIDsMatching(originIDs ...uint32) Option {
 	})
 }
 
+func WithConsumerID(cid int64) Option {
+	return optionFunc(func(c *config) {
+		c.consumerID = cid
+	})
+}
+
 // WithInvoker makes an option to invoke the rangefeed tasks such as running the
 // the client and processing events emitted by the client with a caller-supplied
 // function, which can make it easier to introspect into work done by a given
@@ -253,10 +255,6 @@ func WithOnMetadata(fn OnMetadata) Option {
 // DeleteRange is called with UseRangeTombstone, but not when the range is
 // deleted using point tombstones). If this callback is not provided, an error
 // is emitted when these are encountered.
-//
-// MVCC range tombstones are currently experimental, and requires the
-// MVCCRangeTombstones version gate. They are only expected during certain
-// operations like schema GC and IMPORT INTO (i.e. not across live tables).
 type OnDeleteRange func(ctx context.Context, value *kvpb.RangeFeedDeleteRange)
 
 // WithOnDeleteRange sets up a callback that's invoked whenever an MVCC range

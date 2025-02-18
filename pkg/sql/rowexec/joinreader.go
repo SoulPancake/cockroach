@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowexec
 
@@ -102,8 +97,9 @@ type joinReader struct {
 	// used by buffered rows in joinReaderOrderingStrategy. If the memory limit is
 	// exceeded, the joinReader will spill to disk. diskMonitor is used to monitor
 	// the disk utilization in this case.
-	limitedMemMonitor *mon.BytesMonitor
-	diskMonitor       *mon.BytesMonitor
+	limitedMemMonitor   *mon.BytesMonitor
+	unlimitedMemMonitor *mon.BytesMonitor
+	diskMonitor         *mon.BytesMonitor
 
 	fetchSpec      fetchpb.IndexFetchSpec
 	splitFamilyIDs []descpb.FamilyID
@@ -325,7 +321,7 @@ func newJoinReader(
 	case lookupJoinReaderType:
 		lookupCols = spec.LookupColumns
 	default:
-		return nil, errors.Errorf("unsupported joinReaderType")
+		return nil, errors.AssertionFailedf("unsupported joinReaderType")
 	}
 	// The joiner has a choice to make between getting DistSender-level
 	// parallelism for its lookup batches and setting row and memory limits (due
@@ -347,7 +343,7 @@ func newJoinReader(
 		// in order to ensure the lookups are ordered, so set shouldLimitBatches.
 		spec.MaintainOrdering, shouldLimitBatches = true, true
 	}
-	useStreamer, txn, err := flowCtx.UseStreamer()
+	useStreamer, txn, err := flowCtx.UseStreamer(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -399,7 +395,7 @@ func newJoinReader(
 	case lookupJoinReaderType:
 		leftTypes = input.OutputTypes()
 	default:
-		return nil, errors.Errorf("unsupported joinReaderType")
+		return nil, errors.AssertionFailedf("unsupported joinReaderType")
 	}
 	rightTypes := spec.FetchSpec.FetchedColumnTypes()
 
@@ -550,16 +546,18 @@ func newJoinReader(
 
 		var diskBuffer kvstreamer.ResultDiskBuffer
 		if jr.streamerInfo.maintainOrdering {
+			diskBufferMemAcc := jr.streamerInfo.unlimitedMemMonitor.MakeBoundAccount()
 			jr.streamerInfo.diskMonitor = execinfra.NewMonitor(
 				ctx, jr.FlowCtx.DiskMonitor, "streamer-disk", /* name */
 			)
 			diskBuffer = rowcontainer.NewKVStreamerResultDiskBuffer(
-				jr.FlowCtx.Cfg.TempStorage, jr.streamerInfo.diskMonitor,
+				jr.FlowCtx.Cfg.TempStorage, diskBufferMemAcc, jr.streamerInfo.diskMonitor,
 			)
 		}
 		singleRowLookup := readerType == indexJoinReaderType || spec.LookupColumnsAreKey
 		streamingKVFetcher = row.NewStreamingKVFetcher(
 			flowCtx.Cfg.DistSender,
+			flowCtx.Cfg.KVStreamerMetrics,
 			flowCtx.Stopper(),
 			jr.txn,
 			flowCtx.Cfg.Settings,
@@ -574,6 +572,8 @@ func newJoinReader(
 			int(spec.FetchSpec.MaxKeysPerRow),
 			diskBuffer,
 			&jr.streamerInfo.txnKVStreamerMemAcc,
+			spec.FetchSpec.External,
+			row.FetchSpecRequiresRawMVCCValues(spec.FetchSpec),
 		)
 	} else {
 		// When not using the Streamer API, we want to limit the batch size hint
@@ -595,6 +595,7 @@ func newJoinReader(
 			LockWaitPolicy:             spec.LockingWaitPolicy,
 			LockDurability:             spec.LockingDurability,
 			LockTimeout:                flowCtx.EvalCtx.SessionData().LockTimeout,
+			DeadlockTimeout:            flowCtx.EvalCtx.SessionData().DeadlockTimeout,
 			Alloc:                      &jr.alloc,
 			MemMonitor:                 flowCtx.Mon,
 			Spec:                       &spec.FetchSpec,
@@ -728,6 +729,7 @@ func (jr *joinReader) initJoinReaderStrategy(
 	// disk, it releases all of the memory reservations, so we make the
 	// corresponding memory monitor not hold on to any bytes.
 	jr.limitedMemMonitor.RelinquishAllOnReleaseBytes()
+	jr.unlimitedMemMonitor = execinfra.NewMonitor(ctx, flowCtx.Mon, "joinreader-unlimited")
 	jr.diskMonitor = execinfra.NewMonitor(ctx, flowCtx.DiskMonitor, "joinreader-disk")
 	drc := rowcontainer.NewDiskBackedNumberedRowContainer(
 		false, /* deDup */
@@ -735,6 +737,7 @@ func (jr *joinReader) initJoinReaderStrategy(
 		jr.FlowCtx.EvalCtx,
 		jr.FlowCtx.Cfg.TempStorage,
 		jr.limitedMemMonitor,
+		jr.unlimitedMemMonitor,
 		jr.diskMonitor,
 	)
 	if limit < mon.DefaultPoolAllocationSize {
@@ -1228,6 +1231,9 @@ func (jr *joinReader) close() {
 		if jr.MemMonitor != nil {
 			jr.MemMonitor.Stop(jr.Ctx())
 		}
+		if jr.unlimitedMemMonitor != nil {
+			jr.unlimitedMemMonitor.Stop(jr.Ctx())
+		}
 		if jr.diskMonitor != nil {
 			jr.diskMonitor.Stop(jr.Ctx())
 		}
@@ -1262,6 +1268,9 @@ func (jr *joinReader) execStatsForTrace() *execinfrapb.ComponentStats {
 	// Note that there is no need to include the maximum bytes of
 	// jr.limitedMemMonitor because it is a child of jr.MemMonitor.
 	ret.Exec.MaxAllocatedMem.Add(jr.MemMonitor.MaximumBytes())
+	if jr.unlimitedMemMonitor != nil {
+		ret.Exec.MaxAllocatedMem.Add(jr.unlimitedMemMonitor.MaximumBytes())
+	}
 	if jr.diskMonitor != nil {
 		ret.Exec.MaxAllocatedDisk.Add(jr.diskMonitor.MaximumBytes())
 	}

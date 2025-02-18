@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import moment from "moment-timezone";
 
@@ -361,7 +356,7 @@ export function EncodeUriName(name: string): string {
   return encodeURIComponent(name).replace(/%25/g, "%252525");
 }
 
-export function EncodeDatabasesUri(db: string): string {
+function encodeDatabasesUri(db: string): string {
   return `/databases/${EncodeUriName(db)}`;
 }
 
@@ -371,13 +366,13 @@ export function EncodeDatabasesToIndexUri(
   table: string,
   indexName: string,
 ): string {
-  return `${EncodeDatabasesUri(db)}/${EncodeUriName(schema)}/${EncodeUriName(
+  return `${encodeDatabasesUri(db)}/${EncodeUriName(schema)}/${EncodeUriName(
     table,
   )}/${EncodeUriName(indexName)}`;
 }
 
-export function EncodeDatabaseTableUri(db: string, table: string): string {
-  return `${EncodeDatabaseUri(db)}/table/${EncodeUriName(table)}`;
+function encodeDatabaseTableUri(db: string, table: string): string {
+  return `${encodeDatabaseUri(db)}/table/${EncodeUriName(table)}`;
 }
 
 export function EncodeDatabaseTableIndexUri(
@@ -385,12 +380,12 @@ export function EncodeDatabaseTableIndexUri(
   table: string,
   indexName: string,
 ): string {
-  return `${EncodeDatabaseTableUri(db, table)}/index/${EncodeUriName(
+  return `${encodeDatabaseTableUri(db, table)}/index/${EncodeUriName(
     indexName,
   )}`;
 }
 
-export function EncodeDatabaseUri(db: string): string {
+function encodeDatabaseUri(db: string): string {
   return `/database/${EncodeUriName(db)}`;
 }
 

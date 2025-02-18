@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colfetcher
 
@@ -19,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvstreamer"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
@@ -500,7 +496,7 @@ func NewColIndexJoin(
 ) (*ColIndexJoin, error) {
 	// NB: we hit this with a zero NodeID (but !ok) with multi-tenancy.
 	if nodeID, ok := flowCtx.NodeID.OptionalNodeID(); nodeID == 0 && ok {
-		return nil, errors.Errorf("attempting to create a ColIndexJoin with uninitialized NodeID")
+		return nil, errors.AssertionFailedf("attempting to create a ColIndexJoin with uninitialized NodeID")
 	}
 	if !spec.LookupExpr.Empty() {
 		return nil, errors.AssertionFailedf("non-empty lookup expressions are not supported for index joins")
@@ -521,7 +517,7 @@ func NewColIndexJoin(
 	cFetcherMemoryLimit := totalMemoryLimit
 
 	var kvFetcher *row.KVFetcher
-	useStreamer, txn, err := flowCtx.UseStreamer()
+	useStreamer, txn, err := flowCtx.UseStreamer(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -544,11 +540,22 @@ func NewColIndexJoin(
 		if flowCtx.EvalCtx.SessionData().StreamerAlwaysMaintainOrdering {
 			maintainOrdering = true
 		}
-		if maintainOrdering && diskMonitor == nil {
-			return nil, errors.AssertionFailedf("diskMonitor is nil when ordering needs to be maintained")
+		var diskBuffer kvstreamer.ResultDiskBuffer
+		if maintainOrdering {
+			if diskMonitor == nil {
+				return nil, errors.AssertionFailedf("diskMonitor is nil when ordering needs to be maintained")
+			}
+			// Explicitly create a separate memory account bound to the
+			// unlimited monitor here - this passes ownership to the disk buffer
+			// which will close the acc.
+			diskBufferMemAcc := streamerBudgetAcc.Monitor().MakeBoundAccount()
+			diskBuffer = rowcontainer.NewKVStreamerResultDiskBuffer(
+				flowCtx.Cfg.TempStorage, diskBufferMemAcc, diskMonitor,
+			)
 		}
 		kvFetcher = row.NewStreamingKVFetcher(
 			flowCtx.Cfg.DistSender,
+			flowCtx.Cfg.KVStreamerMetrics,
 			flowCtx.Stopper(),
 			txn,
 			flowCtx.Cfg.Settings,
@@ -561,22 +568,25 @@ func NewColIndexJoin(
 			maintainOrdering,
 			true, /* singleRowLookup */
 			int(spec.FetchSpec.MaxKeysPerRow),
-			rowcontainer.NewKVStreamerResultDiskBuffer(
-				flowCtx.Cfg.TempStorage, diskMonitor,
-			),
+			diskBuffer,
 			kvFetcherMemAcc,
+			spec.FetchSpec.External,
+			tableArgs.RequiresRawMVCCValues(),
 		)
 	} else {
 		kvFetcher = row.NewKVFetcher(
 			txn,
 			nil,   /* bsHeader */
 			false, /* reverse */
+			tableArgs.RequiresRawMVCCValues(),
 			spec.LockingStrength,
 			spec.LockingWaitPolicy,
 			spec.LockingDurability,
 			flowCtx.EvalCtx.SessionData().LockTimeout,
+			flowCtx.EvalCtx.SessionData().DeadlockTimeout,
 			kvFetcherMemAcc,
 			flowCtx.EvalCtx.TestingKnobs.ForceProductionValues,
+			spec.FetchSpec.External,
 		)
 	}
 

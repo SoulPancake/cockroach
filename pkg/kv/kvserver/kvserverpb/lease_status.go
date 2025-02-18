@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserverpb
 
@@ -43,6 +38,14 @@ func (st LeaseStatus) Expiration() hlc.Timestamp {
 		// lease epoch matches the liveness epoch.
 		if st.Lease.Epoch == st.Liveness.Epoch {
 			exp.Forward(st.Liveness.Expiration.ToTimestamp())
+		}
+		return exp
+	case roachpb.LeaseLeader:
+		exp := st.Lease.MinExpiration
+		// The leader support applies to the lease iff the lease term matches the
+		// raft term.
+		if st.Lease.Term == st.LeaderSupport.Term {
+			exp.Forward(st.LeaderSupport.LeadSupportUntil)
 		}
 		return exp
 	default:

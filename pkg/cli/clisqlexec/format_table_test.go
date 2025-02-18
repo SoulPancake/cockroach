@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package clisqlexec_test
 
@@ -63,6 +58,7 @@ thenshort`,
 	// not much" int, "very very long
 	// thenshort" int, "κόσμε" int, "a|b" int, ܈85 int)
 	// CREATE DATABASE
+	// NOTICE: auto-committing transaction before processing DDL due to autocommit_before_ddl setting
 	// CREATE TABLE
 	// sql -e insert into t.u values (0, 0, 0, 0, 0, 0, 0, 0)
 	// INSERT 0 1
@@ -217,8 +213,11 @@ func Example_sql_empty_table() {
 	// Output:
 	// sql -e create database t;create table t.norows(x int);create table t.nocolsnorows();create table t.nocols(); insert into t.nocols(rowid) values (1),(2),(3);
 	// CREATE DATABASE
+	// NOTICE: auto-committing transaction before processing DDL due to autocommit_before_ddl setting
 	// CREATE TABLE
+	// NOTICE: auto-committing transaction before processing DDL due to autocommit_before_ddl setting
 	// CREATE TABLE
+	// NOTICE: auto-committing transaction before processing DDL due to autocommit_before_ddl setting
 	// CREATE TABLE
 	// INSERT 0 3
 	// sql --format=tsv -e select * from t.norows
@@ -550,6 +549,7 @@ func Example_sql_table() {
 	// Output:
 	// sql -e create database t; create table t.t (s string, d string);
 	// CREATE DATABASE
+	// NOTICE: auto-committing transaction before processing DDL due to autocommit_before_ddl setting
 	// CREATE TABLE
 	// sql -e insert into t.t values (e'foo', 'printable ASCII')
 	// INSERT 0 1

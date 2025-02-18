@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 
+# Copyright 2022 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 set -xeuo pipefail
 
 # When updating to a new Go version, update all of these variables.
-GOVERS=1.22.3
-GOLINK=https://go.dev/dl/go$GOVERS.src.tar.gz
-SRCSHASUM=80648ef34f903193d72a59c0dff019f5f98ae0c9aa13ade0b0ecbff991a76f68
+GOVERS=1.22.8
+GOCOMMIT=$(grep -v ^# /bootstrap/commit.txt | head -n1)
 # We use this for bootstrapping (this is NOT re-published). Note the version
 # matches the version we're publishing, although it doesn't technically have to.
 GOLINUXLINK=https://go.dev/dl/go$GOVERS.linux-amd64.tar.gz
-LINUXSHASUM=8920ea521bad8f6b7bc377b4824982e011c19af27df88a815e3586ea895f1b36
+LINUXSHASUM=5f467d29fc67c7ae6468cb6ad5b047a274bae8180cac5e0b7ddbfeba3e47e18f
 
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -55,15 +60,11 @@ echo '94e64e0e8de05706dfd5ab2f1fee6e7f75280e35b09b5628980805d27939b418 x86_64-w6
 echo *.tar.gz | xargs -n1 tar -xzf
 rm *.tar.gz
 
-curl -fsSL $GOLINK -o golang.tar.gz
-echo "$SRCSHASUM  golang.tar.gz" | sha256sum -c -
 mkdir -p /tmp/go$GOVERS
-tar -C /tmp/go$GOVERS -xzf golang.tar.gz
-rm golang.tar.gz
-cd /tmp/go$GOVERS/go
-# NB: we apply a patch to the Go runtime to keep track of running time on a
-# per-goroutine basis. See #82356 and #82625.
-git apply /bootstrap/diff.patch
+cd /tmp/go$GOVERS
+git clone 'https://github.com/cockroachdb/go.git'
+cd go
+git checkout $GOCOMMIT
 cd ..
 
 CONFIGS="linux_amd64 linux_arm64 darwin_amd64 darwin_arm64 windows_amd64"

@@ -1,23 +1,18 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import Analytics from "analytics-node";
 import { Location } from "history";
-import { Store } from "redux";
 import each from "lodash/each";
 import isEmpty from "lodash/isEmpty";
+import { Store } from "redux";
 
 import * as protos from "src/js/protos";
+import { history } from "src/redux/history";
 import { versionsSelector } from "src/redux/nodes";
 import { AdminUIState } from "src/redux/state";
-import { history } from "src/redux/history";
 import { COCKROACHLABS_ADDR } from "src/util/cockroachlabsAPI";
 
 type ClusterResponse = protos.cockroach.server.serverpb.IClusterResponse;

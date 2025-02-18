@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -139,6 +134,22 @@ func Test_failuresMatchingError(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "an error contains the expected error type, as part of a multi-error",
+			args: args{
+				failures: []failure{
+					createFailure(
+						// Errors that use the `Join` API are recognizable by the
+						// flake detection logic. This test fails if we use
+						// `CombineErrors`.
+						errors.Join(errors.New("oops"), targetError{errors.New("expected-error")}),
+						nil,
+					),
+				},
+				refError: targetError{errors.New("some error")},
+			},
+			want: true,
+		},
+		{
 			name: "single failure - none of errors or squashedErr contains expected error",
 			args: args{
 				failures: []failure{
@@ -168,11 +179,10 @@ func Test_failuresMatchingError(t *testing.T) {
 }
 
 func Test_failureSpecifyOwnerAndAddFailureCombination(t *testing.T) {
-	ti := testImpl{
-		l: nilLogger(),
-	}
+	ti := testImpl{}
+	ti.ReplaceL(nilLogger())
 	ti.addFailure(0, "", vmPreemptionError("my_VM"))
-	errWithOwnership := failuresSpecifyOwner(ti.failures())
+	errWithOwnership := failuresAsErrorWithOwnership(ti.failures())
 
 	require.NotNil(t, errWithOwnership)
 	require.Equal(t, registry.OwnerTestEng, errWithOwnership.Owner)

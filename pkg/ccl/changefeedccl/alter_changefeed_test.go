@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -35,6 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -65,7 +63,7 @@ func TestAlterChangefeedAddTargetPrivileges(t *testing.T) {
 						if _, ok := s.(*externalConnectionKafkaSink); ok {
 							return s
 						}
-						return &externalConnectionKafkaSink{sink: s}
+						return &externalConnectionKafkaSink{sink: s, ignoreDialError: true}
 					},
 				},
 			},
@@ -121,7 +119,7 @@ func TestAlterChangefeedAddTargetPrivileges(t *testing.T) {
 			row := userDB.QueryRow(t, "CREATE CHANGEFEED for table_a INTO 'external://first'")
 			row.Scan(&jobID)
 			userDB.Exec(t, `PAUSE JOB $1`, jobID)
-			waitForJobStatus(userDB, t, catpb.JobID(jobID), `paused`)
+			waitForJobState(userDB, t, catpb.JobID(jobID), `paused`)
 		})
 
 		// user1 is missing the CHANGEFEED privilege on table_b and table_c.
@@ -173,7 +171,7 @@ func TestAlterChangefeedAddTargetPrivileges(t *testing.T) {
 			row := userDB.QueryRow(t, "CREATE CHANGEFEED for table_a INTO 'kafka://foo'")
 			row.Scan(&jobID)
 			userDB.Exec(t, `PAUSE JOB $1`, jobID)
-			waitForJobStatus(userDB, t, catpb.JobID(jobID), `paused`)
+			waitForJobState(userDB, t, catpb.JobID(jobID), `paused`)
 		})
 
 		// user2 is missing the SELECT privilege on table_b and table_c.
@@ -215,12 +213,12 @@ func TestAlterChangefeedAddTarget(t *testing.T) {
 		require.True(t, ok)
 
 		sqlDB.Exec(t, `PAUSE JOB $1`, feed.JobID())
-		waitForJobStatus(sqlDB, t, feed.JobID(), `paused`)
+		waitForJobState(sqlDB, t, feed.JobID(), `paused`)
 
 		sqlDB.Exec(t, fmt.Sprintf(`ALTER CHANGEFEED %d ADD bar`, feed.JobID()))
 
 		sqlDB.Exec(t, fmt.Sprintf(`RESUME JOB %d`, feed.JobID()))
-		waitForJobStatus(sqlDB, t, feed.JobID(), `running`)
+		waitForJobState(sqlDB, t, feed.JobID(), `running`)
 
 		sqlDB.Exec(t, `INSERT INTO foo VALUES(1)`)
 		assertPayloads(t, testFeed, []string{
@@ -240,6 +238,8 @@ func TestAlterChangefeedAddTargetFamily(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	require.NoError(t, log.SetVModule("helpers_test=1"))
+
 	testFn := func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
 		sqlDB := sqlutils.MakeSQLRunner(s.DB)
 		sqlDB.Exec(t, `CREATE TABLE foo (a INT PRIMARY KEY, b STRING, FAMILY onlya (a), FAMILY onlyb (b))`)
@@ -247,27 +247,44 @@ func TestAlterChangefeedAddTargetFamily(t *testing.T) {
 		testFeed := feed(t, f, `CREATE CHANGEFEED FOR foo FAMILY onlya`)
 		defer closeFeed(t, testFeed)
 
-		sqlDB.Exec(t, `INSERT INTO foo VALUES(1, 'hello')`)
-		assertPayloads(t, testFeed, []string{
-			`foo.onlya: [1]->{"after": {"a": 1}}`,
-		})
-
 		feed, ok := testFeed.(cdctest.EnterpriseTestFeed)
 		require.True(t, ok)
 
+		tsr := sqlDB.QueryRow(t, `INSERT INTO foo VALUES(42, 'hello') RETURNING cluster_logical_timestamp()`)
+		var insertTsDecStr string
+		tsr.Scan(&insertTsDecStr)
+		insertTs := parseTimeToHLC(t, insertTsDecStr)
+		assertPayloads(t, testFeed, []string{
+			`foo.onlya: [42]->{"after": {"a": 42}}`,
+		})
+
+		// Wait for the high water mark (aka resolved ts) to advance past the row we inserted's
+		// mvcc ts. Otherwise, we'd see [42] again due to a catch up scan, and it
+		// would muddy the waters.
+		testutils.SucceedsSoon(t, func() error {
+			registry := s.Server.JobRegistry().(*jobs.Registry)
+			job, err := registry.LoadJob(context.Background(), feed.JobID())
+			require.NoError(t, err)
+			prog := job.Progress()
+			if p := prog.GetHighWater(); p != nil && !p.IsEmpty() && insertTs.Less(*p) {
+				return nil
+			}
+			return errors.New("waiting for highwater")
+		})
+
 		sqlDB.Exec(t, `PAUSE JOB $1`, feed.JobID())
-		waitForJobStatus(sqlDB, t, feed.JobID(), `paused`)
+		waitForJobState(sqlDB, t, feed.JobID(), `paused`)
 
 		sqlDB.Exec(t, fmt.Sprintf(`ALTER CHANGEFEED %d ADD foo FAMILY onlyb`, feed.JobID()))
 
 		sqlDB.Exec(t, fmt.Sprintf(`RESUME JOB %d`, feed.JobID()))
-		waitForJobStatus(sqlDB, t, feed.JobID(), `running`)
-
-		sqlDB.Exec(t, `INSERT INTO foo VALUES(2, 'goodbye')`)
+		waitForJobState(sqlDB, t, feed.JobID(), `running`)
+		sqlDB.Exec(t, `INSERT INTO foo VALUES(37, 'goodbye')`)
 		assertPayloads(t, testFeed, []string{
-			`foo.onlyb: [1]->{"after": {"b": "hello"}}`,
-			`foo.onlya: [2]->{"after": {"a": 2}}`,
-			`foo.onlyb: [2]->{"after": {"b": "goodbye"}}`,
+			// Note that we don't see foo.onlyb.[42] here, because we're not
+			// doing a catchup scan and we've already processed that tuple.
+			`foo.onlya: [37]->{"after": {"a": 37}}`,
+			`foo.onlyb: [37]->{"after": {"b": "goodbye"}}`,
 		})
 	}
 
@@ -279,6 +296,8 @@ func TestAlterChangefeedSwitchFamily(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	require.NoError(t, log.SetVModule("helpers_test=1"))
+
 	testFn := func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
 		sqlDB := sqlutils.MakeSQLRunner(s.DB)
 		sqlDB.Exec(t, `CREATE TABLE foo (a INT PRIMARY KEY, b STRING, FAMILY onlya (a), FAMILY onlyb (b))`)
@@ -286,7 +305,11 @@ func TestAlterChangefeedSwitchFamily(t *testing.T) {
 		testFeed := feed(t, f, `CREATE CHANGEFEED FOR foo FAMILY onlya`)
 		defer closeFeed(t, testFeed)
 
-		sqlDB.Exec(t, `INSERT INTO foo VALUES(1, 'hello')`)
+		tsr := sqlDB.QueryRow(t, `INSERT INTO foo VALUES(1, 'hello') RETURNING cluster_logical_timestamp()`)
+		var insertTsDecStr string
+		tsr.Scan(&insertTsDecStr)
+		insertTs := parseTimeToHLC(t, insertTsDecStr)
+
 		assertPayloads(t, testFeed, []string{
 			`foo.onlya: [1]->{"after": {"a": 1}}`,
 		})
@@ -294,17 +317,32 @@ func TestAlterChangefeedSwitchFamily(t *testing.T) {
 		feed, ok := testFeed.(cdctest.EnterpriseTestFeed)
 		require.True(t, ok)
 
+		// Wait for the high water mark (aka resolved ts) to advance past the row we inserted's
+		// mvcc ts. Otherwise, we'd see [1] again due to a catch up scan, and it
+		// would muddy the waters.
+		testutils.SucceedsSoon(t, func() error {
+			registry := s.Server.JobRegistry().(*jobs.Registry)
+			job, err := registry.LoadJob(context.Background(), feed.JobID())
+			require.NoError(t, err)
+			prog := job.Progress()
+			if p := prog.GetHighWater(); p != nil && !p.IsEmpty() && insertTs.Less(*p) {
+				return nil
+			}
+			return errors.New("waiting for highwater")
+		})
+
 		sqlDB.Exec(t, `PAUSE JOB $1`, feed.JobID())
-		waitForJobStatus(sqlDB, t, feed.JobID(), `paused`)
+		waitForJobState(sqlDB, t, feed.JobID(), `paused`)
 
 		sqlDB.Exec(t, fmt.Sprintf(`ALTER CHANGEFEED %d ADD foo FAMILY onlyb DROP foo FAMILY onlya`, feed.JobID()))
 
 		sqlDB.Exec(t, fmt.Sprintf(`RESUME JOB %d`, feed.JobID()))
-		waitForJobStatus(sqlDB, t, feed.JobID(), `running`)
+		waitForJobState(sqlDB, t, feed.JobID(), `running`)
 
 		sqlDB.Exec(t, `INSERT INTO foo VALUES(2, 'goodbye')`)
 		assertPayloads(t, testFeed, []string{
-			`foo.onlyb: [1]->{"after": {"b": "hello"}}`,
+			// Note that we don't see foo.onlyb.[1] here, because we're not
+			// doing a catchup scan and we've already processed that tuple.
 			`foo.onlyb: [2]->{"after": {"b": "goodbye"}}`,
 		})
 	}
@@ -329,12 +367,12 @@ func TestAlterChangefeedDropTarget(t *testing.T) {
 		require.True(t, ok)
 
 		sqlDB.Exec(t, `PAUSE JOB $1`, feed.JobID())
-		waitForJobStatus(sqlDB, t, feed.JobID(), `paused`)
+		waitForJobState(sqlDB, t, feed.JobID(), `paused`)
 
 		sqlDB.Exec(t, fmt.Sprintf(`ALTER CHANGEFEED %d DROP bar`, feed.JobID()))
 
 		sqlDB.Exec(t, fmt.Sprintf(`RESUME JOB %d`, feed.JobID()))
-		waitForJobStatus(sqlDB, t, feed.JobID(), `running`)
+		waitForJobState(sqlDB, t, feed.JobID(), `running`)
 
 		sqlDB.Exec(t, `INSERT INTO foo VALUES(1)`)
 		assertPayloads(t, testFeed, []string{
@@ -365,12 +403,12 @@ func TestAlterChangefeedDropTargetAfterTableDrop(t *testing.T) {
 
 		// Drop bar table.  This should cause the job to be paused.
 		sqlDB.Exec(t, `DROP TABLE bar`)
-		waitForJobStatus(sqlDB, t, feed.JobID(), `paused`)
+		waitForJobState(sqlDB, t, feed.JobID(), `paused`)
 
 		sqlDB.Exec(t, fmt.Sprintf(`ALTER CHANGEFEED %d DROP bar`, feed.JobID()))
 
 		sqlDB.Exec(t, fmt.Sprintf(`RESUME JOB %d`, feed.JobID()))
-		waitForJobStatus(sqlDB, t, feed.JobID(), `running`)
+		waitForJobState(sqlDB, t, feed.JobID(), `running`)
 
 		sqlDB.Exec(t, `INSERT INTO foo VALUES(1)`)
 		assertPayloads(t, testFeed, []string{
@@ -396,12 +434,12 @@ func TestAlterChangefeedDropTargetFamily(t *testing.T) {
 		require.True(t, ok)
 
 		sqlDB.Exec(t, `PAUSE JOB $1`, feed.JobID())
-		waitForJobStatus(sqlDB, t, feed.JobID(), `paused`)
+		waitForJobState(sqlDB, t, feed.JobID(), `paused`)
 
 		sqlDB.Exec(t, fmt.Sprintf(`ALTER CHANGEFEED %d DROP foo FAMILY onlyb`, feed.JobID()))
 
 		sqlDB.Exec(t, fmt.Sprintf(`RESUME JOB %d`, feed.JobID()))
-		waitForJobStatus(sqlDB, t, feed.JobID(), `running`)
+		waitForJobState(sqlDB, t, feed.JobID(), `running`)
 
 		sqlDB.Exec(t, `INSERT INTO foo VALUES(1, 'hello')`)
 		sqlDB.Exec(t, `INSERT INTO foo VALUES(2, 'goodbye')`)
@@ -430,12 +468,12 @@ func TestAlterChangefeedSetDiffOption(t *testing.T) {
 		require.True(t, ok)
 
 		sqlDB.Exec(t, `PAUSE JOB $1`, feed.JobID())
-		waitForJobStatus(sqlDB, t, feed.JobID(), `paused`)
+		waitForJobState(sqlDB, t, feed.JobID(), `paused`)
 
 		sqlDB.Exec(t, fmt.Sprintf(`ALTER CHANGEFEED %d SET diff`, feed.JobID()))
 
 		sqlDB.Exec(t, fmt.Sprintf(`RESUME JOB %d`, feed.JobID()))
-		waitForJobStatus(sqlDB, t, feed.JobID(), `running`)
+		waitForJobState(sqlDB, t, feed.JobID(), `running`)
 
 		sqlDB.Exec(t, `INSERT INTO foo VALUES (0, 'initial')`)
 		assertPayloads(t, testFeed, []string{
@@ -462,7 +500,7 @@ func TestAlterChangefeedRespectsCDCQuery(t *testing.T) {
 		require.True(t, ok)
 
 		sqlDB.Exec(t, `PAUSE JOB $1`, feed.JobID())
-		waitForJobStatus(sqlDB, t, feed.JobID(), `paused`)
+		waitForJobState(sqlDB, t, feed.JobID(), `paused`)
 
 		sqlDB.Exec(t, fmt.Sprintf(`ALTER CHANGEFEED %d SET diff`, feed.JobID()))
 		registry := s.Server.JobRegistry().(*jobs.Registry)
@@ -503,12 +541,12 @@ func TestAlterChangefeedUnsetDiffOption(t *testing.T) {
 		require.True(t, ok)
 
 		sqlDB.Exec(t, `PAUSE JOB $1`, feed.JobID())
-		waitForJobStatus(sqlDB, t, feed.JobID(), `paused`)
+		waitForJobState(sqlDB, t, feed.JobID(), `paused`)
 
 		sqlDB.Exec(t, fmt.Sprintf(`ALTER CHANGEFEED %d UNSET diff`, feed.JobID()))
 
 		sqlDB.Exec(t, fmt.Sprintf(`RESUME JOB %d`, feed.JobID()))
-		waitForJobStatus(sqlDB, t, feed.JobID(), `running`)
+		waitForJobState(sqlDB, t, feed.JobID(), `running`)
 
 		sqlDB.Exec(t, `INSERT INTO foo VALUES (0, 'initial')`)
 		assertPayloads(t, testFeed, []string{
@@ -553,7 +591,7 @@ func TestAlterChangefeedErrors(t *testing.T) {
 		)
 
 		sqlDB.Exec(t, `PAUSE JOB $1`, feed.JobID())
-		waitForJobStatus(sqlDB, t, feed.JobID(), `paused`)
+		waitForJobState(sqlDB, t, feed.JobID(), `paused`)
 
 		sqlDB.ExpectErr(t,
 			`pq: target "TABLE baz" does not exist`,
@@ -632,7 +670,7 @@ func TestAlterChangefeedDropAllTargetsError(t *testing.T) {
 		require.True(t, ok)
 
 		sqlDB.Exec(t, `PAUSE JOB $1`, feed.JobID())
-		waitForJobStatus(sqlDB, t, feed.JobID(), `paused`)
+		waitForJobState(sqlDB, t, feed.JobID(), `paused`)
 
 		sqlDB.ExpectErr(t,
 			`cannot drop all targets`,
@@ -747,12 +785,12 @@ func TestAlterChangefeedPersistSinkURI(t *testing.T) {
 	sqlDB.QueryRow(t, `CREATE CHANGEFEED FOR TABLE foo, bar INTO $1`, unredactedSinkURI).Scan(&changefeedID)
 
 	sqlDB.Exec(t, `PAUSE JOB $1`, changefeedID)
-	waitForJobStatus(sqlDB, t, changefeedID, `paused`)
+	waitForJobState(sqlDB, t, changefeedID, `paused`)
 
 	sqlDB.Exec(t, fmt.Sprintf(`ALTER CHANGEFEED %d SET diff`, changefeedID))
 
 	sqlDB.Exec(t, fmt.Sprintf(`RESUME JOB %d`, changefeedID))
-	waitForJobStatus(sqlDB, t, changefeedID, `running`)
+	waitForJobState(sqlDB, t, changefeedID, `running`)
 
 	job, err := registry.LoadJob(ctx, changefeedID)
 	require.NoError(t, err)
@@ -778,7 +816,7 @@ func TestAlterChangefeedChangeSinkTypeError(t *testing.T) {
 		require.True(t, ok)
 
 		sqlDB.Exec(t, `PAUSE JOB $1`, feed.JobID())
-		waitForJobStatus(sqlDB, t, feed.JobID(), `paused`)
+		waitForJobState(sqlDB, t, feed.JobID(), `paused`)
 
 		sqlDB.ExpectErr(t,
 			`pq: New sink type "null" does not match original sink type "kafka". Altering the sink type of a changefeed is disallowed, consider creating a new changefeed instead.`,
@@ -807,14 +845,14 @@ func TestAlterChangefeedChangeSinkURI(t *testing.T) {
 		require.True(t, ok)
 
 		sqlDB.Exec(t, `PAUSE JOB $1`, feed.JobID())
-		waitForJobStatus(sqlDB, t, feed.JobID(), `paused`)
+		waitForJobState(sqlDB, t, feed.JobID(), `paused`)
 
 		newSinkURI := `kafka://new_kafka_uri`
 
 		sqlDB.Exec(t, fmt.Sprintf(`ALTER CHANGEFEED %d SET sink = '%s'`, feed.JobID(), newSinkURI))
 
 		sqlDB.Exec(t, fmt.Sprintf(`RESUME JOB %d`, feed.JobID()))
-		waitForJobStatus(sqlDB, t, feed.JobID(), `running`)
+		waitForJobState(sqlDB, t, feed.JobID(), `running`)
 
 		job, err := registry.LoadJob(ctx, feed.JobID())
 		require.NoError(t, err)
@@ -875,7 +913,7 @@ func TestAlterChangefeedAddTargetErrors(t *testing.T) {
 		require.True(t, ok)
 
 		require.NoError(t, feed.Pause())
-		waitForJobStatus(sqlDB, t, feed.JobID(), `paused`)
+		waitForJobState(sqlDB, t, feed.JobID(), `paused`)
 
 		sqlDB.Exec(t, `CREATE TABLE bar (a INT PRIMARY KEY)`)
 		sqlDB.Exec(t, `INSERT INTO bar VALUES (1), (2), (3)`)
@@ -904,7 +942,7 @@ func TestAlterChangefeedAddTargetErrors(t *testing.T) {
 		})
 
 		require.NoError(t, feed.Pause())
-		waitForJobStatus(sqlDB, t, feed.JobID(), `paused`)
+		waitForJobState(sqlDB, t, feed.JobID(), `paused`)
 
 		sqlDB.Exec(t, `CREATE TABLE baz (a INT PRIMARY KEY)`)
 		sqlDB.Exec(t, `INSERT INTO baz VALUES (1), (2), (3)`)
@@ -1218,11 +1256,11 @@ func TestAlterChangefeedAddTargetsDuringSchemaChangeError(t *testing.T) {
 
 		var maxCheckpointSize int64 = 100 << 20
 		// Ensure that checkpoints happen every time by setting a large checkpoint size.
-		// Because setting 0 for the FrontierCheckpointFrequency disables checkpointing,
+		// Because setting 0 for the SpanCheckpointInterval disables checkpointing,
 		// setting 1 nanosecond is the smallest possible value.
-		changefeedbase.FrontierCheckpointFrequency.Override(
+		changefeedbase.SpanCheckpointInterval.Override(
 			context.Background(), &s.Server.ClusterSettings().SV, 1*time.Nanosecond)
-		changefeedbase.FrontierCheckpointMaxBytes.Override(
+		changefeedbase.SpanCheckpointMaxBytes.Override(
 			context.Background(), &s.Server.ClusterSettings().SV, maxCheckpointSize)
 
 		// Note the tableSpan to avoid resolved events that leave no gaps
@@ -1302,7 +1340,7 @@ func TestAlterChangefeedAddTargetsDuringSchemaChangeError(t *testing.T) {
 		})
 
 		require.NoError(t, jobFeed.Pause())
-		waitForJobStatus(sqlDB, t, jobFeed.JobID(), `paused`)
+		waitForJobState(sqlDB, t, jobFeed.JobID(), `paused`)
 
 		errMsg := fmt.Sprintf(
 			`pq: cannot perform initial scan on newly added targets while the checkpoint is non-empty, please unpause the changefeed and wait until the high watermark progresses past the current value %s to add these targets.`,
@@ -1318,6 +1356,7 @@ func TestAlterChangefeedAddTargetsDuringSchemaChangeError(t *testing.T) {
 func TestAlterChangefeedAddTargetsDuringBackfill(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	skip.WithIssue(t, 141463)
 
 	var rndMu struct {
 		syncutil.Mutex
@@ -1384,9 +1423,9 @@ func TestAlterChangefeedAddTargetsDuringBackfill(t *testing.T) {
 		}
 
 		// Checkpoint progress frequently, and set the checkpoint size limit.
-		changefeedbase.FrontierCheckpointFrequency.Override(
+		changefeedbase.SpanCheckpointInterval.Override(
 			context.Background(), &s.Server.ClusterSettings().SV, 1)
-		changefeedbase.FrontierCheckpointMaxBytes.Override(
+		changefeedbase.SpanCheckpointMaxBytes.Override(
 			context.Background(), &s.Server.ClusterSettings().SV, maxCheckpointSize)
 
 		registry := s.Server.JobRegistry().(*jobs.Registry)
@@ -1401,7 +1440,7 @@ func TestAlterChangefeedAddTargetsDuringBackfill(t *testing.T) {
 				expectedValues[j] = fmt.Sprintf(`foo: [%d]->{"after": {"val": %d}}`, j, j)
 				expectedValues[j+numRowsPerTable] = fmt.Sprintf(`bar: [%d]->{"after": {"val": %d}}`, j, j)
 			}
-			return assertPayloadsBaseErr(context.Background(), testFeed, expectedValues, false, false)
+			return assertPayloadsBaseErr(context.Background(), testFeed, expectedValues, false, false, changefeedbase.OptEnvelopeWrapped)
 		})
 
 		defer func() {
@@ -1481,12 +1520,12 @@ func TestAlterChangefeedInitialScan(t *testing.T) {
 			require.True(t, ok)
 
 			sqlDB.Exec(t, `PAUSE JOB $1`, feed.JobID())
-			waitForJobStatus(sqlDB, t, feed.JobID(), `paused`)
+			waitForJobState(sqlDB, t, feed.JobID(), `paused`)
 
 			sqlDB.Exec(t, fmt.Sprintf(`ALTER CHANGEFEED %d ADD bar WITH %s`, feed.JobID(), initialScanOption))
 
 			sqlDB.Exec(t, fmt.Sprintf(`RESUME JOB %d`, feed.JobID()))
-			waitForJobStatus(sqlDB, t, feed.JobID(), `running`)
+			waitForJobState(sqlDB, t, feed.JobID(), `running`)
 
 			expectPayloads := (initialScanOption == "initial_scan = 'yes'" || initialScanOption == "initial_scan")
 			if expectPayloads {
@@ -1550,7 +1589,7 @@ func TestAlterChangefeedWithOldCursorFromCreateChangefeed(t *testing.T) {
 		})
 
 		sqlDB.Exec(t, `PAUSE JOB $1`, castedFeed.JobID())
-		waitForJobStatus(sqlDB, t, castedFeed.JobID(), `paused`)
+		waitForJobState(sqlDB, t, castedFeed.JobID(), `paused`)
 
 		sqlDB.Exec(t, `INSERT INTO foo VALUES (2, 'after')`)
 
@@ -1568,7 +1607,7 @@ func TestAlterChangefeedWithOldCursorFromCreateChangefeed(t *testing.T) {
 		sqlDB.Exec(t, fmt.Sprintf(`ALTER CHANGEFEED %d UNSET resolved`, castedFeed.JobID()))
 
 		sqlDB.Exec(t, fmt.Sprintf(`RESUME JOB %d`, castedFeed.JobID()))
-		waitForJobStatus(sqlDB, t, castedFeed.JobID(), `running`)
+		waitForJobState(sqlDB, t, castedFeed.JobID(), `running`)
 
 		assertPayloads(t, testFeed, []string{
 			`foo: [2]->{"after": {"a": 2, "b": "after"}}`,
@@ -1605,7 +1644,7 @@ func TestAlterChangefeedAccessControl(t *testing.T) {
 			currentFeed, closeCf = createFeed(`CREATE CHANGEFEED FOR table_a, table_b`)
 		})
 		rootDB.Exec(t, "PAUSE job $1", currentFeed.JobID())
-		waitForJobStatus(rootDB, t, currentFeed.JobID(), `paused`)
+		waitForJobState(rootDB, t, currentFeed.JobID(), `paused`)
 
 		// Verify who can modify the existing changefeed.
 		asUser(t, f, `userWithAllGrants`, func(userDB *sqlutils.SQLRunner) {
@@ -1632,8 +1671,8 @@ func TestAlterChangefeedAccessControl(t *testing.T) {
 		})
 		asUser(t, f, `otherAdminUser`, func(userDB *sqlutils.SQLRunner) {
 			userDB.Exec(t, "PAUSE job $1", currentFeed.JobID())
-			require.NoError(t, currentFeed.WaitForStatus(func(s jobs.Status) bool {
-				return s == jobs.StatusPaused
+			require.NoError(t, currentFeed.WaitForState(func(s jobs.State) bool {
+				return s == jobs.StatePaused
 			}))
 		})
 		asUser(t, f, `userWithAllGrants`, func(userDB *sqlutils.SQLRunner) {

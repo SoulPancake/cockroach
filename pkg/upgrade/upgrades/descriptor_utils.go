@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package upgrades
 
@@ -39,7 +34,7 @@ func createSystemTable(
 	tableLocality tree.LocalityLevel,
 ) error {
 	return db.DescsTxn(ctx, func(ctx context.Context, txn descs.Txn) error {
-		dbDesc, err := txn.Descriptors().ByID(txn.KV()).Get().Database(ctx, keys.SystemDatabaseID)
+		dbDesc, err := txn.Descriptors().ByIDWithoutLeased(txn.KV()).Get().Database(ctx, keys.SystemDatabaseID)
 		if err != nil {
 			return err
 		}
@@ -104,7 +99,7 @@ func CreateSystemTableInTxn(
 	b.CPut(tKey, desc.GetID(), nil)
 	b.CPut(catalogkeys.MakeDescMetadataKey(codec, desc.GetID()), desc.DescriptorProto(), nil)
 	if desc.IsSequence() {
-		b.InitPut(codec.SequenceKey(uint32(desc.GetID())), desc.GetSequenceOpts().Start, false /* failOnTombstones */)
+		b.CPut(codec.SequenceKey(uint32(desc.GetID())), desc.GetSequenceOpts().Start, nil /* expValue */)
 	}
 	if err := txn.Run(ctx, b); err != nil {
 		return descpb.InvalidID, false, err

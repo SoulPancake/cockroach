@@ -1,18 +1,8 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import Long from "long";
-import moment from "moment-timezone";
-import React from "react";
-import { connect } from "react-redux";
-import { createSelector } from "reselect";
 import {
   util,
   TimeWindow,
@@ -21,17 +11,29 @@ import {
   defaultTimeScaleOptions,
 } from "@cockroachlabs/cluster-ui";
 import { History } from "history";
-import isNil from "lodash/isNil";
-import map from "lodash/map";
 import isEqual from "lodash/isEqual";
+import isNil from "lodash/isNil";
 import isObject from "lodash/isObject";
+import map from "lodash/map";
+import Long from "long";
+import moment from "moment-timezone";
+import React from "react";
+import { connect } from "react-redux";
+import { createSelector } from "reselect";
 
+import { PayloadAction } from "src/interfaces/action";
 import * as protos from "src/js/protos";
+import { refreshSettings } from "src/redux/apiReducers";
+import {
+  selectResolution10sStorageTTL,
+  selectResolution30mStorageTTL,
+} from "src/redux/clusterSettings";
 import {
   MetricsQuery,
   requestMetrics as requestMetricsAction,
 } from "src/redux/metrics";
 import { AdminUIState } from "src/redux/state";
+import { adjustTimeScale, selectMetricsTime } from "src/redux/timeScale";
 import { findChildrenOfType } from "src/util/find";
 import {
   Metric,
@@ -39,14 +41,6 @@ import {
   MetricsDataComponentProps,
   QueryTimeInfo,
 } from "src/views/shared/components/metricQuery";
-import { PayloadAction } from "src/interfaces/action";
-import { refreshSettings } from "src/redux/apiReducers";
-import { adjustTimeScale, selectMetricsTime } from "src/redux/timeScale";
-import {
-  selectResolution10sStorageTTL,
-  selectResolution30mStorageTTL,
-} from "src/redux/clusterSettings";
-
 
 /**
  * queryFromProps is a helper method which generates a TimeSeries Query data

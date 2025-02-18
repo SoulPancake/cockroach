@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package invertedidx
 
@@ -75,6 +70,12 @@ func (t *trigramFilterPlanner) extractInvertedFilterConditionFromLeaf(
 		// Do not generate legacy inverted constraints for similarity filters
 		// if the text similarity optimization is enabled.
 		if evalCtx.SessionData().OptimizerUseTrigramSimilarityOptimization {
+			return inverted.NonInvertedColExpression{}, expr, nil
+		}
+
+		// Do not plan inverted index scans when the trigram similarity threshold is 0
+		// because all strings will be matched.
+		if evalCtx.SessionData().TrigramSimilarityThreshold == 0 {
 			return inverted.NonInvertedColExpression{}, expr, nil
 		}
 		// If we're doing a % expression (similarity threshold), we need to

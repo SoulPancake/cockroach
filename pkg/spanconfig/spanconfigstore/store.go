@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package spanconfigstore exposes utilities for storing and retrieving
 // SpanConfigs associated with a single span.
@@ -183,9 +178,19 @@ func (s *Store) getFallbackConfig() roachpb.SpanConfig {
 
 // Apply is part of the spanconfig.StoreWriter interface.
 func (s *Store) Apply(
-	ctx context.Context, dryrun bool, updates ...spanconfig.Update,
+	ctx context.Context, updates ...spanconfig.Update,
 ) (deleted []spanconfig.Target, added []spanconfig.Record) {
-	deleted, added, err := s.applyInternal(ctx, dryrun, updates...)
+
+	// Log the potential span config changes.
+	for _, update := range updates {
+		err := s.maybeLogUpdate(ctx, &update)
+		if err != nil {
+			log.KvDistribution.Warningf(ctx, "attempted to log a spanconfig update to "+
+				"target:%+v, but got the following error:%+v", update.GetTarget(), err)
+		}
+	}
+
+	deleted, added, err := s.applyInternal(ctx, updates...)
 	if err != nil {
 		log.Fatalf(ctx, "%v", err)
 	}
@@ -243,7 +248,7 @@ func (s *Store) Clone() *Store {
 }
 
 func (s *Store) applyInternal(
-	ctx context.Context, dryrun bool, updates ...spanconfig.Update,
+	ctx context.Context, updates ...spanconfig.Update,
 ) (deleted []spanconfig.Target, added []spanconfig.Record, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -263,7 +268,7 @@ func (s *Store) applyInternal(
 			return nil, nil, errors.AssertionFailedf("unknown target type")
 		}
 	}
-	deletedSpans, addedEntries, err := s.mu.spanConfigStore.apply(ctx, dryrun, spanStoreUpdates...)
+	deletedSpans, addedEntries, err := s.mu.spanConfigStore.apply(ctx, spanStoreUpdates...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -314,4 +319,51 @@ func (s *Store) Iterate(f func(spanconfig.Record) error) error {
 			}
 			return f(record)
 		})
+}
+
+// maybeLogUpdate logs the SpanConfig changes to the distribution channel. It
+// also logs changes to the span boundaries. It doesn't log the changes to the
+// SpanConfig for high churn fields like protected timestamps.
+func (s *Store) maybeLogUpdate(ctx context.Context, update *spanconfig.Update) error {
+	nextSC := update.GetConfig()
+	target := update.GetTarget()
+
+	// Return early from SystemTarget updates because they correspond to PTS
+	// updates.
+	if !target.IsSpanTarget() {
+		return nil
+	}
+
+	rKey, err := keys.Addr(target.GetSpan().Key)
+	if err != nil {
+		return err
+	}
+
+	var curSpanConfig roachpb.SpanConfig
+	var curSpan roachpb.Span
+	var found bool
+	func() {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		curSpanConfig, curSpan, found = s.mu.spanConfigStore.getSpanConfigForKey(ctx, rKey)
+	}()
+
+	// Check if the span bounds have changed.
+	if found &&
+		(!curSpan.Key.Equal(target.GetSpan().Key) ||
+			!curSpan.EndKey.Equal(target.GetSpan().EndKey)) {
+		log.KvDistribution.Infof(ctx,
+			"changing the span boundaries for span:%+v from:[%+v:%+v) to:[%+v:%+v) "+
+				"with config: %+v", target, curSpan.Key, curSpan.EndKey, target.GetSpan().Key,
+			target.GetSpan().EndKey, nextSC)
+	}
+
+	// Log if there is a SpanConfig change in any field other than
+	// ProtectedTimestamps to avoid logging PTS updates.
+	if log.V(2) || (found && curSpanConfig.HasConfigurationChange(nextSC)) {
+		log.KvDistribution.Infof(ctx,
+			"changing the spanconfig for span:%+v from:%+v to:%+v",
+			target, curSpanConfig, nextSC)
+	}
+	return nil
 }

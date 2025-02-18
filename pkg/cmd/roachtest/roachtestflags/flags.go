@@ -1,28 +1,25 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package roachtestflags
 
 import (
+	"fmt"
 	"os"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
+	"github.com/cockroachdb/cockroach/pkg/roachprod/vm"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/spf13/pflag"
 )
 
 // This block defines all roachtest flags (for the list and run/bench commands).
 var (
-	Cloud string = spec.GCE
-	_            = registerListFlag(&Cloud, FlagInfo{
+	Cloud spec.Cloud = spec.GCE
+	_                = registerListFlag(&Cloud, FlagInfo{
 		Name: "cloud",
 		Usage: `List only tests compatible with the given cloud ("local", "gce",
 		        "aws", "azure", or "all")`,
@@ -91,7 +88,13 @@ var (
 	SelectiveTests = false
 	_              = registerRunFlag(&SelectiveTests, FlagInfo{
 		Name:  "selective-tests",
-		Usage: `Use selective tests to run based on previous test execution. this is considered only if the select-probability is 1.0`,
+		Usage: `Use selective tests to run based on previous test execution. Incompatible with --select-probability`,
+	})
+
+	SuccessfulTestsSelectPct = 0.35
+	_                        = registerRunFlag(&SuccessfulTestsSelectPct, FlagInfo{
+		Name:  "successful-test-select-pct",
+		Usage: `The percent of test that should be selected from the tests that have been running successfully as per test selection. Default is 0.35`,
 	})
 
 	Username string = os.Getenv("ROACHPROD_USER")
@@ -109,10 +112,12 @@ var (
 		Usage: `Absolute path to cockroach binary to use`,
 	})
 
-	CockroachBinaryPath string = "cockroach"
-	_                          = registerRunOpsFlag(&CockroachBinaryPath, FlagInfo{
-		Name:  "cockroach-binary",
-		Usage: `Relative path to cockroach binary to use, on the cluster specified in --cluster`,
+	ConfigPath string
+	_          = registerRunOpsFlag(&ConfigPath, FlagInfo{
+		Name: "config",
+		Usage: `Path to a YAML config file containing the state of the cluster.
+						Used by operations to determine cluster settings, start options,
+						and the cluster spec.`,
 	})
 
 	CertsDir string
@@ -181,6 +186,15 @@ var (
 		Usage: `
 			Probability that clusters will be created with 'arm64' CPU architecture
 			for tests that support 'arm64' (default 0)`,
+	})
+
+	CockroachEAProbability float64 = defaultCockroachEAProbability
+	_                              = registerRunFlag(&CockroachEAProbability, FlagInfo{
+		Name: "metamorphic-cockroach-ea-probability",
+		Usage: `
+			Probability that tests will be run with assertions enabled. A cockroach
+      binary built with the --crdb_test flag must be passed to --cockroach-ea
+      for assertions to be enabled.`,
 	})
 
 	// ArtifactsDir is a path to a local dir where the test logs and artifacts
@@ -252,6 +266,13 @@ var (
 			binary)`,
 	})
 
+	ForceCpuProfile bool
+	_               = registerRunFlag(&ForceCpuProfile, FlagInfo{
+		Name: "force-cpu-profile",
+		Usage: `
+                        Enable unconditional collection of CPU profiles`,
+	})
+
 	Parallelism int = 10
 	_               = registerRunFlag(&Parallelism, FlagInfo{
 		Name:  "parallelism",
@@ -301,10 +322,88 @@ var (
 		Usage: `The port on which to serve the HTTP interface`,
 	})
 
-	DogstatsdAddr string = ""
-	_                    = registerRunOpsFlag(&DogstatsdAddr, FlagInfo{
-		Name:  "dogstatsd-addr",
-		Usage: `The address to which to connect to dogstatsd, to send Datadog events.`,
+	ExportOpenmetrics bool = false
+	_                      = registerRunFlag(&ExportOpenmetrics, FlagInfo{
+		Name:  "export-openmetrics",
+		Usage: `flag to denote if roachtest should export openmetrics file for performance metrics.`,
+	})
+
+	OpenmetricsLabels string = ""
+	_                        = registerRunFlag(&OpenmetricsLabels, FlagInfo{
+		Name:  "openmetrics-labels",
+		Usage: `flag to pass custom labels to pass to openmetrics for performance metrics,`,
+	})
+
+	DatadogSite string = "us5.datadoghq.com"
+	_                  = registerRunOpsFlag(&DatadogSite, FlagInfo{
+		Name:  "datadog-site",
+		Usage: `Datadog site to communicate with (e.g., us5.datadoghq.com).`,
+	})
+
+	DatadogAPIKey string = ""
+	_                    = registerRunOpsFlag(&DatadogAPIKey, FlagInfo{
+		Name:  "datadog-api-key",
+		Usage: `Datadog API key to emit telemetry data to Datadog.`,
+	})
+
+	DatadogApplicationKey string = ""
+	_                            = registerRunOpsFlag(&DatadogApplicationKey, FlagInfo{
+		Name:  "datadog-app-key",
+		Usage: `Datadog application key to read telemetry data from Datadog.`,
+	})
+
+	DatadogTags string = ""
+	_                  = registerRunOpsFlag(&DatadogTags, FlagInfo{
+		Name:  "datadog-tags",
+		Usage: `A comma-separated list of tags to attach to telemetry data (e.g., key1:val1,key2:val2).`,
+	})
+
+	DBName string = ""
+	_             = registerRunOpsFlag(&DBName, FlagInfo{
+		Name: "db",
+		Usage: "Specify the name of the database to run the operation against (e.g., tpcc, tpch). If the given database " +
+			"does not exist, the operation fails. If not provided, a random database is selected, excluding system-created databases",
+	})
+
+	TableName string = ""
+	_                = registerRunOpsFlag(&TableName, FlagInfo{
+		Name: "db-table",
+		Usage: "Specifies the name of the database table to run the operation against, using the database provided in the --db flag. " +
+			"If the table does not exist, the operation fails. If not provided, a random table is selected.",
+	})
+
+	OperationParallelism int = 1
+	_                        = registerRunOpsFlag(&OperationParallelism, FlagInfo{
+		Name:  "parallelism",
+		Usage: fmt.Sprintf("Number of operations to run in parallel, max value is %d", MaxOperationParallelism),
+	})
+
+	WaitBeforeNextExecution time.Duration = 15 * time.Minute
+	_                                     = registerRunOpsFlag(&WaitBeforeNextExecution, FlagInfo{
+		Name:  "wait-before-next-execution",
+		Usage: "Interval to wait before the operation next execution after the previous run.",
+	})
+
+	RunForever bool = false
+	_               = registerRunOpsFlag(&RunForever, FlagInfo{
+		Name:  "run-forever",
+		Usage: "Execute operations indefinitely until the command is terminated, (default false).",
+	})
+
+	WorkloadCluster string = ""
+	_                      = registerRunOpsFlag(&WorkloadCluster, FlagInfo{
+		Name: "workload-cluster",
+		Usage: "Specify the name of the workload cluster. The workload cluster is the one running operations and " +
+			"workloads, such as TPC-C, on the cluster",
+	})
+
+	SideEyeApiToken string = ""
+	_                      = registerRunFlag(&SideEyeApiToken, FlagInfo{
+		Name: "side-eye-token",
+		Usage: `The API token to use for configuring the Side-Eye agents running on the
+						created clusters. If empty, the Side-Eye agents will not be started.
+						When set, app.side-eye.io can be used to monitor running clusters and also
+						timing out tests will get a snapshot before their clusters are destroyed.`,
 	})
 
 	PreferLocalSSD bool = true
@@ -320,7 +419,7 @@ var (
 			List of <version>=<path to cockroach binary>. If a certain version <ver>
 			is present in the list, the respective binary will be used when a
 			mixed-version test asks for the respective binary, instead of roachprod
-			stage <ver>. Example: 20.1.4=cockroach-20.1,20.2.0=cockroach-20.2.`,
+			stage <ver>. Example: v20.1.4=cockroach-20.1,v20.2.0=cockroach-20.2.`,
 	})
 
 	SlackToken string
@@ -359,8 +458,8 @@ var (
 	_                         = registerRunFlag(&SelectProbability, FlagInfo{
 		Name: "select-probability",
 		Usage: `
-			The probability of a matched test being selected to run. Note: this will
-			run at least one test per prefix.`,
+			The probability of a matched test being selected to run. Incompatible with --selective-tests.
+			Note: this will run at least one test per prefix.`,
 	})
 
 	UseSpotVM = NeverUseSpot
@@ -390,6 +489,14 @@ var (
 						Clear the local cluster cache of missing clusters when syncing resources with
 						providers. Set this to false when running many concurrent Azure tests. Azure
 						can return stale VM information when many PUT calls are made in succession.`,
+	})
+
+	AlwaysCollectArtifacts bool = false
+	_                           = registerRunFlag(&AlwaysCollectArtifacts, FlagInfo{
+		Name: "always-collect-artifacts",
+		Usage: `
+						Always collect artifacts during test teardown, even if the test did not
+						time out or fail.`,
 	})
 )
 
@@ -444,12 +551,14 @@ var (
 )
 
 const (
-	defaultEncryptionProbability = 1
-	defaultFIPSProbability       = 0
-	defaultARM64Probability      = 0
-	NeverUseSpot                 = "never"
-	AlwaysUseSpot                = "always"
-	AutoUseSpot                  = "auto"
+	defaultEncryptionProbability  = 1
+	defaultFIPSProbability        = 0
+	defaultARM64Probability       = 0
+	defaultCockroachEAProbability = 0
+	NeverUseSpot                  = "never"
+	AlwaysUseSpot                 = "always"
+	AutoUseSpot                   = "auto"
+	MaxOperationParallelism       = 10
 )
 
 // FlagInfo contains the name and usage of a flag. Used to make the code
@@ -482,6 +591,9 @@ func AddListFlags(cmdFlags *pflag.FlagSet) {
 // command flag set.
 func AddRunFlags(cmdFlags *pflag.FlagSet) {
 	globalMan.AddFlagsToCommand(runCmdID, cmdFlags)
+	for _, provider := range vm.Providers {
+		provider.ConfigureProviderFlags(cmdFlags, vm.SingleProject)
+	}
 }
 
 // AddRunOpsFlags adds all flags registered for the run-operations command to

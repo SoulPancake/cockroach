@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -86,7 +83,7 @@ func setupWebhookSinkWithDetails(
 	if err != nil {
 		return nil, err
 	}
-	sinkSrc, err := makeWebhookSink(ctx, sinkURL{URL: u}, encodingOpts, sinkOpts, parallelism, nilPacerFactory, source, nilMetricsRecorderBuilder, cluster.MakeClusterSettings())
+	sinkSrc, err := makeWebhookSink(ctx, &changefeedbase.SinkURL{URL: u}, encodingOpts, sinkOpts, parallelism, nilPacerFactory, source, nilMetricsRecorderBuilder, cluster.MakeClusterSettings())
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +128,7 @@ func testSendAndReceiveRows(t *testing.T, sinkSrc Sink, sinkDest *cdctest.MockWe
 
 	opts, err := getGenericWebhookSinkOptions().GetEncodingOptions()
 	require.NoError(t, err)
-	enc, err := makeJSONEncoder(ctx, jsonEncoderOptions{EncodingOptions: opts})
+	enc, err := makeJSONEncoder(ctx, jsonEncoderOptions{EncodingOptions: opts}, getTestingEnrichedSourceProvider(opts))
 	require.NoError(t, err)
 
 	// test a resolved timestamp entry

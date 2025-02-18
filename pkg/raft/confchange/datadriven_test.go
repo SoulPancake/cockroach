@@ -1,5 +1,5 @@
-// This code has been modified from its original form by Cockroach Labs, Inc.
-// All modifications are Copyright 2024 Cockroach Labs, Inc.
+// This code has been modified from its original form by The Cockroach Authors.
+// All modifications are Copyright 2024 The Cockroach Authors.
 //
 // Copyright 2019 The etcd Authors
 //
@@ -18,23 +18,26 @@
 package confchange
 
 import (
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/raft/quorum"
 	pb "github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/raft/tracker"
 	"github.com/cockroachdb/datadriven"
+	"github.com/cockroachdb/errors"
 )
 
 func TestConfChangeDataDriven(t *testing.T) {
 	datadriven.Walk(t, "testdata", func(t *testing.T, path string) {
-		tr := tracker.MakeProgressTracker(10, 0)
 		c := Changer{
-			Tracker:   tr,
-			LastIndex: 0, // incremented in this test with each cmd
+			Config:           quorum.MakeEmptyConfig(),
+			ProgressMap:      tracker.MakeEmptyProgressMap(),
+			MaxInflight:      10,
+			MaxInflightBytes: 0,
+			LastIndex:        0, // incremented in this test with each cmd
 		}
 
 		// The test files use the commands
@@ -81,23 +84,23 @@ func TestConfChangeDataDriven(t *testing.T) {
 				ccs = append(ccs, cc)
 			}
 
-			var cfg tracker.Config
-			var trk tracker.ProgressMap
+			var cfg quorum.Config
+			var progressMap tracker.ProgressMap
 			var err error
 			switch d.Cmd {
 			case "simple":
-				cfg, trk, err = c.Simple(ccs...)
+				cfg, progressMap, err = c.Simple(ccs...)
 			case "enter-joint":
 				var autoLeave bool
 				if len(d.CmdArgs) > 0 {
 					d.ScanArgs(t, "autoleave", &autoLeave)
 				}
-				cfg, trk, err = c.EnterJoint(autoLeave, ccs...)
+				cfg, progressMap, err = c.EnterJoint(autoLeave, ccs...)
 			case "leave-joint":
 				if len(ccs) > 0 {
 					err = errors.New("this command takes no input")
 				} else {
-					cfg, trk, err = c.LeaveJoint()
+					cfg, progressMap, err = c.LeaveJoint()
 				}
 			default:
 				return "unknown command"
@@ -105,8 +108,8 @@ func TestConfChangeDataDriven(t *testing.T) {
 			if err != nil {
 				return err.Error() + "\n"
 			}
-			c.Tracker.Config, c.Tracker.Progress = cfg, trk
-			return fmt.Sprintf("%s\n%s", c.Tracker.Config, c.Tracker.Progress)
+			c.Config, c.ProgressMap = cfg, progressMap
+			return fmt.Sprintf("%s\n%s", c.Config, c.ProgressMap)
 		})
 	})
 }

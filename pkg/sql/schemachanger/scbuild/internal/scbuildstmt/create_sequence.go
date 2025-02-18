@@ -1,18 +1,12 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scbuildstmt
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/build"
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -31,6 +25,12 @@ import (
 )
 
 func CreateSequence(b BuildCtx, n *tree.CreateSequence) {
+	doCreateSequence(b, n)
+}
+
+// doCreateSequence creates a sequence and returns the sequence element that
+// has been created.
+func doCreateSequence(b BuildCtx, n *tree.CreateSequence) *scpb.Sequence {
 	dbElts, scElts := b.ResolveTargetObject(n.Name.ToUnresolvedObjectName(), privilege.CREATE)
 	_, _, schemaElem := scpb.FindSchema(scElts)
 	_, _, dbElem := scpb.FindDatabase(dbElts)
@@ -52,7 +52,7 @@ func CreateSequence(b BuildCtx, n *tree.CreateSequence) {
 		})
 	if ers != nil && !ers.IsEmpty() {
 		if n.IfNotExists {
-			return
+			return nil
 		}
 		panic(sqlerrors.NewRelationAlreadyExistsError(n.Name.FQString()))
 	}
@@ -93,10 +93,6 @@ func CreateSequence(b BuildCtx, n *tree.CreateSequence) {
 		}
 		if opt.Name == tree.SeqOptRestart {
 			restartWith = opt.IntVal
-		}
-		if opt.Name == tree.SeqOptCacheNode && !b.EvalCtx().Settings.Version.IsActive(b, clusterversion.V24_1) {
-			panic(scerrors.NotImplementedErrorf(n, "node-level sequence caching unsupported"+
-				"before V24.1"))
 		}
 	}
 	// If the database is multi-region then CREATE SEQUENCE will fallback.
@@ -167,8 +163,8 @@ func CreateSequence(b BuildCtx, n *tree.CreateSequence) {
 	b.Add(&scpb.ColumnType{
 		TableID:                 sequenceID,
 		ColumnID:                tabledesc.SequenceColumnID,
-		TypeT:                   scpb.TypeT{Type: types.Int},
-		ElementCreationMetadata: &scpb.ElementCreationMetadata{In_23_1OrLater: true},
+		TypeT:                   newTypeT(types.Int),
+		ElementCreationMetadata: scdecomp.NewElementCreationMetadata(b.EvalCtx().Settings.Version.ActiveVersion(b)),
 	})
 	b.Add(&scpb.ColumnNotNull{
 		TableID:  sequenceID,
@@ -209,6 +205,7 @@ func CreateSequence(b BuildCtx, n *tree.CreateSequence) {
 	}
 	// Log the creation of this sequence.
 	b.LogEventForExistingTarget(sequenceElem)
+	return sequenceElem
 }
 
 func maybeAssignSequenceOwner(b BuildCtx, sequence *scpb.Namespace, owner *tree.ColumnItem) {

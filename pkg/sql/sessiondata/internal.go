@@ -1,18 +1,14 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sessiondata
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 )
 
 // InternalExecutorOverride is used by the Executor interface
@@ -69,13 +65,25 @@ type InternalExecutorOverride struct {
 	// being emitted for changes to data made in a session. It is illegal to set
 	// this option when using the internal executor with an outer txn.
 	DisableChangefeedReplication bool
-
 	// OriginIDForLogicalDataReplication is an identifier for the cluster that
 	// originally wrote the data that are being written in this session. An
 	// originID of 0 (the default) identifies a local write, 1 identifies a remote
 	// write of unspecified origin, and 2+ are reserved to identify remote writes
 	// from specific clusters.
 	OriginIDForLogicalDataReplication uint32
+	// OriginTimestampForLogicalDataReplication is the mvcc timestamp the data
+	// written in this session were originally written with before being
+	// replicated via Logical Data Replication. The creator of this internal
+	// executor session is responsible for ensuring that every row it writes via
+	// the internal executor had this origin timestamp.
+	OriginTimestampForLogicalDataReplication hlc.Timestamp
+	// PlanCacheMode, if set, overrides the plan_cache_mode session variable.
+	PlanCacheMode *sessiondatapb.PlanCacheMode
+	// GrowStackSize, if true, indicates that the connExecutor goroutine stack
+	// should be grown to 32KiB right away.
+	GrowStackSize bool
+	// DisablePlanGists, if true, overrides the disable_plan_gists session var.
+	DisablePlanGists bool
 }
 
 // NoSessionDataOverride is the empty InternalExecutorOverride which does not
@@ -94,4 +102,12 @@ var NodeUserSessionDataOverride = InternalExecutorOverride{
 var NodeUserWithLowUserPrioritySessionDataOverride = InternalExecutorOverride{
 	User:             username.MakeSQLUsernameFromPreNormalizedString(username.NodeUser),
 	QualityOfService: &sessiondatapb.UserLowQoS,
+}
+
+// NodeUserWithBulkLowPriSessionDataOverride is an InternalExecutorOverride
+// which overrides the user to the NodeUser and sets the quality of service to
+// sessiondatapb.BulkLow.
+var NodeUserWithBulkLowPriSessionDataOverride = InternalExecutorOverride{
+	User:             username.MakeSQLUsernameFromPreNormalizedString(username.NodeUser),
+	QualityOfService: &sessiondatapb.BulkLowQoS,
 }

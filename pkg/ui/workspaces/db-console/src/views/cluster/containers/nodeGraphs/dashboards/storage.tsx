@@ -1,29 +1,25 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
-import map from "lodash/map";
 import { AxisUnits } from "@cockroachlabs/cluster-ui";
+import map from "lodash/map";
+import React from "react";
 
 import LineGraph from "src/views/cluster/components/linegraph";
-import { Metric, Axis, MetricProps } from "src/views/shared/components/metricQuery";
 import {
   CapacityGraphTooltip,
   LiveBytesGraphTooltip,
 } from "src/views/cluster/containers/nodeGraphs/dashboards/graphTooltips";
+import { Metric, Axis } from "src/views/shared/components/metricQuery";
 
 import {
   GraphDashboardProps,
   nodeDisplayName,
   storeIDsForNode,
 } from "./dashboardUtils";
+import { storeMetrics } from "./storeUtils";
 
 export default function (props: GraphDashboardProps) {
   const {
@@ -38,45 +34,6 @@ export default function (props: GraphDashboardProps) {
 
   const getNodeNameById = (id: string) =>
     nodeDisplayName(nodeDisplayNameByID, id);
-
-  /**
-   * Dynamically shows either the aggregated node-level metric when viewing the
-   * cluster-level dashboard, or store-level metrics when viewing a single node.
-   */
-  const storeMetrics = (props: MetricProps) => nodeIDs.flatMap(nid => {
-    const storeIDs = storeIDsForNode(storeIDsByNodeID, nid);
-
-    let aggregateType = "total";
-    if (props.aggregateAvg) {
-      aggregateType = "average";
-    } else if (props.aggregateMax) {
-      aggregateType = "max";
-    } else if (props.aggregateMin) {
-      aggregateType = "min";
-    }
-
-    const nodeMetric = <Metric
-      key={nid}
-      title={`n${nid},${aggregateType}`}
-      sources={storeIDs}
-      {...props}
-    />;
-
-    // show only the aggregated node-level metric when viewing multiple nodes
-    if (nodeIDs.length > 1) {
-      return nodeMetric;
-    }
-    
-    // otherwise, show the aggregated metric and a per-store breakdown
-    return [nodeMetric, ...storeIDs.map(sid => (
-      <Metric
-        key={`${nid}-${sid}`}
-        title={`n${nid},s${sid}`}
-        sources={[sid]}
-        {...props}
-      />
-    ))];
-  });
 
   return [
     <LineGraph
@@ -155,7 +112,14 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Duration} label="latency">
-        {storeMetrics({ name: "cr.store.raft.process.logcommit.latency-p99", aggregateMax: true })}
+        {storeMetrics(
+          {
+            name: "cr.store.raft.process.logcommit.latency-p99",
+            aggregateMax: true,
+          },
+          nodeIDs,
+          storeIDsByNodeID,
+        )}
       </Axis>
     </LineGraph>,
 
@@ -169,7 +133,14 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Duration} label="latency">
-        {storeMetrics({ name: "cr.store.raft.process.logcommit.latency-p50", aggregateMax: true })}
+        {storeMetrics(
+          {
+            name: "cr.store.raft.process.logcommit.latency-p50",
+            aggregateMax: true,
+          },
+          nodeIDs,
+          storeIDsByNodeID,
+        )}
       </Axis>
     </LineGraph>,
 
@@ -184,7 +155,14 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Duration} label="latency">
-        {storeMetrics({ name: "cr.store.raft.process.commandcommit.latency-p99", aggregateMax: true })}
+        {storeMetrics(
+          {
+            name: "cr.store.raft.process.commandcommit.latency-p99",
+            aggregateMax: true,
+          },
+          nodeIDs,
+          storeIDsByNodeID,
+        )}
       </Axis>
     </LineGraph>,
 
@@ -199,7 +177,14 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Duration} label="latency">
-        {storeMetrics({ name: "cr.store.raft.process.commandcommit.latency-p50", aggregateMax: true })}
+        {storeMetrics(
+          {
+            name: "cr.store.raft.process.commandcommit.latency-p50",
+            aggregateMax: true,
+          },
+          nodeIDs,
+          storeIDsByNodeID,
+        )}
       </Axis>
     </LineGraph>,
 
@@ -213,7 +198,14 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis label="factor">
-        {storeMetrics({ name: "cr.store.rocksdb.read-amplification", aggregateAvg: true })}
+        {storeMetrics(
+          {
+            name: "cr.store.rocksdb.read-amplification",
+            aggregateAvg: true,
+          },
+          nodeIDs,
+          storeIDsByNodeID,
+        )}
       </Axis>
     </LineGraph>,
 
@@ -226,7 +218,11 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis label="sstables">
-        {storeMetrics({ name: "cr.store.rocksdb.num-sstables" })}
+        {storeMetrics(
+          { name: "cr.store.rocksdb.num-sstables" },
+          nodeIDs,
+          storeIDsByNodeID,
+        )}
       </Axis>
     </LineGraph>,
 
@@ -239,7 +235,11 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis label="sstables">
-        {storeMetrics({ name: "cr.store.storage.l0-num-files" })}
+        {storeMetrics(
+          { name: "cr.store.storage.l0-num-files" },
+          nodeIDs,
+          storeIDsByNodeID,
+        )}
       </Axis>
     </LineGraph>,
 
@@ -252,7 +252,11 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis label="Size" units={AxisUnits.Bytes}>
-        {storeMetrics({ name: "cr.store.storage.l0-level-size" })}
+        {storeMetrics(
+          { name: "cr.store.storage.l0-level-size" },
+          nodeIDs,
+          storeIDsByNodeID,
+        )}
       </Axis>
     </LineGraph>,
 
@@ -280,7 +284,14 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Bytes} label="written bytes">
-        {storeMetrics({ name: "cr.store.rocksdb.flushed-bytes", nonNegativeRate: true })}
+        {storeMetrics(
+          {
+            name: "cr.store.rocksdb.flushed-bytes",
+            nonNegativeRate: true,
+          },
+          nodeIDs,
+          storeIDsByNodeID,
+        )}
       </Axis>
     </LineGraph>,
 
@@ -293,7 +304,14 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Bytes} label="written bytes">
-        {storeMetrics({ name: "cr.store.storage.wal.bytes_written", nonNegativeRate: true })}
+        {storeMetrics(
+          {
+            name: "cr.store.storage.wal.bytes_written",
+            nonNegativeRate: true,
+          },
+          nodeIDs,
+          storeIDsByNodeID,
+        )}
       </Axis>
     </LineGraph>,
 
@@ -306,7 +324,14 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Bytes} label="written bytes">
-        {storeMetrics({ name: "cr.store.rocksdb.compacted-bytes-written", nonNegativeRate: true })}
+        {storeMetrics(
+          {
+            name: "cr.store.rocksdb.compacted-bytes-written",
+            nonNegativeRate: true,
+          },
+          nodeIDs,
+          storeIDsByNodeID,
+        )}
       </Axis>
     </LineGraph>,
 
@@ -319,7 +344,14 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Bytes} label="written bytes">
-        {storeMetrics({ name: "cr.store.rocksdb.ingested-bytes", nonNegativeRate: true })}
+        {storeMetrics(
+          {
+            name: "cr.store.rocksdb.ingested-bytes",
+            nonNegativeRate: true,
+          },
+          nodeIDs,
+          storeIDsByNodeID,
+        )}
       </Axis>
     </LineGraph>,
 

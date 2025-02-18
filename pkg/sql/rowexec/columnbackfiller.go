@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowexec
 
@@ -110,6 +105,9 @@ func (*columnBackfiller) Resume(output execinfra.RowReceiver) {
 	panic("not implemented")
 }
 
+// Close is part of the execinfra.Processor interface.
+func (*columnBackfiller) Close(context.Context) {}
+
 func (cb *columnBackfiller) doRun(ctx context.Context) *execinfrapb.ProducerMetadata {
 	finishedSpans, err := cb.mainLoop(ctx)
 	if err != nil {
@@ -196,7 +194,7 @@ func GetResumeSpans(
 	mutationID descpb.MutationID,
 	filter backfill.MutationFilter,
 ) ([]roachpb.Span, *jobs.Job, int, error) {
-	tableDesc, err := col.ByID(txn.KV()).Get().Table(ctx, tableID)
+	tableDesc, err := col.ByIDWithoutLeased(txn.KV()).Get().Table(ctx, tableID)
 	if err != nil {
 		return nil, nil, 0, err
 	}

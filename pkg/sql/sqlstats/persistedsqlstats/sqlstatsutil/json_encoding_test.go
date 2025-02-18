@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlstatsutil
 
@@ -108,10 +103,7 @@ func TestSQLStatsJsonEncoding(t *testing.T) {
          "indexes": [{{joinStrings .StringArray}}],
          "latencyInfo": {
            "min": {{.Float}},
-           "max": {{.Float}},
-           "p50": {{.Float}},
-           "p90": {{.Float}},
-           "p99": {{.Float}}
+           "max": {{.Float}}
          },
          "lastErrorCode": "{{.String}}"
        },
@@ -220,6 +212,10 @@ func TestSQLStatsJsonEncoding(t *testing.T) {
 		// Strip the monononic part of timestamps, as it doesn't roundtrip. UTC()
 		// has that stripping side-effect.
 		input.Stats.LastExecTimestamp = input.Stats.LastExecTimestamp.UTC()
+		// We are no longer setting the latency percentiles.
+		input.Stats.LatencyInfo.P50 = 0
+		input.Stats.LatencyInfo.P90 = 0
+		input.Stats.LatencyInfo.P99 = 0
 
 		err = DecodeStmtStatsStatisticsJSON(actualStatisticsJSON, &actualJSONUnmarshalled.Stats)
 		require.NoError(t, err)
@@ -295,10 +291,7 @@ func TestSQLStatsJsonEncoding(t *testing.T) {
          "planGists": [{{joinStrings .StringArray}}],
          "latencyInfo": {
            "min": {{.Float}},
-           "max": {{.Float}},
-           "p50": {{.Float}},
-           "p90": {{.Float}},
-           "p99": {{.Float}},
+           "max": {{.Float}}
          },
          "errorCode": "{{.String}}"
        },
@@ -409,6 +402,10 @@ func TestSQLStatsJsonEncoding(t *testing.T) {
 		// Strip the monononic part of timestamps, as it doesn't roundtrip. UTC()
 		// has that stripping side-effect.
 		expectedStatistics.Stats.LastExecTimestamp = expectedStatistics.Stats.LastExecTimestamp.UTC()
+		// We no longer set the percentile latencies.
+		expectedStatistics.Stats.LatencyInfo.P50 = 0
+		expectedStatistics.Stats.LatencyInfo.P90 = 0
+		expectedStatistics.Stats.LatencyInfo.P99 = 0
 
 		err = DecodeStmtStatsStatisticsJSON(actualStatisticsJSON, &actualJSONUnmarshalled.Stats)
 		require.NoError(t, err)

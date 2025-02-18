@@ -246,7 +246,6 @@ CREATE PROCEDURE p_nested(curs REFCURSOR) AS $$
   END;
 $$ LANGUAGE PLpgSQL;
 
-skipif config local-mixed-23.2
 statement ok
 DROP FUNCTION f;
 CREATE FUNCTION f(n INT) RETURNS INT AS $$
@@ -282,7 +281,6 @@ $$ LANGUAGE PLpgSQL;
 statement ok
 CLOSE ALL;
 
-skipif config local-mixed-23.2
 query I
 SELECT f(0);
 ----
@@ -291,7 +289,6 @@ SELECT f(0);
 statement ok
 CLOSE ALL;
 
-skipif config local-mixed-23.2
 query I
 SELECT f(1);
 ----
@@ -300,7 +297,6 @@ SELECT f(1);
 statement ok
 CLOSE ALL;
 
-skipif config local-mixed-23.2
 query I
 SELECT f(2);
 ----
@@ -309,7 +305,6 @@ SELECT f(2);
 statement ok
 CLOSE ALL;
 
-skipif config local-mixed-23.2
 query I
 SELECT f(3);
 ----
@@ -495,7 +490,7 @@ query T noticetrace
 CALL p();
 ----
 NOTICE: outer handler
-NOTICE: inner block 100
+NOTICE: inner block x=100
 
 # A block nested in an exception handler can have its own exception handler.
 statement ok
@@ -524,7 +519,7 @@ CALL p();
 ----
 NOTICE: outer handler
 NOTICE: inner block
-NOTICE: inner handler 100
+NOTICE: inner handler x=100
 
 # A block can be nested inside another block that has an exception handler.
 statement ok
@@ -696,5 +691,42 @@ BEGIN
       RETURN decl_33;
     END;
   END IF;
+END;
+$$ LANGUAGE PLpgSQL;
+
+subtest multi_declare
+
+statement ok
+DROP FUNCTION IF EXISTS f;
+
+statement ok
+CREATE FUNCTION f() RETURNS INT AS $$
+DECLARE
+  x INT := 0;
+DECLARE
+  y INT := x + 1;
+BEGIN
+  RAISE NOTICE '% %', x, y;
+  RETURN 0;
+END;
+$$ LANGUAGE PLpgSQL;
+
+query T noticetrace
+SELECT f();
+----
+NOTICE: 0 1
+
+statement ok
+DROP FUNCTION IF EXISTS f;
+
+statement error pgcode 42601 pq: duplicate declaration at or near "x"
+CREATE FUNCTION f() RETURNS INT AS $$
+DECLARE
+  x INT := 0;
+DECLARE
+  x INT := 1;
+BEGIN
+  RAISE NOTICE '%', x;
+  RETURN 0;
 END;
 $$ LANGUAGE PLpgSQL;

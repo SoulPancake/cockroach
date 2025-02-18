@@ -1,15 +1,10 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
 import { AxisUnits } from "@cockroachlabs/cluster-ui";
+import React from "react";
 
 import LineGraph from "src/views/cluster/components/linegraph";
 import { Metric, Axis } from "src/views/shared/components/metricQuery";
@@ -338,6 +333,10 @@ export default function (props: GraphDashboardProps) {
       sources={storeSources}
       tenantSource={tenantSource}
       showMetricsInTooltip={true}
+      tooltip={`The Consistency Checker Queue periodically checks 
+      that all replicas in a given range are consistent. For large 
+      clusters, the queue is always expected to have a pending 
+      backlog.`}
     >
       <Axis units={AxisUnits.Count} label="actions">
         <Metric

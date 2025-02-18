@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 
 package enginepb
@@ -33,6 +28,7 @@ func populatedMVCCValueHeader() MVCCValueHeader {
 		OmitInRangefeeds: true,
 		ImportEpoch:      1,
 		OriginID:         1,
+		OriginTimestamp:  hlc.Timestamp{WallTime: 1, Logical: 1},
 	}
 	allFieldsSet.KVNemesisSeq.Set(123)
 	return allFieldsSet
@@ -44,6 +40,7 @@ func defaultMVCCValueHeader() MVCCValueHeader {
 		OmitInRangefeeds: false,
 		ImportEpoch:      0,
 		OriginID:         0,
+		OriginTimestamp:  hlc.Timestamp{},
 	}
 }
 
@@ -62,9 +59,11 @@ func TestMVCCValueHeader_IsEmpty(t *testing.T) {
 	require.False(t, MVCCValueHeader{OmitInRangefeeds: allFieldsSet.OmitInRangefeeds}.IsEmpty())
 	require.False(t, MVCCValueHeader{ImportEpoch: allFieldsSet.ImportEpoch}.IsEmpty())
 	require.False(t, MVCCValueHeader{OriginID: allFieldsSet.OriginID}.IsEmpty())
+	require.False(t, MVCCValueHeader{OriginTimestamp: allFieldsSet.OriginTimestamp}.IsEmpty())
 }
 
 func TestMVCCValueHeader_MarshalUnmarshal(t *testing.T) {
+	// TODO: test this with random combinations of header fields set.
 	vh := populatedMVCCValueHeader()
 	b, err := protoutil.Marshal(&vh)
 	require.NoError(t, err)

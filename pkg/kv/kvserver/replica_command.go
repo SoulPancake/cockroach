@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -19,7 +14,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
@@ -141,7 +135,7 @@ func maybeDescriptorChangedError(
 
 func splitSnapshotWarningStr(rangeID roachpb.RangeID, status *raft.Status) redact.RedactableString {
 	var s redact.RedactableString
-	if status != nil && status.RaftState == raft.StateLeader {
+	if status != nil && status.RaftState == raftpb.StateLeader {
 		for replicaID, pr := range status.Progress {
 			if replicaID == status.Lead {
 				// TODO(tschottdorf): remove this line once we have picked up
@@ -515,7 +509,6 @@ func (r *Replica) adminSplitWithDescriptor(
 	var userOnlyLeftStats enginepb.MVCCStats
 	var totalStats enginepb.MVCCStats
 	if EnableEstimatedMVCCStatsInSplit.Get(&r.store.ClusterSettings().SV) &&
-		r.ClusterSettings().Version.IsActive(ctx, clusterversion.V24_1_EstimatedMVCCStatsInSplit) &&
 		reason != manualAdminReason &&
 		!useEstimatedStatsForExternalBytes {
 		// If the stats contain estimates, re-compute them to prevent estimates
@@ -888,7 +881,39 @@ func (r *Replica) AdminMerge(
 		// Intents have been placed, so the merge is now in its critical phase. Get
 		// a consistent view of the data from the right-hand range. If the merge
 		// commits, we'll write this data to the left-hand range in the merge
-		// trigger.
+		// trigger. This consistent view is dependent on two things (a) the
+		// SubsumeRequest is evaluated at a leaseholder that is at least as recent
+		// as the leaseholder that evaluated the deletion intent placed on the RHS
+		// RangeDescriptor, (b) the SubsumeRequest freezes the range for new reads
+		// and writes at the leaseholder, and freezes the closed timestamp so
+		// follower reads cannot occur at a timestamp beyond what is accounted for
+		// in SubsumeResponse.ClosedTimestamp (see batcheval.Subsume for more
+		// details).
+		//
+		// When SubsumeRequest does a write (on newer cluster versions), (a) is
+		// guaranteed by the fact that this request needs to be replicated and so
+		// cannot be successfully processed by a stale leaseholder (due to the
+		// protection in RaftCommand.ProposerLeaseSequence). When SubsumeRequest
+		// is a read, it may seem that (a) is not guaranteed since the request
+		// below is sent outside the txn, and does not set a timestamp, so could
+		// be assigned a timestamp lower than the txn timestamp, and routed to an
+		// older leaseholder. The reason this doesn't happen is subtle:
+		// - Say the txn (whose txn coordinator is this node) got assigned a
+		//   timestamp t1.
+		// - The intent put went to the RHS leaseholder which was ahead, at
+		//   timestamp t2. The response to the intent put will bump up the local
+		//   hlc.Timestamp to t2.
+		// - This SubsumeRequest does not set kvpb.Header.Timestamp, but it will
+		//   include in kvpb.Header.Now a value that is >= t2. When this request
+		//   is received by an old leaseholder (the aforementioned hazard), the
+		//   old leaseholder will bump its hlc.Clock to >= t2 and stop being the
+		//   leaseholder, and reject the request. The request will get eventually
+		//   (successfully) retried at a leaseholder that has the lease at
+		//   timestamp >= t2.
+		//
+		// This must be a single request in a BatchRequest: there are multiple
+		// places that do special logic (needed for safety) that rely on
+		// BatchRequest.IsSingleSubsumeRequest() returning true.
 		br, pErr := kv.SendWrapped(ctx, r.store.DB().NonTransactionalSender(),
 			&kvpb.SubsumeRequest{
 				RequestHeader: kvpb.RequestHeader{Key: rightDesc.StartKey.AsRawKey()},
@@ -965,13 +990,23 @@ func (r *Replica) AdminMerge(
 		}
 		if !errors.HasType(err, (*kvpb.TransactionRetryWithProtoRefreshError)(nil)) {
 			if err != nil {
-				return reply, kvpb.NewErrorf("merge failed: %s", err)
+				return reply, kvpb.NewError(errors.Wrap(err, "merge failed"))
 			}
 			return reply, nil
 		}
 	}
 }
 
+// waitForApplication is waiting for application at all replicas (voters or
+// non-voters). This is an outlier in that the system is typically expected to
+// function with only a quorum of voters being available. So it should be used
+// extremely sparingly.
+//
+// IMPORTANT: if adding a call to this method, ensure that whatever command is
+// needing this behavior sets
+// ReplicatedEvalResult.DoTimelyApplicationToAllReplicas. That ensures that
+// replication flow control will not arbitrarily delay application on a
+// replica by maintaining a non-empty send-queue.
 func waitForApplication(
 	ctx context.Context,
 	dialer *nodedialer.Dialer,
@@ -2268,27 +2303,16 @@ func prepareChangeReplicasTrigger(
 				}
 				added = append(added, rDesc)
 			case internalChangeTypeRemoveLearner, internalChangeTypeRemoveNonVoter:
-				rDesc, ok := updatedDesc.GetReplicaDescriptor(chg.target.StoreID)
+				rDesc, ok := updatedDesc.RemoveReplica(chg.target.NodeID, chg.target.StoreID)
 				if !ok {
-					return nil, errors.Errorf("target %s not found", chg.target)
+					return nil, errors.Errorf("target %v not found", chg.target)
 				}
-				prevTyp := rDesc.Type
-				isRaftLearner := prevTyp == roachpb.LEARNER || prevTyp == roachpb.NON_VOTER
-				if !useJoint || isRaftLearner {
-					rDesc, _ = updatedDesc.RemoveReplica(chg.target.NodeID, chg.target.StoreID)
-				} else if prevTyp != roachpb.VOTER_FULL {
-					// NB: prevTyp is already known to be VOTER_FULL because of
-					// !InAtomicReplicationChange() and the learner handling
-					// above. We check it anyway.
-					return nil, errors.AssertionFailedf("cannot transition from %s to VOTER_OUTGOING", prevTyp)
-				} else {
-					rDesc, _, _ = updatedDesc.SetReplicaType(chg.target.NodeID, chg.target.StoreID, roachpb.VOTER_OUTGOING)
+				if prevTyp := rDesc.Type; prevTyp != roachpb.LEARNER && prevTyp != roachpb.NON_VOTER {
+					return nil, errors.Errorf("cannot remove %s target %v, not a LEARNER or NON_VOTER",
+						prevTyp, chg.target)
 				}
 				removed = append(removed, rDesc)
 			case internalChangeTypeDemoteVoterToLearner:
-				// Demotion is similar to removal, except that a demotion
-				// cannot apply to a learner, and that the resulting type is
-				// different when entering a joint config.
 				rDesc, ok := updatedDesc.GetReplicaDescriptor(chg.target.StoreID)
 				if !ok {
 					return nil, errors.Errorf("target %s not found", chg.target)
@@ -2334,6 +2358,9 @@ func prepareChangeReplicasTrigger(
 				updatedDesc.SetReplicaType(rDesc.NodeID, rDesc.StoreID, roachpb.VOTER_FULL)
 				isJoint = true
 			case roachpb.VOTER_OUTGOING:
+				// Note: Replicas have not been given a VOTER_OUTGOING type since v20.1.
+				// However, we have not run the migration to remove existing replicas
+				// with the type from old clusters, so we retain this code. See #42251.
 				updatedDesc.RemoveReplica(rDesc.NodeID, rDesc.StoreID)
 				isJoint = true
 			case roachpb.VOTER_DEMOTING_LEARNER:
@@ -2893,7 +2920,7 @@ func (r *Replica) getSenderReplicas(
 // there is either an initialized[2] replica or a `ReplicaPlaceholder`[3] to
 // accept the snapshot by creating a placeholder if necessary. Finally, a *Raft
 // snapshot* message is manually handed to the replica's Raft node (by calling
-// `stepRaftGroup` + `handleRaftReadyRaftMuLocked`). During the application
+// `stepRaftGroupRaftMuLocked` + `handleRaftReadyRaftMuLocked`). During the application
 // process, several other SSTs may be created for direct ingestion. An SST for
 // the unreplicated range-ID local keys is created for the Raft entries, hard
 // state, and truncated state. An SST is created for deleting each subsumed
@@ -2953,12 +2980,11 @@ func (r *Replica) sendSnapshotUsingDelegate(
 		)
 	}
 
-	status := r.RaftStatus()
-	if status == nil {
-		// This code path is sometimes hit during scatter for replicas that
-		// haven't woken up yet.
-		retErr = benignerror.New(errors.Wrap(errMarkSnapshotError, "raft status not initialized"))
-		return
+	status := r.RaftBasicStatus()
+	if status.Empty() {
+		// This code path is sometimes hit during scatter for replicas that haven't
+		// woken up yet.
+		return benignerror.New(errors.Wrap(errMarkSnapshotError, "raft status not initialized"))
 	}
 
 	snapUUID := uuid.MakeV4()
@@ -3112,13 +3138,13 @@ func (r *Replica) validateSnapshotDelegationRequest(
 	// is not too far behind the leaseholder. If the delegate is too far behind
 	// that is also needs a snapshot, then any snapshot it sends will be useless.
 	r.mu.RLock()
-	replIdx := r.mu.state.RaftAppliedIndex + 1
-	status := r.raftStatusRLocked()
+	replIdx := r.shMu.state.RaftAppliedIndex + 1
+	status := r.raftBasicStatusRLocked()
 	r.mu.RUnlock()
 
-	if status == nil {
-		// This code path is sometimes hit during scatter for replicas that
-		// haven't woken up yet.
+	if status.Empty() {
+		// This code path is sometimes hit during scatter for replicas that haven't
+		// woken up yet.
 		return errors.Errorf("raft status not initialized")
 	}
 	replTerm := kvpb.RaftTerm(status.Term)
@@ -3273,16 +3299,6 @@ func (r *Replica) followerSendSnapshot(
 	defer snap.Close()
 	log.Event(ctx, "generated snapshot")
 
-	// We avoid shipping over the past Raft log in the snapshot by changing the
-	// truncated state (we're allowed to -- it's an unreplicated key and not
-	// subject to mapping across replicas). The actual sending happens in
-	// kvBatchSnapshotStrategy.Send and results in no log entries being sent at
-	// all. Note that Metadata.Index is really the applied index of the replica.
-	snap.State.TruncatedState = &kvserverpb.RaftTruncatedState{
-		Index: kvpb.RaftIndex(snap.RaftSnap.Metadata.Index),
-		Term:  kvpb.RaftTerm(snap.RaftSnap.Metadata.Term),
-	}
-
 	// See comment on DeprecatedUsingAppliedStateKey for why we need to set this
 	// explicitly for snapshots going out to followers.
 	snap.State.DeprecatedUsingAppliedStateKey = true
@@ -3298,7 +3314,6 @@ func (r *Replica) followerSendSnapshot(
 	// replication, are dealing with a non-system range, are on at
 	// least 24.1, and our store has external files.
 	externalReplicate := !sharedReplicate && nonSystemRange &&
-		r.store.ClusterSettings().Version.IsActive(ctx, clusterversion.V24_1) &&
 		externalFileSnapshotting.Get(&r.store.ClusterSettings().SV)
 	if externalReplicate {
 		start := snap.State.Desc.StartKey.AsRawKey()
@@ -3334,6 +3349,7 @@ func (r *Replica) followerSendSnapshot(
 		SenderQueuePriority: req.SenderQueuePriority,
 		SharedReplicate:     sharedReplicate,
 		ExternalReplicate:   externalReplicate,
+		RangeKeysInOrder:    true,
 	}
 	newBatchFn := func() storage.WriteBatch {
 		return r.store.TODOEngine().NewWriteBatch()

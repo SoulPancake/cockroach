@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package registry
 
@@ -24,20 +19,22 @@ type Owner string
 
 // The allowable values of Owner.
 const (
-	OwnerCDC              Owner = `cdc`
-	OwnerDisasterRecovery Owner = `disaster-recovery`
-	OwnerKV               Owner = `kv`
-	OwnerReplication      Owner = `replication`
-	OwnerAdmissionControl Owner = `admission-control`
-	OwnerObservability    Owner = `obs-prs`
-	OwnerServer           Owner = `server` // not currently staffed
-	OwnerSQLFoundations   Owner = `sql-foundations`
-	OwnerMigrations       Owner = `migrations`
-	OwnerReleaseEng       Owner = `release-eng`
-	OwnerSQLQueries       Owner = `sql-queries`
-	OwnerStorage          Owner = `storage`
-	OwnerTestEng          Owner = `test-eng`
-	OwnerDevInf           Owner = `dev-inf`
+	OwnerCDC                Owner = `cdc`
+	OwnerDisasterRecovery   Owner = `disaster-recovery`
+	OwnerKV                 Owner = `kv`
+	OwnerAdmissionControl   Owner = `admission-control`
+	OwnerObservability      Owner = `obs-prs`
+	OwnerObservabilityIndia Owner = `obs-india-prs`
+	OwnerServer             Owner = `server`
+	OwnerSQLFoundations     Owner = `sql-foundations`
+	OwnerMigrations         Owner = `migrations`
+	OwnerProductSecurity    Owner = `product-security`
+	OwnerReleaseEng         Owner = `release-eng`
+	OwnerSQLQueries         Owner = `sql-queries`
+	OwnerStorage            Owner = `storage`
+	OwnerTestEng            Owner = `test-eng`
+	OwnerDevInf             Owner = `dev-inf`
+	OwnerFieldEng           Owner = `field-engineering`
 )
 
 // IsValid returns true if the owner is valid, i.e. it has a corresponding team

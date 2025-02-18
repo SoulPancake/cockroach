@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -45,6 +40,7 @@ type showTenantNodeCapability struct {
 }
 
 type showTenantNode struct {
+	zeroInputPlanNode
 	tenantSpec           tenantSpec
 	withReplication      bool
 	withPriorReplication bool
@@ -230,6 +226,7 @@ func (n *showTenantNode) Values() tree.Datums {
 		)
 	} else {
 		// This is a 'SHOW VIRTUAL CLUSTER name WITH REPLICATION STATUS' command.
+		replicationJobID := tree.DNull
 		sourceTenantName := tree.DNull
 		sourceClusterUri := tree.DNull
 		replicatedTimestamp := tree.DNull
@@ -239,8 +236,9 @@ func (n *showTenantNode) Values() tree.Datums {
 
 		replicationInfo := v.replicationInfo
 		if replicationInfo != nil {
+			replicationJobID = tree.NewDInt(tree.DInt(v.tenantInfo.PhysicalReplicationConsumerJobID))
 			sourceTenantName = tree.NewDString(string(replicationInfo.IngestionDetails.SourceTenantName))
-			sourceClusterUri = tree.NewDString(replicationInfo.IngestionDetails.StreamAddress)
+			sourceClusterUri = tree.NewDString(replicationInfo.IngestionDetails.SourceClusterConnUri)
 			if replicationInfo.ReplicationLagInfo != nil {
 				minIngested := replicationInfo.ReplicationLagInfo.MinIngestedTimestamp
 				// The latest fully replicated time. Truncating to the nearest microsecond
@@ -269,6 +267,7 @@ func (n *showTenantNode) Values() tree.Datums {
 		}
 
 		result = append(result,
+			replicationJobID,
 			sourceTenantName,
 			sourceClusterUri,
 			retainedTimestamp,

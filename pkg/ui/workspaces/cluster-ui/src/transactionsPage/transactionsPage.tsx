@@ -1,23 +1,17 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
-import classNames from "classnames/bind";
-import { RouteComponentProps } from "react-router-dom";
-import flatMap from "lodash/flatMap";
-import merge from "lodash/merge";
-import isString from "lodash/isString";
 import { InlineAlert } from "@cockroachlabs/ui-components";
+import classNames from "classnames/bind";
+import flatMap from "lodash/flatMap";
+import isString from "lodash/isString";
+import merge from "lodash/merge";
 import moment from "moment-timezone";
+import React from "react";
+import { RouteComponentProps } from "react-router-dom";
 
-import { Timestamp, TimestampToMoment, syncHistory, unique } from "src/util";
 import {
   SqlStatsSortType,
   createCombinedStmtsRequest,
@@ -25,6 +19,9 @@ import {
   SqlStatsSortOptions,
   SqlStatsResponse,
 } from "src/api/statementsApi";
+import { SearchCriteria } from "src/searchCriteria/searchCriteria";
+import { TimeScaleLabel } from "src/timeScaleDropdown/timeScaleLabel";
+import { Timestamp, TimestampToMoment, syncHistory, unique } from "src/util";
 import {
   STATS_LONG_LOADING_DURATION,
   getSortLabel,
@@ -32,13 +29,16 @@ import {
   getSubsetWarning,
   getReqSortColumn,
 } from "src/util/sqlActivityConstants";
-import { SearchCriteria } from "src/searchCriteria/searchCriteria";
-import { TimeScaleLabel } from "src/timeScaleDropdown/timeScaleLabel";
 
-import { Loading } from "../loading";
+import { RequestState } from "../api";
+import ColumnsSelector from "../columnsSelector/columnsSelector";
+import { isSelectedColumn } from "../columnsSelector/utils";
+import { commonStyles } from "../common";
 import { Delayed } from "../delayed";
+import { Loading } from "../loading";
+import { SelectOption } from "../multiSelectCheckbox/multiSelectCheckbox";
 import { PageConfig, PageConfigItem } from "../pageConfig";
-import { Search } from "../search";
+import { Pagination, ResultsPerPageLabel } from "../pagination";
 import {
   Filter,
   Filters,
@@ -47,41 +47,37 @@ import {
   updateFiltersQueryParamsOnTab,
   SelectedFilters,
 } from "../queryFilter";
-import { UIConfigState } from "../store";
-import ColumnsSelector from "../columnsSelector/columnsSelector";
-import { SelectOption } from "../multiSelectCheckbox/multiSelectCheckbox";
-import {
-  getLabel,
-  StatisticTableColumnKeys,
-} from "../statsTableUtil/statsTableUtil";
-import ClearStats from "../sqlActivity/clearStats";
-import LoadingError from "../sqlActivity/errorComponent";
-import { commonStyles } from "../common";
-import {
-  TimeScale,
-  timeScale1hMinOptions,
-  getValidOption,
-  toRoundedDateRange,
-} from "../timeScaleDropdown";
-import { isSelectedColumn } from "../columnsSelector/utils";
-import timeScaleStyles from "../timeScaleDropdown/timeScale.module.scss";
-import { RequestState } from "../api";
-import { Pagination, ResultsPerPageLabel } from "../pagination";
+import { Search } from "../search";
 import {
   handleSortSettingFromQueryString,
   ISortedTablePagination,
   SortSetting,
   updateSortSettingQueryParamsOnTab,
 } from "../sortedtable";
+import ClearStats from "../sqlActivity/clearStats";
+import LoadingError from "../sqlActivity/errorComponent";
+import styles from "../statementsPage/statementsPage.module.scss";
+import {
+  getLabel,
+  StatisticTableColumnKeys,
+} from "../statsTableUtil/statsTableUtil";
+import { UIConfigState } from "../store";
+import {
+  TimeScale,
+  timeScale1hMinOptions,
+  getValidOption,
+  toRoundedDateRange,
+} from "../timeScaleDropdown";
+import timeScaleStyles from "../timeScaleDropdown/timeScale.module.scss";
 import {
   makeTransactionsColumns,
   TransactionInfo,
   TransactionsTable,
 } from "../transactionsTable";
-import styles from "../statementsPage/statementsPage.module.scss";
 
-import { TransactionViewType } from "./transactionsPageTypes";
 import { EmptyTransactionsPlaceholder } from "./emptyTransactionsPlaceholder";
+import { statisticsClasses } from "./transactionsPageClasses";
+import { TransactionViewType } from "./transactionsPageTypes";
 import {
   generateRegion,
   generateRegionNode,
@@ -89,7 +85,6 @@ import {
   searchTransactionsData,
   filterTransactions,
 } from "./utils";
-import { statisticsClasses } from "./transactionsPageClasses";
 
 const cx = classNames.bind(styles);
 const timeScaleStylesCx = classNames.bind(timeScaleStyles);

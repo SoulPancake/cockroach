@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package optbuilder
 
@@ -309,11 +304,6 @@ func (mb *mutationBuilder) buildAntiJoinForDoNothingArbiter(
 						Strength:   tree.ForShare,
 						Targets:    []tree.TableName{tree.MakeUnqualifiedTableName(mb.tab.Name())},
 						WaitPolicy: tree.LockWaitBlock,
-						// Unique arbiters must ensure the non-existence of certain rows, so
-						// we use predicate locks instead of record locks to prevent
-						// insertion of new rows into the locked span(s) by other concurrent
-						// transactions.
-						Form: tree.LockPredicate,
 					},
 				},
 			}
@@ -323,6 +313,12 @@ func (mb *mutationBuilder) buildAntiJoinForDoNothingArbiter(
 	var indexFlags *tree.IndexFlags
 	if source, ok := texpr.(*tree.AliasedTableExpr); ok {
 		indexFlags = source.IndexFlags
+	}
+	if mb.b.evalCtx.SessionData().AvoidFullTableScansInMutations {
+		if indexFlags == nil {
+			indexFlags = &tree.IndexFlags{}
+		}
+		indexFlags.AvoidFullScan = true
 	}
 
 	// Build the right side of the anti-join. Use a new metadata instance
@@ -339,6 +335,9 @@ func (mb *mutationBuilder) buildAntiJoinForDoNothingArbiter(
 		locking,
 		inScope,
 		true, /* disableNotVisibleIndex */
+		// TODO(136704): Review and adjust the scope used here after implementing
+		// WITH CHECK to ensure correct filtering behavior for UPSERT operations.
+		cat.PolicyScopeExempt,
 	)
 
 	// If the index is a unique partial index, then rows that are not in the
@@ -444,11 +443,6 @@ func (mb *mutationBuilder) buildLeftJoinForUpsertArbiter(
 						Strength:   tree.ForUpdate,
 						Targets:    []tree.TableName{tree.MakeUnqualifiedTableName(mb.tab.Name())},
 						WaitPolicy: tree.LockWaitBlock,
-						// Unique arbiters must ensure the non-existence of certain rows, so
-						// we use predicate locks instead of record locks to prevent
-						// insertion of new rows into the locked span(s) by other concurrent
-						// transactions.
-						Form: tree.LockPredicate,
 					},
 				},
 			}
@@ -458,6 +452,12 @@ func (mb *mutationBuilder) buildLeftJoinForUpsertArbiter(
 	var indexFlags *tree.IndexFlags
 	if source, ok := texpr.(*tree.AliasedTableExpr); ok {
 		indexFlags = source.IndexFlags
+	}
+	if mb.b.evalCtx.SessionData().AvoidFullTableScansInMutations {
+		if indexFlags == nil {
+			indexFlags = &tree.IndexFlags{}
+		}
+		indexFlags.AvoidFullScan = true
 	}
 
 	// Build the right side of the left outer join. Use a different instance of
@@ -477,6 +477,9 @@ func (mb *mutationBuilder) buildLeftJoinForUpsertArbiter(
 		locking,
 		inScope,
 		true, /* disableNotVisibleIndex */
+		// TODO(136704): Review and adjust the scope used here after implementing
+		// WITH CHECK to ensure correct filtering behavior for UPSERT operations.
+		cat.PolicyScopeExempt,
 	)
 	// Set fetchColIDs to reference the columns created for the fetch values.
 	mb.setFetchColIDs(mb.fetchScope.cols)
@@ -694,6 +697,9 @@ func (h *arbiterPredicateHelper) tableScope() *scope {
 			noRowLocking,
 			h.mb.b.allocScope(),
 			false, /* disableNotVisibleIndex */
+			// TODO(136704): Review and adjust the scope used here after implementing
+			// WITH CHECK to ensure correct filtering behavior for UPSERT operations.
+			cat.PolicyScopeExempt,
 		)
 	}
 	return h.tableScopeLazy

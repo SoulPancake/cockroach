@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tenantcapabilities
 
@@ -97,6 +92,10 @@ const (
 	// metrics, but this implementation is simpler).
 	CanViewAllMetrics // can_view_all_metrics
 
+	// CanPrepareTxns describes the ability of a tenant to prepare transactions as
+	// part of the XA two-phase commit protocol.
+	CanPrepareTxns // can_prepare_txns
+
 	MaxCapabilityID ID = iota - 1
 )
 
@@ -129,6 +128,7 @@ var capabilities = [MaxCapabilityID + 1]Capability{
 	TenantSpanConfigBounds: spanConfigBoundsCapability(TenantSpanConfigBounds),
 	CanDebugProcess:        boolCapability(CanDebugProcess),
 	CanViewAllMetrics:      boolCapability(CanViewAllMetrics),
+	CanPrepareTxns:         boolCapability(CanPrepareTxns),
 }
 
 // EnableAll enables maximum access to services.

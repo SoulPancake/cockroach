@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package regionliveness
 
@@ -19,7 +14,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	clustersettings "github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
@@ -34,6 +28,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness/slbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
@@ -102,13 +97,6 @@ type Prober interface {
 	GetProbeTimeout() (bool, time.Duration)
 	// MarkPhysicalRegionAsAvailable deletes the unavailable_at timestamp for a region.
 	MarkPhysicalRegionAsAvailable(ctx context.Context, txn *kv.Txn, region string, timestamp *tree.DTimestamp) error
-}
-
-// RegionProvider abstracts the lookup of regions (see regions.Provider).
-type RegionProvider interface {
-	// GetRegions provides access to the set of regions available to the
-	// current tenant.
-	GetRegions(ctx context.Context) (*serverpb.RegionsResponse, error)
 }
 
 type CachedDatabaseRegions interface {
@@ -213,6 +201,7 @@ func (l *livenessProber) ProbeLivenessWithPhysicalRegion(
 
 	// Region is alive or we hit some other error.
 	if err == nil || !IsQueryTimeoutErr(err) {
+		log.VEventf(ctx, 2, "region probe completed with error: %v", err)
 		return err
 	}
 
@@ -235,10 +224,12 @@ func (l *livenessProber) ProbeLivenessWithPhysicalRegion(
 		if err != nil {
 			return err
 		}
+		log.VEventf(ctx, 2, "marking region %q as dead at time: %s", string(regionBytes), txnTS.String())
 		if err := txn.Run(ctx, ba); err != nil {
 			// Conditional put failing is fine, since it means someone else
 			// has marked the region as dead.
 			if errors.HasType(err, &kvpb.ConditionFailedError{}) {
+				log.VEventf(ctx, 2, "ignoring condition failed for region: %q", string(regionBytes))
 				return nil
 			}
 			return err

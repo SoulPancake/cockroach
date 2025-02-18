@@ -1,18 +1,14 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexec
 
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -21,9 +17,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
+	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra/execopnode"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
@@ -73,11 +73,12 @@ type ParallelUnorderedSynchronizer struct {
 	// streamingMemAcc for the metadata.
 	metadataAccountedFor int64
 	inputs               []colexecargs.OpWithMetaInfo
-	inputCtxs            []context.Context
-	// cancelLocalInput stores context cancellation functions for each of the
-	// inputs. The functions are populated only if localPlan is true.
-	cancelLocalInput []context.CancelFunc
-	tracingSpans     []*tracing.Span
+	// cancelInputsOnDrain stores context cancellation functions for each of the
+	// inputs. The slice is only allocated and populated if eager cancellation
+	// on drain should be performed (see the comments in
+	// NewParallelUnorderedSynchronizer for more details).
+	cancelInputsOnDrain []context.CancelFunc
+	tracingSpans        []*tracing.Span
 	// readNextBatch is a slice of channels, where each channel corresponds to the
 	// input at the same index in inputs. It is used as a barrier for input
 	// goroutines to wait on until the Next goroutine signals that it is safe to
@@ -96,6 +97,13 @@ type ParallelUnorderedSynchronizer struct {
 	// nextBatch is a slice of functions each of which obtains a next batch from
 	// the corresponding to it input.
 	nextBatch []func()
+
+	// outputBatch is the output batch emitted by the synchronizer.
+	//
+	// The contract of Operator.Next encourages emitting the same batch across
+	// Next calls, so batches coming from the inputs are decomposed into vectors
+	// which are inserted into this batch.
+	outputBatch coldata.Batch
 
 	state int32
 	// externalWaitGroup refers to the WaitGroup passed in externally. Since the
@@ -128,6 +136,29 @@ func (s *ParallelUnorderedSynchronizer) Child(nth int, verbose bool) execopnode.
 	return s.inputs[nth].Root
 }
 
+func eagerCancellationDisabled(flowCtx *execinfra.FlowCtx) bool {
+	var sd *sessiondata.SessionData
+	if flowCtx.EvalCtx != nil { // EvalCtx can be nil in tests
+		sd = flowCtx.EvalCtx.SessionData()
+	}
+	return !flowCtx.Local || (sd != nil && sd.DisableVecUnionEagerCancellation)
+}
+
+// hasParallelUnorderedSync returns whether there is at least one parallel
+// unordered sync in the tree of operators rooted in op.
+func hasParallelUnorderedSync(op execopnode.OpNode) bool {
+	if _, ok := op.(*ParallelUnorderedSynchronizer); ok {
+		return true
+	}
+	const verbose = true
+	for i := 0; i < op.ChildCount(verbose); i++ {
+		if hasParallelUnorderedSync(op.Child(i, verbose)) {
+			return true
+		}
+	}
+	return false
+}
+
 // NewParallelUnorderedSynchronizer creates a new ParallelUnorderedSynchronizer.
 // On the first call to Next, len(inputs) goroutines are spawned to read each
 // input asynchronously (to not be limited by a slow input). These will
@@ -137,10 +168,45 @@ func (s *ParallelUnorderedSynchronizer) Child(nth int, verbose bool) execopnode.
 func NewParallelUnorderedSynchronizer(
 	flowCtx *execinfra.FlowCtx,
 	processorID int32,
-	streamingMemAcc *mon.BoundAccount,
+	allocator *colmem.Allocator,
+	inputTypes []*types.T,
 	inputs []colexecargs.OpWithMetaInfo,
 	wg *sync.WaitGroup,
 ) *ParallelUnorderedSynchronizer {
+	// Check whether the synchronizer should be allowed to eagerly cancel its
+	// inputs when it transitions into the draining state. This optimization is
+	// needed to support locality-optimized search feature.
+	//
+	// If the plan is distributed, there might be an inbox in the input tree,
+	// and the synchronizer cannot cancel the work eagerly because canceling the
+	// context would break the gRPC stream and make it impossible to fetch the
+	// remote metadata. Furthermore, it will result in the remote flow
+	// cancellation.
+	// TODO(yuzefovich): we could allow eager cancellation in the distributed
+	// plans too, but only of inputs that don't have inboxes in the input tree.
+	var allowEagerCancellationOnDrain bool
+	if !eagerCancellationDisabled(flowCtx) {
+		// If the plan is local, then the only requirement for allowing eager
+		// cancellation on drain is that there are no other parallel unordered
+		// syncs in the input trees. This is needed since the "child" sync won't
+		// be able to distinguish the benign context cancellation error from a
+		// true query execution error, so it can "poison" the query execution if
+		// the child sync hasn't transitioned into the draining mode when we
+		// perform the eager cancellation. The child sync also won't distinguish
+		// between the benign context cancellation and the flow cancellation, so
+		// it might not collect the metadata from its inputs when it should.
+		allowEagerCancellationOnDrain = true
+		for _, input := range inputs {
+			if hasParallelUnorderedSync(input.Root) {
+				allowEagerCancellationOnDrain = false
+				break
+			}
+		}
+	}
+	var cancelInputs []context.CancelFunc
+	if allowEagerCancellationOnDrain {
+		cancelInputs = make([]context.CancelFunc, len(inputs))
+	}
 	readNextBatch := make([]chan struct{}, len(inputs))
 	for i := range readNextBatch {
 		// Buffer readNextBatch chans to allow for non-blocking writes. There will
@@ -148,18 +214,18 @@ func NewParallelUnorderedSynchronizer(
 		readNextBatch[i] = make(chan struct{}, 1)
 	}
 	return &ParallelUnorderedSynchronizer{
-		flowCtx:           flowCtx,
-		processorID:       processorID,
-		streamingMemAcc:   streamingMemAcc,
-		inputs:            inputs,
-		inputCtxs:         make([]context.Context, len(inputs)),
-		cancelLocalInput:  make([]context.CancelFunc, len(inputs)),
-		tracingSpans:      make([]*tracing.Span, len(inputs)),
-		readNextBatch:     readNextBatch,
-		batches:           make([]coldata.Batch, len(inputs)),
-		nextBatch:         make([]func(), len(inputs)),
-		externalWaitGroup: wg,
-		internalWaitGroup: &sync.WaitGroup{},
+		flowCtx:             flowCtx,
+		processorID:         processorID,
+		streamingMemAcc:     allocator.Acc(),
+		inputs:              inputs,
+		cancelInputsOnDrain: cancelInputs,
+		tracingSpans:        make([]*tracing.Span, len(inputs)),
+		readNextBatch:       readNextBatch,
+		batches:             make([]coldata.Batch, len(inputs)),
+		nextBatch:           make([]func(), len(inputs)),
+		outputBatch:         allocator.NewMemBatchNoCols(inputTypes, coldata.BatchSize() /* capacity */),
+		externalWaitGroup:   wg,
+		internalWaitGroup:   &sync.WaitGroup{},
 		// batchCh is a buffered channel in order to offer non-blocking writes to
 		// input goroutines. During normal operation, this channel will have at most
 		// len(inputs) messages. However, during DrainMeta, inputs might need to
@@ -179,22 +245,14 @@ func (s *ParallelUnorderedSynchronizer) Init(ctx context.Context) {
 		return
 	}
 	for i, input := range s.inputs {
-		s.inputCtxs[i], s.tracingSpans[i] = execinfra.ProcessorSpan(
+		var inputCtx context.Context
+		inputCtx, s.tracingSpans[i] = execinfra.ProcessorSpan(
 			s.Ctx, s.flowCtx, fmt.Sprintf("parallel unordered sync input %d", i), s.processorID,
 		)
-		if s.flowCtx.Local {
-			// If the plan is local, there are no colrpc.Inboxes in this input
-			// tree, and the synchronizer can cancel the current work eagerly
-			// when transitioning into draining.
-			//
-			// If the plan is distributed, there might be an inbox in the
-			// input tree, and the synchronizer cannot cancel the work eagerly
-			// because canceling the context would break the gRPC stream and
-			// make it impossible to fetch the remote metadata. Furthermore, it
-			// will result in the remote flow cancellation.
-			s.inputCtxs[i], s.cancelLocalInput[i] = context.WithCancel(s.inputCtxs[i])
+		if s.cancelInputsOnDrain != nil {
+			inputCtx, s.cancelInputsOnDrain[i] = context.WithCancel(inputCtx)
 		}
-		input.Root.Init(s.inputCtxs[i])
+		input.Root.Init(inputCtx)
 		s.nextBatch[i] = func(inputOp colexecop.Operator, inputIdx int) func() {
 			return func() {
 				s.batches[inputIdx] = inputOp.Next()
@@ -259,7 +317,7 @@ func (s *ParallelUnorderedSynchronizer) init() {
 				switch state {
 				case parallelUnorderedSynchronizerStateRunning:
 					if err := colexecerror.CatchVectorizedRuntimeError(s.nextBatch[inputIdx]); err != nil {
-						if s.getState() == parallelUnorderedSynchronizerStateDraining && s.Ctx.Err() == nil && s.cancelLocalInput[inputIdx] != nil {
+						if s.getState() == parallelUnorderedSynchronizerStateDraining && s.Ctx.Err() == nil && s.cancelInputsOnDrain != nil {
 							// The synchronizer has just transitioned into the
 							// draining state and eagerly canceled work of this
 							// input. That cancellation is likely to manifest
@@ -394,7 +452,11 @@ func (s *ParallelUnorderedSynchronizer) Next() coldata.Batch {
 				s.bufferedMeta = append(s.bufferedMeta, msg.meta...)
 				continue
 			}
-			return msg.b
+			for i, vec := range msg.b.ColVecs() {
+				s.outputBatch.ReplaceCol(vec, i)
+			}
+			colexecutils.UpdateBatchState(s.outputBatch, msg.b.Length(), msg.b.Selection() != nil /* usesSel */, msg.b.Selection())
+			return s.outputBatch
 		}
 	}
 }
@@ -419,11 +481,51 @@ func (s *ParallelUnorderedSynchronizer) DrainMeta() []execinfrapb.ProducerMetada
 	if prevState == parallelUnorderedSynchronizerStateUninitialized {
 		s.init()
 	}
-	// Cancel all local inputs (we will still wait for all remote ones to
-	// return the next batch).
-	for _, cancelFunc := range s.cancelLocalInput {
+	// Cancel all inputs if eager cancellation is allowed.
+	for _, cancelFunc := range s.cancelInputsOnDrain {
 		if cancelFunc != nil {
+			// Note that if Init was never called, cancelFunc will be nil, in
+			// which case there is nothing to cancel.
 			cancelFunc()
+		}
+	}
+
+	bufferMeta := func(meta []execinfrapb.ProducerMetadata) {
+		if eagerCancellationDisabled(s.flowCtx) {
+			s.bufferedMeta = append(s.bufferedMeta, meta...)
+			return
+		}
+		// Given that the synchronizer is draining, it is safe to ignore all
+		// context cancellation errors in the metadata for local plans. This is
+		// the case because:
+		// - if the query should result in an error, then some other error was
+		// already propagated to the client, and this was the reason for why we
+		// transitioned into draining;
+		// - if the query should be successful, yet we have some pending context
+		// cancellation errors, then it must be the case that query execution
+		// was short-circuited (e.g. because of the LIMIT), so we can pretend
+		// the part of the execution that hit the pending error didn't happen
+		// since clearly it wasn't necessary to compute the query result.
+		//
+		// Note that we cannot ignore all errors here since some of them (like
+		// ReadWithinUncertaintyIntervalError) could poison the txn and need to
+		// be propagated to the client, so we only swallow the cancellation
+		// errors here.
+		// TODO(yuzefovich): the txn could be poisoned even by errors that we're
+		// swallowing. I think we could (and perhaps should) swallow all errors
+		// here.
+		for _, m := range meta {
+			if m.Err == nil ||
+				// This is ugly, but the context cancellation if observed in the
+				// KV layer can result in kvpb errors that don't satisfy
+				// errors.Is check (because they don't serialize the original
+				// error), so we have this string matching instead.
+				(!strings.Contains(m.Err.Error(), context.Canceled.Error()) &&
+					// If the cancellation is observed by the CancelChecker,
+					// then it propagates a QueryCanceledError.
+					!errors.Is(m.Err, cancelchecker.QueryCanceledError)) {
+				s.bufferedMeta = append(s.bufferedMeta, m)
+			}
 		}
 	}
 
@@ -443,7 +545,7 @@ func (s *ParallelUnorderedSynchronizer) DrainMeta() []execinfrapb.ProducerMetada
 			if msg == nil {
 				batchChDrained = true
 			} else if msg.meta != nil {
-				s.bufferedMeta = append(s.bufferedMeta, msg.meta...)
+				bufferMeta(msg.meta)
 			}
 		default:
 			batchChDrained = true
@@ -462,7 +564,7 @@ func (s *ParallelUnorderedSynchronizer) DrainMeta() []execinfrapb.ProducerMetada
 	// Drain the batchCh, this reads the metadata that was pushed.
 	for msg := <-s.batchCh; msg != nil; msg = <-s.batchCh {
 		if msg.meta != nil {
-			s.bufferedMeta = append(s.bufferedMeta, msg.meta...)
+			bufferMeta(msg.meta)
 		}
 	}
 
@@ -470,7 +572,7 @@ func (s *ParallelUnorderedSynchronizer) DrainMeta() []execinfrapb.ProducerMetada
 	for exitLoop := false; !exitLoop; {
 		select {
 		case err := <-s.errCh:
-			s.bufferedMeta = append(s.bufferedMeta, execinfrapb.ProducerMetadata{Err: err})
+			bufferMeta([]execinfrapb.ProducerMetadata{{Err: err}})
 		default:
 			exitLoop = true
 		}
@@ -478,6 +580,7 @@ func (s *ParallelUnorderedSynchronizer) DrainMeta() []execinfrapb.ProducerMetada
 
 	// Done.
 	s.setState(parallelUnorderedSynchronizerStateDone)
+	s.outputBatch = nil
 	bufferedMeta := s.bufferedMeta
 	// Eagerly lose the reference to the metadata since it might be of
 	// non-trivial footprint.

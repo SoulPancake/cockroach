@@ -1,16 +1,8 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import { connect } from "react-redux";
-import { createSelector } from "reselect";
-import { RouteComponentProps, withRouter } from "react-router-dom";
 import {
   Filters,
   defaultFilters,
@@ -23,23 +15,26 @@ import {
   TransactionsPageRootProps,
   api,
 } from "@cockroachlabs/cluster-ui";
+import { connect } from "react-redux";
+import { RouteComponentProps, withRouter } from "react-router-dom";
 import { bindActionCreators } from "redux";
+import { createSelector } from "reselect";
 
+import { trackApplySearchCriteriaAction } from "src/redux/analyticsActions";
 import {
   createSelectorForCachedDataField,
   refreshNodes,
   refreshTxns,
   refreshUserSQLRoles,
 } from "src/redux/apiReducers";
+import { LocalSetting } from "src/redux/localsettings";
+import { nodeRegionsByIDSelector } from "src/redux/nodes";
 import { resetSQLStatsAction } from "src/redux/sqlStats";
 import { AdminUIState } from "src/redux/state";
+import { setGlobalTimeScaleAction } from "src/redux/statements";
+import { selectTimeScale } from "src/redux/timeScale";
 import { selectHasAdminRole } from "src/redux/user";
 import { PrintTime } from "src/views/reports/containers/range/print";
-import { nodeRegionsByIDSelector } from "src/redux/nodes";
-import { setGlobalTimeScaleAction } from "src/redux/statements";
-import { LocalSetting } from "src/redux/localsettings";
-import { selectTimeScale } from "src/redux/timeScale";
-import { trackApplySearchCriteriaAction } from "src/redux/analyticsActions";
 
 import {
   activeTransactionsPageActionCreators,
@@ -50,7 +45,7 @@ import {
 // statistics were reset.
 export const selectLastReset = createSelector(
   (state: AdminUIState) => state.cachedData.transactions,
-  (state) => {
+  state => {
     if (!state?.data) {
       return "unknown";
     }
@@ -61,7 +56,7 @@ export const selectLastReset = createSelector(
 
 const selectOldestDate = createSelector(
   (state: AdminUIState) => state.cachedData.transactions,
-  (txns) => {
+  txns => {
     return txns?.data?.oldest_aggregated_ts_returned;
   },
 );

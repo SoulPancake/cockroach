@@ -1,28 +1,20 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { Loading } from "@cockroachlabs/cluster-ui";
+import forEach from "lodash/forEach";
 import map from "lodash/map";
 import sortBy from "lodash/sortBy";
-import forEach from "lodash/forEach";
 import React from "react";
-import { createSelector } from "reselect";
-import { connect } from "react-redux";
 import Helmet from "react-helmet";
+import { connect } from "react-redux";
 import { RouteComponentProps, withRouter } from "react-router-dom";
-import { Loading } from "@cockroachlabs/cluster-ui";
+import { createSelector } from "reselect";
 
 import { InfoTooltip } from "src/components/infoTooltip";
-import * as docsURL from "src/util/docs";
-import { FixLong } from "src/util/fixLong";
 import { cockroach } from "src/js/protos";
-import { AdminUIState } from "src/redux/state";
 import {
   refreshDataDistribution,
   refreshNodes,
@@ -34,13 +26,14 @@ import {
   selectLivenessRequestStatus,
   selectNodeRequestStatus,
 } from "src/redux/nodes";
+import { AdminUIState } from "src/redux/state";
+import * as docsURL from "src/util/docs";
+import { FixLong } from "src/util/fixLong";
 import { BackToAdvanceDebug } from "src/views/reports/containers/util";
 
 import ReplicaMatrix, { SchemaObject } from "./replicaMatrix";
 import { TreeNode, TreePath } from "./tree";
 import "./index.styl";
-
-
 
 type DataDistributionResponse =
   cockroach.server.serverpb.DataDistributionResponse;

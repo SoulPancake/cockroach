@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -30,7 +25,9 @@ func runRestart(ctx context.Context, t test.Test, c cluster.Cluster, downDuratio
 
 	t.Status("installing cockroach")
 	startOpts := option.DefaultStartOpts()
-	startOpts.RoachprodOpts.ExtraArgs = append(startOpts.RoachprodOpts.ExtraArgs, "--vmodule=raft_log_queue=3")
+	// Increase the log verbosity to help debug future failures.
+	startOpts.RoachprodOpts.ExtraArgs = append(startOpts.RoachprodOpts.ExtraArgs,
+		"--vmodule=store=2,store_rebalancer=2,liveness=2,raft_log_queue=3,replica_range_lease=3,raft=3")
 	c.Start(ctx, t.L(), startOpts, install.MakeClusterSettings(), crdbNodes)
 
 	// We don't really need tpcc, we just need a good amount of traffic and a good

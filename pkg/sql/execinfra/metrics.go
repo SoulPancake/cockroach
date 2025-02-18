@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package execinfra
 
@@ -21,6 +16,7 @@ import (
 type DistSQLMetrics struct {
 	QueriesActive               *metric.Gauge
 	QueriesTotal                *metric.Counter
+	DistributedCount            *metric.Counter
 	ContendedQueriesCount       *metric.Counter
 	CumulativeContentionNanos   *metric.Counter
 	FlowsActive                 *metric.Gauge
@@ -45,14 +41,20 @@ var _ metric.Struct = DistSQLMetrics{}
 var (
 	metaQueriesActive = metric.Metadata{
 		Name:        "sql.distsql.queries.active",
-		Help:        "Number of SQL queries currently active",
-		Measurement: "Queries",
+		Help:        "Number of invocations of the execution engine currently active (multiple of which may occur for a single SQL statement)",
+		Measurement: "DistSQL runs",
 		Unit:        metric.Unit_COUNT,
 	}
 	metaQueriesTotal = metric.Metadata{
 		Name:        "sql.distsql.queries.total",
-		Help:        "Number of SQL queries executed",
-		Measurement: "Queries",
+		Help:        "Number of invocations of the execution engine executed (multiple of which may occur for a single SQL statement)",
+		Measurement: "DistSQL runs",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaDistributedCount = metric.Metadata{
+		Name:        "sql.distsql.distributed_exec.count",
+		Help:        "Number of invocations of the execution engine executed with full or partial distribution (multiple of which may occur for a single SQL statement)",
+		Measurement: "DistSQL runs",
 		Unit:        metric.Unit_COUNT,
 	}
 	metaContendedQueriesCount = metric.Metadata{
@@ -150,6 +152,7 @@ func MakeDistSQLMetrics(histogramWindow time.Duration) DistSQLMetrics {
 	return DistSQLMetrics{
 		QueriesActive:             metric.NewGauge(metaQueriesActive),
 		QueriesTotal:              metric.NewCounter(metaQueriesTotal),
+		DistributedCount:          metric.NewCounter(metaDistributedCount),
 		ContendedQueriesCount:     metric.NewCounter(metaContendedQueriesCount),
 		CumulativeContentionNanos: metric.NewCounter(metaCumulativeContentionNanos),
 		FlowsActive:               metric.NewGauge(metaFlowsActive),
@@ -178,14 +181,17 @@ func MakeDistSQLMetrics(histogramWindow time.Duration) DistSQLMetrics {
 	}
 }
 
-// QueryStart registers the start of a new DistSQL query.
-func (m *DistSQLMetrics) QueryStart() {
+// RunStart registers the start of an invocation of the DistSQL engine.
+func (m *DistSQLMetrics) RunStart(distributed bool) {
 	m.QueriesActive.Inc(1)
 	m.QueriesTotal.Inc(1)
+	if distributed {
+		m.DistributedCount.Inc(1)
+	}
 }
 
-// QueryStop registers the end of a DistSQL query.
-func (m *DistSQLMetrics) QueryStop() {
+// RunStop registers the end of an invocation of the DistSQL engine.
+func (m *DistSQLMetrics) RunStop() {
 	m.QueriesActive.Dec(1)
 }
 

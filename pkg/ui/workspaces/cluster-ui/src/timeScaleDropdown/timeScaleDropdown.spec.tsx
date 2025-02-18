@@ -1,23 +1,20 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React, { useState } from "react";
-import { mount } from "enzyme";
-import moment from "moment-timezone";
-import { MemoryRouter } from "react-router";
-import { assert } from "chai";
 import { render } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { assert } from "chai";
+import { mount } from "enzyme";
+import moment from "moment-timezone";
+import React, { useState } from "react";
+import { MemoryRouter } from "react-router";
 
 import { timeFormat as customMenuTimeFormat } from "../dateRangeMenu";
 
+import RangeSelect from "./rangeSelect";
+import { TimeFrameControls } from "./timeFrameControls";
 import {
   formatRangeSelectSelected,
   generateDisabledArrows,
@@ -27,8 +24,6 @@ import {
   TimeScaleDropdown,
 } from "./timeScaleDropdown";
 import * as timescale from "./timeScaleTypes";
-import { TimeFrameControls } from "./timeFrameControls";
-import RangeSelect from "./rangeSelect";
 import { TimeWindow, ArrowDirection, TimeScale } from "./timeScaleTypes";
 
 /**
@@ -158,7 +153,12 @@ describe("<TimeScaleDropdown> component", function () {
         name: "next time interval",
       }),
     );
-    expect(mockSetTimeScale).toHaveBeenCalledTimes(2);
+    userEvent.click(
+      getByRole("button", {
+        name: "next time interval",
+      }),
+    );
+    expect(mockSetTimeScale).toHaveBeenCalledTimes(3);
     getByText("Past Hour");
   });
 

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package upgrades
 
@@ -72,10 +67,11 @@ func bootstrapCluster(
 		{"initialize the cluster.secret setting", initializeClusterSecret},
 		{"update system.locations with default location data", updateSystemLocationData},
 		{"create default databases", createDefaultDbs},
-		{"add default SQL schema telemetry schedule", ensureSQLSchemaTelemetrySchedule},
 		{"create jobs metrics polling job", createJobsMetricsPollingJob},
 		{"create sql activity updater job", createActivityUpdateJobMigration},
 		{"create mvcc stats job", createMVCCStatisticsJob},
+		{"create update cached table metadata job", createUpdateTableMetadataCacheJob},
+		{"maybe initialize replication standby read-only catalog", maybeSetupPCRStandbyReader},
 	} {
 		log.Infof(ctx, "executing bootstrap step %q", u.name)
 		if err := u.fn(ctx, cv, deps); err != nil {

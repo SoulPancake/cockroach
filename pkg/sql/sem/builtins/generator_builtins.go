@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package builtins
 
@@ -40,6 +35,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/syntheticprivilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/arith"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
@@ -54,6 +50,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 )
 
 // See the comments at the start of generators.go for details about
@@ -1402,7 +1399,7 @@ func (s *subscriptsValueGenerator) Values() (tree.Datums, error) {
 // EmptyGenerator returns a new, empty generator. Used when a SRF
 // evaluates to NULL.
 func EmptyGenerator() eval.ValueGenerator {
-	return &arrayValueGenerator{array: tree.NewDArray(types.Any)}
+	return &arrayValueGenerator{array: tree.NewDArray(types.AnyElement)}
 }
 
 // NullGenerator returns a new generator that returns a single row of nulls
@@ -1768,7 +1765,7 @@ func makeJSONPopulateImpl(gen eval.GeneratorWithExprsOverload, info string) tree
 		// structure. The first argument is an arbitrary tuple type, which is used
 		// to set the columns of the output when the builtin is used as a FROM
 		// source, or used as-is when it's used as an ordinary projection. To match
-		// PostgreSQL, the argument actually is types.Any, and its tuple-ness is
+		// PostgreSQL, the argument actually is types.AnyElement, and its tuple-ness is
 		// checked at execution time.
 		// The second argument is a JSON object or array of objects. The builtin
 		// transforms the JSON in the second argument into the tuple in the first
@@ -1779,7 +1776,7 @@ func makeJSONPopulateImpl(gen eval.GeneratorWithExprsOverload, info string) tree
 		// the default values of each field will be NULL.
 		// The second argument can also be null, in which case the first argument
 		// is returned as-is.
-		Types:              tree.ParamTypes{{Name: "base", Typ: types.Any}, {Name: "from_json", Typ: types.Jsonb}},
+		Types:              tree.ParamTypes{{Name: "base", Typ: types.AnyElement}, {Name: "from_json", Typ: types.Jsonb}},
 		ReturnType:         tree.IdentityReturnType(0),
 		GeneratorWithExprs: gen,
 		Class:              tree.GeneratorClass,
@@ -3303,7 +3300,17 @@ func makeTableMetricsGenerator(
 	storeID := int32(tree.MustBeDInt(args[1]))
 	start := []byte(tree.MustBeDBytes(args[2]))
 	end := []byte(tree.MustBeDBytes(args[3]))
-
+	// We use the keys as-is if they are valid engine keys, otherwise we encode
+	// them as a version-less key. This preserves the ability to pass in
+	// manually constructed engine keys, but also allows for the common practice
+	// of passing in keys extracted from the ranges table. It's possible
+	// (although somewhat unlikely) for a user key to validate as an engine key.
+	if ek, ok := storage.DecodeEngineKey(start); !ok || ek.Validate() != nil {
+		start = storage.EncodeMVCCKey(storage.MVCCKey{Key: start})
+	}
+	if ek, ok := storage.DecodeEngineKey(end); !ok || ek.Validate() != nil {
+		end = storage.EncodeMVCCKey(storage.MVCCKey{Key: start})
+	}
 	return newTableMetricsIterator(evalCtx, nodeID, storeID, start, end), nil
 }
 
@@ -3408,6 +3415,17 @@ func makeStorageInternalKeysGenerator(
 	storeID := int32(tree.MustBeDInt(args[1]))
 	start := []byte(tree.MustBeDBytes(args[2]))
 	end := []byte(tree.MustBeDBytes(args[3]))
+	// We use the keys as-is if they are valid engine keys, otherwise we encode
+	// them as a version-less key. This preserves the ability to pass in
+	// manually constructed engine keys, but also allows for the common practice
+	// of passing in keys extracted from the ranges table. It's possible
+	// (although somewhat unlikely) for a user key to validate as an engine key.
+	if ek, ok := storage.DecodeEngineKey(start); !ok || ek.Validate() != nil {
+		start = storage.EncodeMVCCKey(storage.MVCCKey{Key: start})
+	}
+	if ek, ok := storage.DecodeEngineKey(end); !ok || ek.Validate() != nil {
+		end = storage.EncodeMVCCKey(storage.MVCCKey{Key: end})
+	}
 
 	var megabytesPerSecond int64
 	if len(args) > 4 {
@@ -3672,11 +3690,11 @@ func newInternallyExecutedQueryIterator(
 // ExecuteQueryViaJobExecContext executes the provided query via the JobExecCtx
 // of the eval.Context. The method is initialized in the sql package to avoid
 // import cycles.
-var ExecuteQueryViaJobExecContext func(*eval.Context, context.Context, string, *kv.Txn, sessiondata.InternalExecutorOverride, string, ...interface{}) (eval.InternalRows, error)
+var ExecuteQueryViaJobExecContext func(*eval.Context, context.Context, redact.RedactableString, *kv.Txn, sessiondata.InternalExecutorOverride, string, ...interface{}) (eval.InternalRows, error)
 
 // Start implements the eval.ValueGenerator interface.
 func (qi *internallyExecutedQueryIterator) Start(ctx context.Context, txn *kv.Txn) error {
-	opName := "internally-executed-query-builtin"
+	var opName redact.RedactableString = "internally-executed-query-builtin"
 	var ieo sessiondata.InternalExecutorOverride
 	// Always use the session's user, even in "jobs-like" mode.
 	ieo.User = qi.evalCtx.SessionData().User()

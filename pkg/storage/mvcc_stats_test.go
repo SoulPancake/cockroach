@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
@@ -2060,7 +2055,13 @@ func TestMVCCStatsRandomized(t *testing.T) {
 		if s.rng.Intn(2) != 0 {
 			str = lock.Exclusive
 		}
-		if err := MVCCAcquireLock(ctx, s.batch, s.Txn, str, s.key, s.MSDelta, 0, 0); err != nil {
+		var txnMeta *enginepb.TxnMeta
+		var ignoredSeq []enginepb.IgnoredSeqNumRange
+		if s.Txn != nil {
+			txnMeta = &s.Txn.TxnMeta
+			ignoredSeq = s.Txn.IgnoredSeqNums
+		}
+		if err := MVCCAcquireLock(ctx, s.batch, txnMeta, ignoredSeq, str, s.key, s.MSDelta, 0, 0); err != nil {
 			return false, err.Error()
 		}
 		return true, ""

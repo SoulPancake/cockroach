@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package json
 
@@ -29,9 +24,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
+	"github.com/cockroachdb/cockroach/pkg/util/deduplicate"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/intsets"
-	uniq "github.com/cockroachdb/cockroach/pkg/util/unique"
 	"github.com/cockroachdb/errors"
 )
 
@@ -972,6 +967,19 @@ func ParseJSON(s string, opts ...ParseOption) (JSON, error) {
 	return cfg.parseJSON(s)
 }
 
+func init() {
+	encoding.PrettyPrintJSONValueEncoded = func(b []byte) (string, error) {
+		rem, j, err := DecodeJSON(b)
+		if err != nil {
+			return "", err
+		}
+		if len(rem) != 0 {
+			return "", errors.Newf("unexpected remainder after decoding JSON: %v", rem)
+		}
+		return j.String(), nil
+	}
+}
+
 // EncodeInvertedIndexKeys takes in a key prefix and returns a slice of inverted index keys,
 // one per unique path through the receiver.
 func EncodeInvertedIndexKeys(b []byte, json JSON) ([][]byte, error) {
@@ -1191,7 +1199,7 @@ func (j jsonArray) encodeInvertedIndexKeys(b []byte) ([][]byte, error) {
 	// to emit duplicate keys from this method, as it's more expensive to
 	// deduplicate keys via KV (which will actually write the keys) than to do
 	// it now (just an in-memory sort and distinct).
-	outKeys = uniq.UniquifyByteSlices(outKeys)
+	outKeys = deduplicate.ByteSlices(outKeys)
 	return outKeys, nil
 }
 

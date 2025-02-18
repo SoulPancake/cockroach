@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobs
 
@@ -169,7 +164,7 @@ func registerScopedScheduledJobExecutor(name string, ex ScheduledJobExecutor) fu
 // addFakeJob adds a fake job associated with the specified scheduleID.
 // Returns the id of the newly created job.
 func addFakeJob(
-	t *testing.T, h *testHelper, scheduleID jobspb.ScheduleID, status Status, txn isql.Txn,
+	t *testing.T, h *testHelper, scheduleID jobspb.ScheduleID, state State, txn isql.Txn,
 ) jobspb.JobID {
 	datums, err := txn.QueryRowEx(context.Background(), "fake-job", txn.KV(),
 		sessiondata.NodeUserSessionDataOverride,
@@ -179,7 +174,7 @@ VALUES ($1, $2, $3)
 RETURNING id`,
 			h.env.SystemJobsTableName(),
 		),
-		CreatedByScheduledJobs, scheduleID, status,
+		CreatedByScheduledJobs, scheduleID, state,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, datums)

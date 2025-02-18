@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package opttester
 
@@ -24,9 +19,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"text/tabwriter"
 	"time"
@@ -42,7 +39,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
@@ -74,6 +70,7 @@ import (
 	"github.com/cockroachdb/datadriven"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/errors/oserror"
+	"github.com/dustin/go-humanize"
 	"github.com/pmezard/go-difflib/difflib"
 )
 
@@ -223,8 +220,9 @@ type Flags struct {
 	// the import command.
 	File string
 
-	// CascadeLevels limits the depth of recursive cascades for build-cascades.
-	CascadeLevels int
+	// PostQueryLevels limits the depth of recursive post-queries for
+	// build-post-queries.
+	PostQueryLevels int
 
 	// NoStableFolds controls whether constant folding for normalization includes
 	// stable operators.
@@ -267,23 +265,25 @@ type Flags struct {
 
 	// TxnIsoLevel is the isolation level to plan for.
 	TxnIsoLevel isolation.Level
+
+	// MaxStackBytes specifies the number of bytes to limit the stack size to.
+	// If it is zero, the stack size has the default Go limit.
+	MaxStackBytes int
 }
 
 // New constructs a new instance of the OptTester for the given SQL statement.
 // Metadata used by the SQL query is accessed via the catalog.
-func New(catalog cat.Catalog, sql string) *OptTester {
+func New(catalog cat.Catalog, sqlStr string) *OptTester {
 	ctx := context.Background()
 	ot := &OptTester{
 		catalog: catalog,
-		sql:     sql,
+		sql:     sqlStr,
 		ctx:     ctx,
 		semaCtx: tree.MakeSemaContext(catalog),
 		evalCtx: eval.MakeTestingEvalContext(cluster.MakeTestingClusterSettings()),
 	}
 	ot.f = &norm.Factory{}
 	ot.f.Init(ot.ctx, &ot.evalCtx, ot.catalog)
-	ot.evalCtx.SessionData().ReorderJoinsLimit = opt.DefaultJoinOrderLimit
-	ot.evalCtx.SessionData().OptimizerUseMultiColStats = true
 	ot.Flags.ctx = ot.ctx
 	ot.Flags.evalCtx = ot.evalCtx
 	ot.semaCtx.SearchPath = tree.EmptySearchPath
@@ -291,37 +291,15 @@ func New(catalog cat.Catalog, sql string) *OptTester {
 	// time. May 10, 2017 is a historic day: the release date of CockroachDB 1.0.
 	ot.evalCtx.TxnTimestamp = time.Date(2017, 05, 10, 13, 0, 0, 0, time.UTC)
 
-	// Set any OptTester-wide session flags here.
+	// Set session settings to their global defaults.
+	if err := sql.TestingResetSessionVariables(ctx, ot.evalCtx); err != nil {
+		panic(errors.Wrap(err, "could not reset session variables"))
+	}
 
+	// Set non-default session settings.
 	ot.evalCtx.SessionData().UserProto = username.MakeSQLUsernameFromPreNormalizedString("opttester").EncodeProto()
 	ot.evalCtx.SessionData().Database = "defaultdb"
 	ot.evalCtx.SessionData().ZigzagJoinEnabled = true
-	ot.evalCtx.SessionData().OptimizerUseForecasts = true
-	ot.evalCtx.SessionData().OptimizerUseHistograms = true
-	ot.evalCtx.SessionData().LocalityOptimizedSearch = true
-	ot.evalCtx.SessionData().ReorderJoinsLimit = opt.DefaultJoinOrderLimit
-	ot.evalCtx.SessionData().InsertFastPath = true
-	ot.evalCtx.SessionData().OptSplitScanLimit = tabledesc.MaxBucketAllowed
-	ot.evalCtx.SessionData().VariableInequalityLookupJoinEnabled = true
-	ot.evalCtx.SessionData().OptimizerUseImprovedDisjunctionStats = true
-	ot.evalCtx.SessionData().OptimizerUseLimitOrderingForStreamingGroupBy = true
-	ot.evalCtx.SessionData().OptimizerUseImprovedSplitDisjunctionForJoins = true
-	ot.evalCtx.SessionData().OptimizerAlwaysUseHistograms = true
-	ot.evalCtx.SessionData().OptimizerHoistUncorrelatedEqualitySubqueries = true
-	ot.evalCtx.SessionData().OptimizerUseImprovedComputedColumnFiltersDerivation = true
-	ot.evalCtx.SessionData().OptimizerUseImprovedJoinElimination = true
-	ot.evalCtx.SessionData().OptimizerUseProvidedOrderingFix = true
-	ot.evalCtx.SessionData().OptimizerMergeJoinsEnabled = true
-	ot.evalCtx.SessionData().OptimizerUseVirtualComputedColumnStats = true
-	ot.evalCtx.SessionData().OptimizerUseTrigramSimilarityOptimization = true
-	ot.evalCtx.SessionData().OptimizerUseImprovedDistinctOnLimitHintCosting = true
-	ot.evalCtx.SessionData().OptimizerUseImprovedTrigramSimilaritySelectivity = true
-	ot.evalCtx.SessionData().TrigramSimilarityThreshold = 0.3
-	ot.evalCtx.SessionData().OptimizerUseImprovedZigzagJoinCosting = true
-	ot.evalCtx.SessionData().OptimizerUseImprovedMultiColumnSelectivityEstimate = true
-	ot.evalCtx.SessionData().OptimizerProveImplicationWithVirtualComputedColumns = true
-	ot.evalCtx.SessionData().OptimizerPushOffsetIntoIndexJoin = true
-	ot.evalCtx.SessionData().OptimizerUsePolymorphicParameterFix = true
 
 	return ot
 }
@@ -373,10 +351,10 @@ func New(catalog cat.Catalog, sql string) *OptTester {
 //     attempts to use the placeholder fast path to obtain a fully optimized
 //     expression with placeholders.
 //
-//   - build-cascades [flags]
+//   - build-post-queries [flags]
 //
-//     Builds a query and then recursively builds cascading queries. Outputs all
-//     unoptimized plans.
+//     Builds a query and then recursively builds cascading queries and AFTER
+//     triggers. Outputs all unoptimized plans.
 //
 //   - optsteps [flags]
 //
@@ -484,7 +462,7 @@ func New(catalog cat.Catalog, sql string) *OptTester {
 //     modifies the existing set of the flags.
 //
 //   - no-stable-folds: disallows constant folding for stable operators; only
-//     used with "norm".
+//     used with "norm", "opt", "exprnorm", and "expropt".
 //
 //   - fully-qualify-names: fully qualify all column names in the test output.
 //
@@ -527,12 +505,6 @@ func New(catalog cat.Catalog, sql string) *OptTester {
 //   - table: used to set the current table used by the command. This is used by
 //     the inject-stats command.
 //
-//   - stats-quality-prefix: must be used with the stats-quality command. If
-//     rewriteActualFlag=true, indicates that a table should be created with the
-//     given prefix for the output of each subexpression in the query. Otherwise,
-//     outputs the name of the table that would be created for each
-//     subexpression.
-//
 //   - ignore-tables: specifies the set of stats tables for which stats quality
 //     comparisons should not be outputted. Only used with the stats-quality
 //     command. Note that tables can always be added to the `ignore-tables` set
@@ -548,18 +520,8 @@ func New(catalog cat.Catalog, sql string) *OptTester {
 //
 //   - inject-stats: the file path is relative to the test file.
 //
-//   - join-limit: sets the value for SessionData.ReorderJoinsLimit, which
-//     indicates the number of joins at which the optimizer should stop
-//     attempting to reorder.
-//
-//   - prefer-lookup-joins-for-fks: sets SessionData.PreferLookupJoinsForFKs to
-//     true, causing foreign key operations to prefer lookup joins.
-//
-//   - null-ordered-last: sets SessionData.NullOrderedLast to true, which orders
-//     NULL values last in ascending order.
-//
-//   - cascade-levels: used to limit the depth of recursive cascades for
-//     build-cascades.
+//   - post-query-levels: used to limit the depth of recursive cascades for
+//     build-post-queries.
 //
 //   - index-version: controls the version of the index descriptor created in
 //     the test catalog. This is used by the exec-ddl command for CREATE INDEX
@@ -592,6 +554,9 @@ func New(catalog cat.Catalog, sql string) *OptTester {
 //     full path or a relative path to testdata.
 //
 //   - isolation: sets the isolation level to plan for.
+//
+//   - max-stack: sets the maximum stack size for the goroutine that optimizes
+//     the query. See debug.SetMaxStack.
 func (ot *OptTester) RunCommand(tb testing.TB, d *datadriven.TestData) string {
 	// Allow testcases to override the flags.
 	for _, a := range d.CmdArgs {
@@ -615,6 +580,26 @@ func (ot *OptTester) RunCommand(tb testing.TB, d *datadriven.TestData) string {
 	ot.evalCtx.Placeholders = nil
 	ot.evalCtx.TxnIsoLevel = ot.Flags.TxnIsoLevel
 
+	if ot.Flags.MaxStackBytes > 0 {
+		originalMaxStack := debug.SetMaxStack(ot.Flags.MaxStackBytes)
+		defer debug.SetMaxStack(originalMaxStack)
+		// Spawn a separate goroutine. A fresh stack makes tests using this
+		// setting more reliable.
+		var wg sync.WaitGroup
+		wg.Add(1)
+		var res string
+		go func() {
+			defer wg.Done()
+			res = ot.runCommandInternal(tb, d)
+		}()
+		wg.Wait()
+		return res
+	} else {
+		return ot.runCommandInternal(tb, d)
+	}
+}
+
+func (ot *OptTester) runCommandInternal(tb testing.TB, d *datadriven.TestData) string {
 	switch d.Cmd {
 	case "exec-ddl":
 		testCatalog, ok := ot.catalog.(*testcat.Catalog)
@@ -698,7 +683,7 @@ func (ot *OptTester) RunCommand(tb testing.TB, d *datadriven.TestData) string {
 		}
 		return ot.FormatExpr(e)
 
-	case "build-cascades":
+	case "build-post-queries":
 		o := ot.makeOptimizer()
 		o.DisableOptimizations()
 		if err := ot.buildExpr(o.Factory()); err != nil {
@@ -706,13 +691,22 @@ func (ot *OptTester) RunCommand(tb testing.TB, d *datadriven.TestData) string {
 		}
 		e := o.Memo().RootExpr()
 
-		var buildCascades func(e opt.Expr, tp treeprinter.Node, level int)
-		buildCascades = func(e opt.Expr, tp treeprinter.Node, level int) {
-			if ot.Flags.CascadeLevels != 0 && level > ot.Flags.CascadeLevels {
+		var buildPostQueries func(e opt.Expr, tp treeprinter.Node, level int)
+		buildPostQueries = func(e opt.Expr, tp treeprinter.Node, level int) {
+			if ot.Flags.PostQueryLevels != 0 && level > ot.Flags.PostQueryLevels {
 				return
 			}
 			if opt.IsMutationOp(e) {
 				p := e.Private().(*memo.MutationPrivate)
+				inputRel := e.Child(0).(memo.RelExpr).Relational()
+
+				// Cascades need a map from the original memo to the one they are being
+				// built from. Since we're using the same memo to build the cascades, we
+				// build an identity map for the mutation's input columns.
+				var colMap opt.ColMap
+				inputRel.OutputCols.ForEach(func(col opt.ColumnID) {
+					colMap.Set(int(col), int(col))
+				})
 
 				for _, c := range p.FKCascades {
 					// We use the same memo to build the cascade. This makes the entire
@@ -724,26 +718,45 @@ func (ot *OptTester) RunCommand(tb testing.TB, d *datadriven.TestData) string {
 						ot.catalog,
 						o.Factory(),
 						c.WithID,
-						e.Child(0).(memo.RelExpr).Relational(),
-						c.OldValues,
-						c.NewValues,
+						inputRel,
+						colMap,
 					)
 					if err != nil {
 						d.Fatalf(tb, "error building cascade: %+v", err)
 					}
 					n := tp.Child("cascade")
 					n.Child(strings.TrimRight(ot.FormatExpr(cascade), "\n"))
-					buildCascades(cascade, n, level+1)
+					buildPostQueries(cascade, n, level+1)
+				}
+				if t := p.AfterTriggers; t != nil {
+					// We use the same memo to build the triggers. This makes the entire
+					// tree easier to read (e.g. the column IDs won't overlap).
+					triggers, err := t.Builder.Build(
+						context.Background(),
+						&ot.semaCtx,
+						&ot.evalCtx,
+						ot.catalog,
+						o.Factory(),
+						t.WithID,
+						inputRel,
+						colMap,
+					)
+					if err != nil {
+						d.Fatalf(tb, "error building triggers: %+v", err)
+					}
+					n := tp.Child("after-triggers")
+					n.Child(strings.TrimRight(ot.FormatExpr(triggers), "\n"))
+					buildPostQueries(triggers, n, level+1)
 				}
 			}
 			for i := 0; i < e.ChildCount(); i++ {
-				buildCascades(e.Child(i), tp, level)
+				buildPostQueries(e.Child(i), tp, level)
 			}
 		}
 		tp := treeprinter.New()
 		root := tp.Child("root")
 		root.Child(strings.TrimRight(ot.FormatExpr(e), "\n"))
-		buildCascades(e, root, 1)
+		buildPostQueries(e, root, 1)
 
 		return tp.String()
 
@@ -879,12 +892,17 @@ func (ot *OptTester) RunCommand(tb testing.TB, d *datadriven.TestData) string {
 	}
 }
 
+// GetMemo returns the memo for the current command, if any.
+func (ot *OptTester) GetMemo() *memo.Memo {
+	if ot.f == nil {
+		return nil
+	}
+	return ot.f.Memo()
+}
+
 // FormatExpr is a convenience wrapper for memo.FormatExpr.
 func (ot *OptTester) FormatExpr(e opt.Expr) string {
-	var mem *memo.Memo
-	if rel, ok := e.(memo.RelExpr); ok {
-		mem = rel.Memo()
-	}
+	mem := ot.f.Memo()
 	return memo.FormatExpr(
 		ot.ctx, e, ot.Flags.ExprFormat, false /* redactableValues */, mem, ot.catalog,
 	)
@@ -917,18 +935,19 @@ func (ot *OptTester) checkExpectedRules(tb testing.TB, d *datadriven.TestData) {
 }
 
 func (ot *OptTester) postProcess(tb testing.TB, d *datadriven.TestData, e opt.Expr) {
-	ot.fillInLazyProps(e)
+	mem := ot.f.Memo()
+	ot.fillInLazyProps(mem, e)
 
 	if rel, ok := e.(memo.RelExpr); ok {
 		for _, cols := range ot.Flags.ColStats {
-			memo.RequestColStat(ot.ctx, &ot.evalCtx, rel, cols)
+			memo.RequestColStat(ot.ctx, &ot.evalCtx, mem, rel, cols)
 		}
 	}
 	ot.checkExpectedRules(tb, d)
 }
 
 // Fills in lazily-derived properties (for display).
-func (ot *OptTester) fillInLazyProps(e opt.Expr) {
+func (ot *OptTester) fillInLazyProps(mem *memo.Memo, e opt.Expr) {
 	if rel, ok := e.(memo.RelExpr); ok {
 		// These properties are derived from the normalized expression.
 		rel = rel.FirstExpr()
@@ -937,14 +956,14 @@ func (ot *OptTester) fillInLazyProps(e opt.Expr) {
 		ot.f.CustomFuncs().DerivePruneCols(rel, intsets.Fast{} /* disabledRules */)
 
 		// Derive columns that are candidates for null rejection.
-		norm.DeriveRejectNullCols(rel, intsets.Fast{} /* disabledRules */)
+		norm.DeriveRejectNullCols(mem, rel, intsets.Fast{} /* disabledRules */)
 
 		// Make sure the interesting orderings are calculated.
-		ordering.DeriveInterestingOrderings(rel)
+		ordering.DeriveInterestingOrderings(mem, rel)
 	}
 
 	for i, n := 0, e.ChildCount(); i < n; i++ {
-		ot.fillInLazyProps(e.Child(i))
+		ot.fillInLazyProps(mem, e.Child(i))
 	}
 }
 
@@ -979,7 +998,7 @@ func (f *Flags) Set(arg datadriven.CmdArg) error {
 			if len(s) != 2 {
 				return errors.Errorf("Expected both session variable name and value for set flag")
 			}
-			err := sql.SetSessionVariable(f.ctx, f.evalCtx, s[0], s[1])
+			err := sql.TestingSetSessionVariable(f.ctx, f.evalCtx, s[0], s[1])
 			if err != nil {
 				return err
 			}
@@ -1134,15 +1153,15 @@ func (f *Flags) Set(arg datadriven.CmdArg) error {
 		}
 		f.File = arg.Vals[0]
 
-	case "cascade-levels":
+	case "post-query-levels":
 		if len(arg.Vals) != 1 {
-			return fmt.Errorf("cascade-levels requires a single argument")
+			return fmt.Errorf("post-query-levels requires a single argument")
 		}
 		levels, err := strconv.ParseInt(arg.Vals[0], 10, 64)
 		if err != nil {
-			return errors.Wrap(err, "cascade-levels")
+			return errors.Wrap(err, "post-query-levels")
 		}
-		f.CascadeLevels = int(levels)
+		f.PostQueryLevels = int(levels)
 
 	case "index-version":
 		if len(arg.Vals) != 1 {
@@ -1193,10 +1212,20 @@ func (f *Flags) Set(arg datadriven.CmdArg) error {
 		level, ok := isolation.Level_value[arg.Vals[0]]
 		if !ok {
 			return fmt.Errorf(
-				"invalid isolation level (must be found in %v): %v", isolation.Level_value, arg.Vals[0],
+				"invalid isolation level %q, must be one of %s", arg.Vals[0], isolation.Levels(),
 			)
 		}
 		f.TxnIsoLevel = isolation.Level(level)
+
+	case "max-stack":
+		if len(arg.Vals) != 1 {
+			return fmt.Errorf("max-stack requires one argument")
+		}
+		bytes, err := humanize.ParseBytes(arg.Vals[0])
+		if err != nil {
+			return err
+		}
+		f.MaxStackBytes = int(bytes)
 
 	default:
 		return fmt.Errorf("unknown argument: %s", arg.Key)
@@ -1249,7 +1278,9 @@ func (ot *OptTester) OptimizeWithTables(tables map[cat.StableID]cat.Table) (opt.
 	o.NotifyOnMatchedRule(func(ruleName opt.RuleName) bool {
 		return !ot.Flags.DisableRules.Contains(int(ruleName))
 	})
-	o.Factory().FoldingControl().AllowStableFolds()
+	if !ot.Flags.NoStableFolds {
+		o.Factory().FoldingControl().AllowStableFolds()
+	}
 	return ot.optimizeExpr(o, tables)
 }
 
@@ -1320,7 +1351,7 @@ func (ot *OptTester) AssignPlaceholders(
 	o.NotifyOnMatchedRule(maybeDisableRule)
 
 	o.Factory().FoldingControl().AllowStableFolds()
-	if err := o.Factory().AssignPlaceholders(prepMemo); err != nil {
+	if err = o.Factory().AssignPlaceholders(prepMemo); err != nil {
 		return nil, err
 	}
 	return o.Optimize()
@@ -1338,7 +1369,11 @@ func (ot *OptTester) PlaceholderFastPath() (_ opt.Expr, ok bool, _ error) {
 	if err != nil {
 		return nil, false, err
 	}
-	return o.TryPlaceholderFastPath()
+	ok, err = o.TryPlaceholderFastPath()
+	if err != nil {
+		return nil, false, err
+	}
+	return ot.f.Memo().RootExpr(), ok, nil
 }
 
 // Memo returns a string that shows the memo data structure that is constructed
@@ -1791,7 +1826,7 @@ func (ot *OptTester) optStepsDisplay(before string, after string, os *optSteps) 
 		ot.separator("=")
 		ot.output(format, args...)
 		if rel, ok := e.(memo.RelExpr); ok {
-			ot.output("  Cost: %.2f\n", rel.Cost())
+			ot.output("  Cost: %.2f\n", rel.Cost().C)
 		} else {
 			ot.output("\n")
 		}
@@ -2118,7 +2153,8 @@ func (ot *OptTester) createTableAs(name tree.TableName, rel memo.RelExpr) (*test
 
 	relProps := rel.Relational()
 	outputCols := relProps.OutputCols
-	colNameGen := memo.NewColumnNameGenerator(rel)
+	mem := ot.f.Memo()
+	colNameGen := memo.NewColumnNameGenerator(mem, rel)
 
 	// Create each of the columns and their estimated stats for the test catalog
 	// table.
@@ -2126,7 +2162,7 @@ func (ot *OptTester) createTableAs(name tree.TableName, rel memo.RelExpr) (*test
 	jsonStats := make([]stats.JSONStatistic, outputCols.Len())
 	i := 0
 	for col, ok := outputCols.Next(0); ok; col, ok = outputCols.Next(col + 1) {
-		colMeta := rel.Memo().Metadata().ColumnMeta(col)
+		colMeta := mem.Metadata().ColumnMeta(col)
 		colName := colNameGen.GenerateName(col)
 
 		columns[i].Init(
@@ -2146,7 +2182,7 @@ func (ot *OptTester) createTableAs(name tree.TableName, rel memo.RelExpr) (*test
 
 		// Make sure we have estimated stats for this column.
 		colSet := opt.MakeColSet(col)
-		memo.RequestColStat(ot.ctx, &ot.evalCtx, rel, colSet)
+		memo.RequestColStat(ot.ctx, &ot.evalCtx, mem, rel, colSet)
 		stat, ok := relProps.Statistics().ColStats.Lookup(colSet)
 		if !ok {
 			return nil, fmt.Errorf("could not find statistic for column %s", colName)
@@ -2245,7 +2281,7 @@ func (ot *OptTester) IndexCandidates() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	indexCandidates := indexrec.FindIndexCandidateSet(expr, expr.(memo.RelExpr).Memo().Metadata())
+	indexCandidates := indexrec.FindIndexCandidateSet(expr, ot.f.Memo().Metadata())
 
 	// Build a formatted string to output from the map of indexCandidates.
 	tablesOutput := make([]string, 0, len(indexCandidates))
@@ -2287,7 +2323,7 @@ func (ot *OptTester) IndexRecommendations() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	md := normExpr.(memo.RelExpr).Memo().Metadata()
+	md := ot.f.Memo().Metadata()
 	indexCandidates := indexrec.FindIndexCandidateSet(normExpr, md)
 	_, hypTables := indexrec.BuildOptAndHypTableMaps(ot.catalog, indexCandidates)
 
@@ -2295,7 +2331,7 @@ func (ot *OptTester) IndexRecommendations() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	md = optExpr.(memo.RelExpr).Memo().Metadata()
+	md = ot.f.Memo().Metadata()
 	recs, err := indexrec.FindRecs(ot.ctx, optExpr, md)
 	if err != nil {
 		return "", err

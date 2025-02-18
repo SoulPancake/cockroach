@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package upgrademanager_test
 
@@ -56,6 +51,13 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+func init() {
+	// We're going to be migrating from the Latest to newer, fake versions in
+	// several tests in this package of tests so we need to remove the typical
+	// guardrails against versions beyond latest.
+	clusterversion.TestingExtraVersions = true
+}
+
 // TestAlreadyRunningJobsAreHandledProperly is a relatively low-level test to
 // ensure that the behavior to detect running jobs is sane. The test intercepts
 // and blocks an upgrade that it first runs. It then duplicates the job to
@@ -67,7 +69,7 @@ func TestAlreadyRunningJobsAreHandledProperly(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	endCV := clusterversion.Latest
+	endCV := clusterversion.Latest + 1
 	if endCV.Version().Internal == 2 {
 		skip.IgnoreLint(t, "test cannot run until there is a new version key")
 	}
@@ -80,6 +82,11 @@ func TestAlreadyRunningJobsAreHandledProperly(t *testing.T) {
 		ReplicationMode: base.ReplicationManual,
 		ServerArgs: base.TestServerArgs{
 			DefaultTestTenant: base.TestIsForStuffThatShouldWorkWithSecondaryTenantsButDoesntYet(107396),
+			Settings: cluster.MakeTestingClusterSettingsWithVersions(
+				endCV.Version(),
+				startCV.Version(),
+				false,
+			),
 
 			Knobs: base.TestingKnobs{
 				JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
@@ -92,6 +99,9 @@ func TestAlreadyRunningJobsAreHandledProperly(t *testing.T) {
 					ProcessorNoTracingSpan: true,
 				},
 				UpgradeManager: &upgradebase.TestingKnobs{
+					ListBetweenOverride: func(from, to roachpb.Version) []roachpb.Version {
+						return []roachpb.Version{to}
+					},
 					RegistryOverride: func(v roachpb.Version) (upgradebase.Upgrade, bool) {
 						if v != endCV.Version() {
 							return nil, false
@@ -389,7 +399,7 @@ func TestMigrateUpdatesReplicaVersion(t *testing.T) {
 				},
 				UpgradeManager: &upgradebase.TestingKnobs{
 					ListBetweenOverride: func(from, to roachpb.Version) []roachpb.Version {
-						return []roachpb.Version{from, to}
+						return []roachpb.Version{to}
 					},
 					RegistryOverride: func(cv roachpb.Version) (upgradebase.Upgrade, bool) {
 						if cv != endCV {
@@ -465,13 +475,9 @@ func TestConcurrentMigrationAttempts(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	// We're going to be migrating from the MinSupportedVersion to imaginary future versions.
-	current := clusterversion.MinSupported.Version()
-	versions := []roachpb.Version{current}
-	for i := int32(1); i <= 4; i++ {
-		v := current
-		v.Internal += i * 2
-		versions = append(versions, v)
+	var versions []roachpb.Version
+	for i := clusterversion.Latest; i < clusterversion.Latest+4; i++ {
+		versions = append(versions, i.Version())
 	}
 
 	// RegisterKVMigration the upgrades to update the map with run counts.
@@ -498,7 +504,13 @@ func TestConcurrentMigrationAttempts(t *testing.T) {
 				},
 				UpgradeManager: &upgradebase.TestingKnobs{
 					ListBetweenOverride: func(from, to roachpb.Version) []roachpb.Version {
-						return versions
+						var res []roachpb.Version
+						for _, v := range versions {
+							if from.Less(v) && v.LessEq(to) {
+								res = append(res, v)
+							}
+						}
+						return res
 					},
 					RegistryOverride: func(cv roachpb.Version) (upgradebase.Upgrade, bool) {
 						return upgrade.NewSystemUpgrade("test", cv, func(
@@ -550,7 +562,7 @@ func TestConcurrentMigrationAttempts(t *testing.T) {
 	for k, c := range migrationRunCounts {
 		require.Equalf(t, 1, c, "version: %v", k)
 	}
-	require.Len(t, migrationRunCounts, len(versions))
+	require.Len(t, migrationRunCounts, len(versions)-1)
 }
 
 // TestPauseMigration ensures that upgrades can indeed be paused and that
@@ -560,8 +572,8 @@ func TestPauseMigration(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	endCV := clusterversion.Latest
-	startCV := endCV - 1
+	endCV := clusterversion.Latest + 1
+	startCV := clusterversion.Latest
 
 	type migrationEvent struct {
 		unblock  chan<- error
@@ -573,7 +585,11 @@ func TestPauseMigration(t *testing.T) {
 		ReplicationMode: base.ReplicationManual,
 		ServerArgs: base.TestServerArgs{
 			DefaultTestTenant: base.TestIsForStuffThatShouldWorkWithSecondaryTenantsButDoesntYet(107393),
-
+			Settings: cluster.MakeTestingClusterSettingsWithVersions(
+				endCV.Version(),
+				startCV.Version(),
+				false,
+			),
 			Knobs: base.TestingKnobs{
 				JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 				Server: &server.TestingKnobs{
@@ -581,6 +597,15 @@ func TestPauseMigration(t *testing.T) {
 					DisableAutomaticVersionUpgrade: make(chan struct{}),
 				},
 				UpgradeManager: &upgradebase.TestingKnobs{
+					ListBetweenOverride: func(from, to roachpb.Version) []roachpb.Version {
+						// We expect calls to ListBetween to be made for (0.0, startCV] and (startCV, endCV].
+						if to != startCV.Version() {
+							if from != startCV.Version() || to != endCV.Version() {
+								panic(fmt.Sprintf("unexpected versions %v, %v\n", from, to))
+							}
+						}
+						return []roachpb.Version{to}
+					},
 					RegistryOverride: func(cv roachpb.Version) (upgradebase.Upgrade, bool) {
 						if cv != endCV.Version() {
 							return nil, false
@@ -666,6 +691,7 @@ SELECT id
 func TestPrecondition(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	skip.UnderStress(t, "flaky")
 
 	// Start by running v0. We want the precondition of v1 to prevent
 	// us from reaching v1 (or v2). We want the precondition to not be
@@ -681,7 +707,7 @@ func TestPrecondition(t *testing.T) {
 		version.Internal += 1
 		return version
 	}
-	v0 := clusterversion.MinSupported.Version()
+	v0 := clusterversion.Latest.Version()
 	v0_fence := fence(v0)
 	v1 := next(v0)
 	v1_fence := fence(v1)
@@ -827,7 +853,7 @@ func TestMigrationFailure(t *testing.T) {
 	// Pick a random version in to fail at
 	versions := clusterversion.ListBetween(startVersion, endVersion)
 	failVersion := versions[rand.Intn(len(versions))]
-	fenceVersion := upgrade.FenceVersionFor(ctx, clusterversion.ClusterVersion{Version: failVersion}).Version
+	fenceVersion := failVersion.FenceVersion()
 	t.Logf("test will fail at version: %s", failVersion.String())
 
 	// Create a storage cluster for the tenant.

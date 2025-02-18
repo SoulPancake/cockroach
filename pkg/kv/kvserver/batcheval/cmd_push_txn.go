@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval
 
@@ -310,6 +305,10 @@ func PushTxn(
 	// Determine what to do with the pushee, based on the push type.
 	switch pushType {
 	case kvpb.PUSH_ABORT:
+		if existTxn.Status == roachpb.PREPARED {
+			return result.Result{}, errors.AssertionFailedf(
+				"PUSH_ABORT succeeded against a PREPARED txn: %+v", existTxn)
+		}
 		// If aborting the transaction, set the new status.
 		reply.PusheeTxn.Status = roachpb.ABORTED
 		// Forward the timestamp to accommodate AbortSpan GC. See method comment for

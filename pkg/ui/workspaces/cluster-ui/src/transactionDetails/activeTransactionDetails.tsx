@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { ArrowLeft } from "@cockroachlabs/icons";
 import { Col, Row } from "antd";
@@ -15,23 +10,23 @@ import React, { useEffect } from "react";
 import Helmet from "react-helmet";
 import { Link, match, useHistory } from "react-router-dom";
 
-import { Button } from "src/button";
-import { commonStyles } from "src/common";
-import { SqlBox, SqlBoxSize } from "src/sql/box";
-import { SummaryCard, SummaryCardItem } from "src/summaryCard";
 import {
   ActiveTransaction,
   ExecutionContentionDetails,
 } from "src/activeExecutions";
 import { StatusIcon } from "src/activeExecutions/statusIcon";
-import summaryCardStyles from "src/summaryCard/summaryCard.module.scss";
-import { getMatchParamByName } from "src/util/query";
-import { executionIdAttr, DATE_FORMAT_24_TZ } from "src/util";
+import { Button } from "src/button";
+import { commonStyles } from "src/common";
 import { WaitTimeInsightsPanel } from "src/detailsPanels/waitTimeInsightsPanel";
+import { SqlBox, SqlBoxSize } from "src/sql/box";
+import { SummaryCard, SummaryCardItem } from "src/summaryCard";
+import summaryCardStyles from "src/summaryCard/summaryCard.module.scss";
+import { executionIdAttr, DATE_FORMAT_24_TZ } from "src/util";
+import { getMatchParamByName } from "src/util/query";
 
 import styles from "../statementDetails/statementDetails.module.scss";
-import { capitalize, Duration } from "../util/format";
 import { Timestamp } from "../timestamp";
+import { capitalize, Duration } from "../util/format";
 const cx = classNames.bind(styles);
 const summaryCardStylesCx = classNames.bind(summaryCardStyles);
 

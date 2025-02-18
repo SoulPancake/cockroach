@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -180,7 +175,6 @@ func newRaftLogQueue(store *Store, db *kv.DB) *raftLogQueue {
 			acceptsUnsplitRanges: true,
 			successes:            store.metrics.RaftLogQueueSuccesses,
 			failures:             store.metrics.RaftLogQueueFailures,
-			storeFailures:        store.metrics.StoreFailures,
 			pending:              store.metrics.RaftLogQueuePending,
 			processingNanos:      store.metrics.RaftLogQueueProcessingNanos,
 			disabledConfig:       kvserverbase.RaftLogQueueEnabled,
@@ -249,7 +243,7 @@ func newTruncateDecision(ctx context.Context, r *Replica) (truncateDecision, err
 	now := timeutil.Now()
 
 	r.mu.RLock()
-	raftLogSize := r.pendingLogTruncations.computePostTruncLogSize(r.mu.raftLogSize)
+	raftLogSize := r.pendingLogTruncations.computePostTruncLogSize(r.shMu.raftLogSize)
 	// A "cooperative" truncation (i.e. one that does not cut off followers from
 	// the log) takes place whenever there are more than
 	// RaftLogQueueStaleThreshold entries or the log's estimated size is above
@@ -270,7 +264,7 @@ func newTruncateDecision(ctx context.Context, r *Replica) (truncateDecision, err
 
 	const anyRecipientStore roachpb.StoreID = 0
 	_, pendingSnapshotIndex := r.getSnapshotLogTruncationConstraintsRLocked(anyRecipientStore, false /* initialOnly */)
-	lastIndex := r.mu.lastIndexNotDurable
+	lastIndex := r.shMu.lastIndexNotDurable
 	// NB: raftLogSize above adjusts for pending truncations that have already
 	// been successfully replicated via raft, but logSizeTrusted does not see if
 	// those pending truncations would cause a transition from trusted =>
@@ -279,7 +273,7 @@ func newTruncateDecision(ctx context.Context, r *Replica) (truncateDecision, err
 	// soon as those pending truncations are enacted r.mu.raftLogSizeTrusted
 	// will become false and we will recompute the size -- so this cannot cause
 	// an indefinite delay in recomputation.
-	logSizeTrusted := r.mu.raftLogSizeTrusted
+	logSizeTrusted := r.shMu.raftLogSizeTrusted
 	firstIndex := r.raftFirstIndexRLocked()
 	r.mu.RUnlock()
 	firstIndex = r.pendingLogTruncations.computePostTruncFirstIndex(firstIndex)
@@ -293,7 +287,7 @@ func newTruncateDecision(ctx context.Context, r *Replica) (truncateDecision, err
 
 	// Is this the raft leader? We only propose log truncation on the raft
 	// leader which has the up to date info on followers.
-	if raftStatus.RaftState != raft.StateLeader {
+	if raftStatus.RaftState != raftpb.StateLeader {
 		return truncateDecision{}, nil
 	}
 
@@ -687,26 +681,11 @@ func (rlq *raftLogQueue) process(
 
 	if _, recompute, _ := rlq.shouldQueueImpl(ctx, decision); recompute {
 		log.VEventf(ctx, 2, "recomputing raft log based on decision %+v", decision)
-
-		// We need to hold raftMu both to access the sideloaded storage and to
-		// make sure concurrent Raft activity doesn't foul up our update to the
-		// cached in-memory values.
-		r.raftMu.Lock()
-		n, err := ComputeRaftLogSize(ctx, r.RangeID, r.store.TODOEngine(), r.raftMu.sideloaded)
-		if err == nil {
-			r.mu.Lock()
-			r.mu.raftLogSize = n
-			r.mu.raftLogLastCheckSize = n
-			r.mu.raftLogSizeTrusted = true
-			r.mu.Unlock()
-		}
-		r.raftMu.Unlock()
-
-		if err != nil {
+		if size, err := r.asLogStorage().updateLogSize(ctx); err != nil {
 			return false, errors.Wrap(err, "recomputing raft log size")
+		} else {
+			log.VEventf(ctx, 2, "recomputed raft log size to %s", humanizeutil.IBytes(size))
 		}
-
-		log.VEventf(ctx, 2, "recomputed raft log size to %s", humanizeutil.IBytes(n))
 
 		// Override the decision, now that an accurate log size is available.
 		decision, err = newTruncateDecision(ctx, r)
@@ -728,11 +707,11 @@ func (rlq *raftLogQueue) process(
 	}
 	b := &kv.Batch{}
 	truncRequest := &kvpb.TruncateLogRequest{
-		RequestHeader: kvpb.RequestHeader{Key: r.Desc().StartKey.AsRawKey()},
-		Index:         decision.NewFirstIndex,
-		RangeID:       r.RangeID,
+		RequestHeader:      kvpb.RequestHeader{Key: r.Desc().StartKey.AsRawKey()},
+		Index:              decision.NewFirstIndex,
+		RangeID:            r.RangeID,
+		ExpectedFirstIndex: decision.Input.FirstIndex,
 	}
-	truncRequest.ExpectedFirstIndex = decision.Input.FirstIndex
 	b.AddRawRequest(truncRequest)
 	if err := rlq.db.Run(ctx, b); err != nil {
 		return false, err

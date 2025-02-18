@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storageccl
 
@@ -24,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble/sstable"
+	"github.com/cockroachdb/pebble/vfs"
 )
 
 // RemoteSSTs lets external SSTables get iterated directly in some cases,
@@ -220,7 +218,7 @@ func (r *sstReader) Close() error {
 }
 
 // Stat returns the size of the file.
-func (r *sstReader) Stat() (os.FileInfo, error) {
+func (r *sstReader) Stat() (vfs.FileInfo, error) {
 	return r.sz, nil
 }
 
@@ -304,9 +302,10 @@ func (r *sstReader) ReadAt(p []byte, offset int64) (int, error) {
 
 type sizeStat int64
 
-func (s sizeStat) Size() int64      { return int64(s) }
-func (sizeStat) IsDir() bool        { panic(errors.AssertionFailedf("unimplemented")) }
-func (sizeStat) ModTime() time.Time { panic(errors.AssertionFailedf("unimplemented")) }
-func (sizeStat) Mode() os.FileMode  { panic(errors.AssertionFailedf("unimplemented")) }
-func (sizeStat) Name() string       { panic(errors.AssertionFailedf("unimplemented")) }
-func (sizeStat) Sys() interface{}   { panic(errors.AssertionFailedf("unimplemented")) }
+func (s sizeStat) Size() int64          { return int64(s) }
+func (sizeStat) IsDir() bool            { panic(errors.AssertionFailedf("unimplemented")) }
+func (sizeStat) ModTime() time.Time     { panic(errors.AssertionFailedf("unimplemented")) }
+func (sizeStat) Mode() os.FileMode      { panic(errors.AssertionFailedf("unimplemented")) }
+func (sizeStat) Name() string           { panic(errors.AssertionFailedf("unimplemented")) }
+func (sizeStat) Sys() interface{}       { panic(errors.AssertionFailedf("unimplemented")) }
+func (sizeStat) DeviceID() vfs.DeviceID { panic(errors.AssertionFailedf("unimplemented")) }

@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package types
 
@@ -59,10 +54,10 @@ var (
 // instead of a method so that other packages can iterate over the map directly.
 // Note that additional elements for the array Oid types are added in init().
 var OidToType = map[oid.Oid]*T{
-	oid.T_anyelement: Any,
+	oid.T_anyelement: AnyElement,
 	oid.T_bit:        typeBit,
 	oid.T_bool:       Bool,
-	oid.T_bpchar:     typeBpChar,
+	oid.T_bpchar:     BPChar,
 	oid.T_bytea:      Bytes,
 	oid.T_char:       QChar,
 	oid.T_date:       Date,
@@ -97,6 +92,7 @@ var OidToType = map[oid.Oid]*T{
 	oid.T_timetz:       TimeTZ,
 	oid.T_timestamp:    Timestamp,
 	oid.T_timestamptz:  TimestampTZ,
+	oid.T_trigger:      Trigger,
 	oid.T_tsquery:      TSQuery,
 	oid.T_tsvector:     TSVector,
 	oid.T_unknown:      Unknown,

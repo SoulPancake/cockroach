@@ -1,39 +1,46 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 /**
  * Alerts is a collection of selectors which determine if there are any Alerts
  * to display based on the current redux state.
  */
 
+import filter from "lodash/filter";
+import has from "lodash/has";
+import isEmpty from "lodash/isEmpty";
+import isNil from "lodash/isNil";
+import without from "lodash/without";
 import moment from "moment-timezone";
-import { createSelector } from "reselect";
 import { Store, Dispatch, Action, AnyAction } from "redux";
 import { ThunkAction } from "redux-thunk";
-import has from "lodash/has";
-import without from "lodash/without";
-import isEmpty from "lodash/isEmpty";
-import filter from "lodash/filter";
-import isNil from "lodash/isNil";
+import { createSelector } from "reselect";
 
-import { longToInt } from "src/util/fixLong";
-import * as docsURL from "src/util/docs";
 import {
   singleVersionSelector,
   numNodesByVersionsTagSelector,
   numNodesByVersionsSelector,
 } from "src/redux/nodes";
+import * as docsURL from "src/util/docs";
+import { longToInt } from "src/util/fixLong";
 
 import { getDataFromServer } from "../util/dataFromServer";
 
+import {
+  refreshCluster,
+  refreshNodes,
+  refreshVersion,
+  refreshHealth,
+  refreshSettings,
+} from "./apiReducers";
+import {
+  selectClusterSettings,
+  selectClusterSettingVersion,
+} from "./clusterSettings";
 import { LocalSetting } from "./localsettings";
+import { AdminUIState, AppDispatch } from "./state";
 import {
   VERSION_DISMISSED_KEY,
   INSTRUCTIONS_BOX_COLLAPSED_KEY,
@@ -43,24 +50,13 @@ import {
   UIDataState,
   UIDataStatus,
 } from "./uiData";
-import {
-  refreshCluster,
-  refreshNodes,
-  refreshVersion,
-  refreshHealth,
-  refreshSettings,
-} from "./apiReducers";
-import { AdminUIState, AppDispatch } from "./state";
-import {
-  selectClusterSettings,
-  selectClusterSettingVersion,
-} from "./clusterSettings";
 
 export enum AlertLevel {
   NOTIFICATION,
   WARNING,
   CRITICAL,
   SUCCESS,
+  INFORMATION,
 }
 
 export interface AlertInfo {
@@ -637,20 +633,6 @@ export const upgradeNotFinalizedWarningSelector = createSelector(
 
 /**
  * Selector which returns an array of all active alerts which should be
- * displayed in the overview list page, these should be non-critical alerts.
- */
-
-export const overviewListAlertsSelector = createSelector(
-  staggeredVersionWarningSelector,
-  clusterPreserveDowngradeOptionOvertimeSelector,
-  upgradeNotFinalizedWarningSelector,
-  (...alerts: Alert[]): Alert[] => {
-    return without(alerts, null, undefined);
-  },
-);
-
-/**
- * Selector which returns an array of all active alerts which should be
  * displayed in the alerts panel, which is embedded within the cluster overview
  * page; currently, this includes all non-critical alerts.
  */
@@ -690,21 +672,48 @@ export const dataFromServerAlertSelector = createSelector(
   },
 );
 
-const licenseTypeNames = new Map<
-  string,
-  "Trial" | "Enterprise" | "Non-Commercial" | "None"
->([
-  ["Evaluation", "Trial"],
+export type LicenseType =
+  | "Evaluation"
+  | "Trial"
+  | "Enterprise"
+  | "Non-Commercial"
+  | "None"
+  | "Free";
+
+const licenseTypeNames = new Map<string, LicenseType>([
+  ["Evaluation", "Evaluation"],
   ["Enterprise", "Enterprise"],
   ["NonCommercial", "Non-Commercial"],
   ["OSS", "None"],
   ["BSD", "None"],
+  ["Free", "Free"],
+  ["Trial", "Trial"],
 ]);
 
 // licenseTypeSelector returns user-friendly names of license types.
 export const licenseTypeSelector = createSelector(
   getDataFromServer,
   data => licenseTypeNames.get(data.LicenseType) || "None",
+);
+
+export const licenseUpdateDismissedLocalSetting = new LocalSetting(
+  "license_update_dismissed",
+  localSettingsSelector,
+  moment(0),
+);
+
+/**
+ * Selector which returns an array of all active alerts which should be
+ * displayed in the overview list page, these should be non-critical alerts.
+ */
+
+export const overviewListAlertsSelector = createSelector(
+  staggeredVersionWarningSelector,
+  clusterPreserveDowngradeOptionOvertimeSelector,
+  upgradeNotFinalizedWarningSelector,
+  (...alerts: Alert[]): Alert[] => {
+    return without(alerts, null, undefined);
+  },
 );
 
 // daysUntilLicenseExpiresSelector returns number of days remaining before license expires.

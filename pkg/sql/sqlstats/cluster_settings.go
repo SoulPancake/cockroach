@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlstats
 
@@ -60,25 +55,6 @@ var DumpStmtStatsToLogBeforeReset = settings.RegisterBoolSetting(
 	"dump collected statement statistics to node logs when periodically cleared",
 	false,
 	settings.WithName("sql.metrics.statement_details.dump_to_logs.enabled"),
-	settings.WithPublic)
-
-// SampleLogicalPlans specifies whether we periodically sample the logical plan
-// for each fingerprint.
-var SampleLogicalPlans = settings.RegisterBoolSetting(
-	settings.ApplicationLevel,
-	"sql.metrics.statement_details.plan_collection.enabled",
-	"periodically save a logical plan for each fingerprint",
-	false,
-	settings.WithPublic)
-
-// LogicalPlanCollectionPeriod specifies the interval between collections of
-// logical plans for each fingerprint.
-var LogicalPlanCollectionPeriod = settings.RegisterDurationSetting(
-	settings.ApplicationLevel,
-	"sql.metrics.statement_details.plan_collection.period",
-	"the time until a new logical plan is collected",
-	5*time.Minute,
-	settings.NonNegativeDuration,
 	settings.WithPublic)
 
 // MaxMemSQLStatsStmtFingerprints specifies the maximum of unique statement

@@ -1,26 +1,21 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import * as protos from "@cockroachlabs/crdb-protobuf-client";
 import { assert } from "chai";
 import Long from "long";
-import * as protos from "@cockroachlabs/crdb-protobuf-client";
 
 import { Filters } from "../queryFilter";
 
+import { data, nodeRegions } from "./transactions.fixture";
 import {
   filterTransactions,
   generateRegion,
   getStatementsByFingerprintId,
   statementFingerprintIdsToText,
 } from "./utils";
-import { data, nodeRegions } from "./transactions.fixture";
 
 type Statement =
   protos.cockroach.server.serverpb.StatementsResponse.ICollectedStatementStatistics;

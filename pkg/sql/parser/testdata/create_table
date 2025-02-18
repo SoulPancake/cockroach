@@ -176,23 +176,24 @@ CREATE TABLE foo(a CHAR(0))
                          ^
 
 parse
-CREATE TABLE a (b BIT VARYING(2), c BIT(1))
+CREATE TABLE a (b BIT VARYING(2), c BIT(1), c BIT, c BIT(0))
 ----
-CREATE TABLE a (b VARBIT(2), c BIT) -- normalized!
-CREATE TABLE a (b VARBIT(2), c BIT) -- fully parenthesized
-CREATE TABLE a (b VARBIT(2), c BIT) -- literals removed
-CREATE TABLE _ (_ VARBIT(2), _ BIT) -- identifiers removed
+CREATE TABLE a (b VARBIT(2), c BIT, c BIT, c BIT(0)) -- normalized!
+CREATE TABLE a (b VARBIT(2), c BIT, c BIT, c BIT(0)) -- fully parenthesized
+CREATE TABLE a (b VARBIT(2), c BIT, c BIT, c BIT(0)) -- literals removed
+CREATE TABLE _ (_ VARBIT(2), _ BIT, _ BIT, _ BIT(0)) -- identifiers removed
 
 error
 CREATE TABLE test (
-  foo BIT(0)
+  foo BIT(-1)
 )
 ----
-at or near ")": syntax error: length for type bit must be at least 1
+at or near "-": syntax error
 DETAIL: source SQL:
 CREATE TABLE test (
-  foo BIT(0)
-           ^
+  foo BIT(-1)
+          ^
+HINT: try \h CREATE TABLE
 
 
 parse
@@ -1369,6 +1370,31 @@ CREATE TABLE a (b INT8, INVERTED INDEX (b)) -- literals removed
 CREATE TABLE _ (_ INT8, INVERTED INDEX (_)) -- identifiers removed
 
 parse
+CREATE TABLE a (b INT8, VECTOR INDEX (b))
+----
+CREATE TABLE a (b INT8, VECTOR INDEX (b))
+CREATE TABLE a (b INT8, VECTOR INDEX (b)) -- fully parenthesized
+CREATE TABLE a (b INT8, VECTOR INDEX (b)) -- literals removed
+CREATE TABLE _ (_ INT8, VECTOR INDEX (_)) -- identifiers removed
+
+# Explicitly name the index.
+parse
+CREATE TABLE a (b INT8, INVERTED INDEX i (b))
+----
+CREATE TABLE a (b INT8, INVERTED INDEX i (b))
+CREATE TABLE a (b INT8, INVERTED INDEX i (b)) -- fully parenthesized
+CREATE TABLE a (b INT8, INVERTED INDEX i (b)) -- literals removed
+CREATE TABLE _ (_ INT8, INVERTED INDEX _ (_)) -- identifiers removed
+
+parse
+CREATE TABLE a (b INT8, VECTOR INDEX i (b))
+----
+CREATE TABLE a (b INT8, VECTOR INDEX i (b))
+CREATE TABLE a (b INT8, VECTOR INDEX i (b)) -- fully parenthesized
+CREATE TABLE a (b INT8, VECTOR INDEX i (b)) -- literals removed
+CREATE TABLE _ (_ INT8, VECTOR INDEX _ (_)) -- identifiers removed
+
+parse
 CREATE TABLE a (b INT8, c INT8 REFERENCES foo)
 ----
 CREATE TABLE a (b INT8, c INT8 REFERENCES foo)
@@ -1601,6 +1627,14 @@ CREATE TABLE a (b INT8, INVERTED INDEX (b) WHERE b > _) -- literals removed
 CREATE TABLE _ (_ INT8, INVERTED INDEX (_) WHERE _ > 3) -- identifiers removed
 
 parse
+CREATE TABLE a (b INT8, VECTOR INDEX (b) WHERE b > 3)
+----
+CREATE TABLE a (b INT8, VECTOR INDEX (b) WHERE b > 3)
+CREATE TABLE a (b INT8, VECTOR INDEX (b) WHERE ((b) > (3))) -- fully parenthesized
+CREATE TABLE a (b INT8, VECTOR INDEX (b) WHERE b > _) -- literals removed
+CREATE TABLE _ (_ INT8, VECTOR INDEX (_) WHERE _ > 3) -- identifiers removed
+
+parse
 CREATE TABLE a (b INT8, c STRING, INDEX (b ASC, c DESC) STORING (c))
 ----
 CREATE TABLE a (b INT8, c STRING, INDEX (b ASC, c DESC) STORING (c))
@@ -1831,6 +1865,14 @@ CREATE TABLE a (INVERTED INDEX (b) PARTITION BY LIST (c) (PARTITION d VALUES IN 
 CREATE TABLE _ (INVERTED INDEX (_) PARTITION BY LIST (_) (PARTITION _ VALUES IN (1))) -- identifiers removed
 
 parse
+CREATE TABLE a (VECTOR INDEX (b) PARTITION BY LIST (c) (PARTITION d VALUES IN (1)))
+----
+CREATE TABLE a (VECTOR INDEX (b) PARTITION BY LIST (c) (PARTITION d VALUES IN (1)))
+CREATE TABLE a (VECTOR INDEX (b) PARTITION BY LIST (c) (PARTITION d VALUES IN ((1)))) -- fully parenthesized
+CREATE TABLE a (VECTOR INDEX (b) PARTITION BY LIST (c) (PARTITION d VALUES IN (_))) -- literals removed
+CREATE TABLE _ (VECTOR INDEX (_) PARTITION BY LIST (_) (PARTITION _ VALUES IN (1))) -- identifiers removed
+
+parse
 CREATE TABLE a (UNIQUE (b) PARTITION BY LIST (c) (PARTITION d VALUES IN (1)))
 ----
 CREATE TABLE a (UNIQUE (b) PARTITION BY LIST (c) (PARTITION d VALUES IN (1)))
@@ -1853,6 +1895,14 @@ CREATE INVERTED INDEX ON a (b) PARTITION BY LIST (c) (PARTITION d VALUES IN (1))
 CREATE INVERTED INDEX ON a (b) PARTITION BY LIST (c) (PARTITION d VALUES IN ((1))) -- fully parenthesized
 CREATE INVERTED INDEX ON a (b) PARTITION BY LIST (c) (PARTITION d VALUES IN (_)) -- literals removed
 CREATE INVERTED INDEX ON _ (_) PARTITION BY LIST (_) (PARTITION _ VALUES IN (1)) -- identifiers removed
+
+parse
+CREATE VECTOR INDEX ON a (b) PARTITION BY LIST (c) (PARTITION d VALUES IN (1))
+----
+CREATE VECTOR INDEX ON a (b) PARTITION BY LIST (c) (PARTITION d VALUES IN (1))
+CREATE VECTOR INDEX ON a (b) PARTITION BY LIST (c) (PARTITION d VALUES IN ((1))) -- fully parenthesized
+CREATE VECTOR INDEX ON a (b) PARTITION BY LIST (c) (PARTITION d VALUES IN (_)) -- literals removed
+CREATE VECTOR INDEX ON _ (_) PARTITION BY LIST (_) (PARTITION _ VALUES IN (1)) -- identifiers removed
 
 parse
 CREATE INDEX IF NOT EXISTS a ON b (c) PARTITION BY LIST (d) (PARTITION e VALUES IN (1))
@@ -2458,6 +2508,14 @@ CREATE TABLE a (b INT8, c STRING, INVERTED INDEX (b ASC, c DESC) WHERE c > 3 NOT
 CREATE TABLE a (b INT8, c STRING, INVERTED INDEX (b ASC, c DESC) WHERE ((c) > (3)) NOT VISIBLE) -- fully parenthesized
 CREATE TABLE a (b INT8, c STRING, INVERTED INDEX (b ASC, c DESC) WHERE c > _ NOT VISIBLE) -- literals removed
 CREATE TABLE _ (_ INT8, _ STRING, INVERTED INDEX (_ ASC, _ DESC) WHERE _ > 3 NOT VISIBLE) -- identifiers removed
+
+parse
+CREATE TABLE a (b INT8, c STRING, VECTOR INDEX (b ASC, c DESC) WHERE c > 3 NOT VISIBLE)
+----
+CREATE TABLE a (b INT8, c STRING, VECTOR INDEX (b ASC, c DESC) WHERE c > 3 NOT VISIBLE)
+CREATE TABLE a (b INT8, c STRING, VECTOR INDEX (b ASC, c DESC) WHERE ((c) > (3)) NOT VISIBLE) -- fully parenthesized
+CREATE TABLE a (b INT8, c STRING, VECTOR INDEX (b ASC, c DESC) WHERE c > _ NOT VISIBLE) -- literals removed
+CREATE TABLE _ (_ INT8, _ STRING, VECTOR INDEX (_ ASC, _ DESC) WHERE _ > 3 NOT VISIBLE) -- identifiers removed
 
 parse
 CREATE TABLE a (b INT8, c STRING, INDEX (b ASC, c DESC) STORING (c) VISIBILITY 0.2)

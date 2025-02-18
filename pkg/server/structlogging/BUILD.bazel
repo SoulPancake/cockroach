@@ -41,6 +41,7 @@ go_test(
         "//pkg/sql/catalog/desctestutils",
         "//pkg/testutils",
         "//pkg/testutils/serverutils",
+        "//pkg/testutils/skip",
         "//pkg/testutils/sqlutils",
         "//pkg/testutils/testcluster",
         "//pkg/util/leaktest",
@@ -50,5 +51,6 @@ go_test(
         "//pkg/util/randutil",
         "//pkg/util/syncutil",
         "@com_github_cockroachdb_errors//:errors",
+        "@com_github_stretchr_testify//assert",
     ],
 )

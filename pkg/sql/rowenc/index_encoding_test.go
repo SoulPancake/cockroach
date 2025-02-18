@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowenc_test
 
@@ -31,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	. "github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/idxtype"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -54,7 +50,7 @@ func makeTableDescForTest(
 	secondaryColumnIDs := make([]descpb.ColumnID, len(test.secondaryValues))
 	columns := make([]descpb.ColumnDescriptor, len(test.primaryValues)+len(test.secondaryValues))
 	var colMap catalog.TableColMap
-	secondaryType := descpb.IndexDescriptor_FORWARD
+	secondaryType := idxtype.FORWARD
 	for i := range columns {
 		columns[i] = descpb.ColumnDescriptor{
 			ID: descpb.ColumnID(i + 1),
@@ -66,10 +62,10 @@ func makeTableDescForTest(
 		} else {
 			columns[i].Type = test.secondaryValues[i-len(test.primaryValues)].ResolvedType()
 			if colinfo.ColumnTypeIsInvertedIndexable(columns[i].Type) {
-				secondaryType = descpb.IndexDescriptor_INVERTED
+				secondaryType = idxtype.INVERTED
 			}
 			if isSecondaryIndexForward && columns[i].Type.Family() == types.JsonFamily {
-				secondaryType = descpb.IndexDescriptor_FORWARD
+				secondaryType = idxtype.FORWARD
 			}
 			secondaryColumnIDs[i-len(test.primaryValues)] = columns[i].ID
 		}

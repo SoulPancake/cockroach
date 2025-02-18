@@ -1,10 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -17,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/cdceval"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/ccl/kvccl/kvfollowerreadsccl"
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobsprofiler"
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -80,6 +78,7 @@ func distChangefeedFlow(
 	execCtx sql.JobExecContext,
 	jobID jobspb.JobID,
 	details jobspb.ChangefeedDetails,
+	description string,
 	localState *cachedState,
 	resultsCh chan<- tree.Datums,
 ) error {
@@ -135,7 +134,7 @@ func distChangefeedFlow(
 		}
 	}
 	return startDistChangefeed(
-		ctx, execCtx, jobID, schemaTS, details, initialHighWater, localState, resultsCh)
+		ctx, execCtx, jobID, schemaTS, details, description, initialHighWater, localState, resultsCh)
 }
 
 func fetchTableDescriptors(
@@ -151,15 +150,15 @@ func fetchTableDescriptors(
 	) error {
 		targetDescs = make([]catalog.TableDescriptor, 0, targets.NumUniqueTables())
 		if err := txn.KV().SetFixedTimestamp(ctx, ts); err != nil {
-			return err
+			return errors.Wrapf(err, "setting timestamp for table descriptor fetch")
 		}
 		// Note that all targets are currently guaranteed to have a Table ID
 		// and lie within the primary index span. Deduplication is important
 		// here as requesting the same span twice will deadlock.
 		return targets.EachTableID(func(id catid.DescID) error {
-			tableDesc, err := descriptors.ByID(txn.KV()).WithoutNonPublic().Get().Table(ctx, id)
+			tableDesc, err := descriptors.ByIDWithoutLeased(txn.KV()).WithoutNonPublic().Get().Table(ctx, id)
 			if err != nil {
-				return err
+				return errors.Wrapf(err, "fetching table descriptor %d", id)
 			}
 			targetDescs = append(targetDescs, tableDesc)
 			return nil
@@ -230,6 +229,7 @@ func startDistChangefeed(
 	jobID jobspb.JobID,
 	schemaTS hlc.Timestamp,
 	details jobspb.ChangefeedDetails,
+	description string,
 	initialHighWater hlc.Timestamp,
 	localState *cachedState,
 	resultsCh chan<- tree.Datums,
@@ -258,12 +258,17 @@ func startDistChangefeed(
 	dsp := execCtx.DistSQLPlanner()
 	evalCtx := execCtx.ExtendedEvalContext()
 
+	//lint:ignore SA1019 deprecated usage
 	var checkpoint *jobspb.ChangefeedProgress_Checkpoint
 	if progress := localState.progress.GetChangefeed(); progress != nil && progress.Checkpoint != nil {
 		checkpoint = progress.Checkpoint
 	}
-	p, planCtx, err := makePlan(execCtx, jobID, details, initialHighWater,
-		trackedSpans, checkpoint, localState.drainingNodes)(ctx, dsp)
+	var spanLevelCheckpoint *jobspb.TimestampSpansMap
+	if progress := localState.progress.GetChangefeed(); progress != nil && progress.SpanLevelCheckpoint != nil {
+		spanLevelCheckpoint = progress.SpanLevelCheckpoint
+	}
+	p, planCtx, err := makePlan(execCtx, jobID, details, description, initialHighWater,
+		trackedSpans, checkpoint, spanLevelCheckpoint, localState.drainingNodes)(ctx, dsp)
 	if err != nil {
 		return err
 	}
@@ -359,7 +364,7 @@ var RangeDistributionStrategy = settings.RegisterEnumSetting(
 		"for the most balanced distribution, use `balanced_simple`. changing this setting "+
 		"will not override locality restrictions",
 	metamorphic.ConstantWithTestChoice("default_range_distribution_strategy",
-		"default", "balanced_simple").(string),
+		"default", "balanced_simple"),
 	map[rangeDistributionType]string{
 		defaultDistribution:        "default",
 		balancedSimpleDistribution: "balanced_simple",
@@ -376,9 +381,12 @@ func makePlan(
 	execCtx sql.JobExecContext,
 	jobID jobspb.JobID,
 	details jobspb.ChangefeedDetails,
+	description string,
 	initialHighWater hlc.Timestamp,
 	trackedSpans []roachpb.Span,
+	//lint:ignore SA1019 deprecated usage
 	checkpoint *jobspb.ChangefeedProgress_Checkpoint,
+	spanLevelCheckpoint *jobspb.TimestampSpansMap,
 	drainingNodes []roachpb.NodeID,
 ) func(context.Context, *sql.DistSQLPlanner) (*sql.PhysicalPlan, *sql.PlanningCtx, error) {
 	return func(ctx context.Context, dsp *sql.DistSQLPlanner) (*sql.PhysicalPlan, *sql.PlanningCtx, error) {
@@ -408,7 +416,7 @@ func makePlan(
 		}
 		planCtx := dsp.NewPlanningCtxWithOracle(ctx, execCtx.ExtendedEvalContext(), nil, /* planner */
 			blankTxn, sql.DistributionType(distMode), oracle, locFilter)
-		spanPartitions, err := dsp.PartitionSpans(ctx, planCtx, trackedSpans)
+		spanPartitions, err := dsp.PartitionSpans(ctx, planCtx, trackedSpans, sql.PartitionSpansBoundDefault)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -449,6 +457,7 @@ func makePlan(
 		// Use the same checkpoint for all aggregators; each aggregator will only look at
 		// spans that are assigned to it.
 		// We could compute per-aggregator checkpoint, but that's probably an overkill.
+		//lint:ignore SA1019 deprecated usage
 		var aggregatorCheckpoint execinfrapb.ChangeAggregatorSpec_Checkpoint
 		var checkpointSpanGroup roachpb.SpanGroup
 
@@ -467,24 +476,46 @@ func makePlan(
 				log.Infof(ctx, "watched spans for node %d: %v", sp.SQLInstanceID, sp)
 			}
 			watches := make([]execinfrapb.ChangeAggregatorSpec_Watch, len(sp.Spans))
+
+			var initialHighWaterPtr *hlc.Timestamp
 			for watchIdx, nodeSpan := range sp.Spans {
-				initialResolved := initialHighWater
-				if checkpointSpanGroup.Encloses(nodeSpan) {
-					initialResolved = checkpoint.Timestamp
-				}
-				watches[watchIdx] = execinfrapb.ChangeAggregatorSpec_Watch{
-					Span:            nodeSpan,
-					InitialResolved: initialResolved,
+				if evalCtx.Settings.Version.IsActive(ctx, clusterversion.V25_2) {
+					// If the cluster has been fully upgraded to v25.2, we should populate
+					// the initial highwater of ChangeAggregatorSpec_Watch and leave the
+					// initial resolved of each span empty. We rely on the aggregators to
+					// forward the checkpointed timestamp for every span based on
+					// aggregatorCheckpoint.
+					watches[watchIdx] = execinfrapb.ChangeAggregatorSpec_Watch{
+						Span: nodeSpan,
+					}
+					initialHighWaterPtr = &initialHighWater
+				} else {
+					// If the cluster has not been fully upgraded to v25.2, we should
+					// leave the initial highwater of ChangeAggregatorSpec_Watch as nil.
+					// We rely on this to tell the aggregators to the initial resolved
+					// timestamp for each span to infer the initial highwater. Read more
+					// from changeAggregator.getInitialHighWaterAndSpans.
+					initialResolved := initialHighWater
+					if checkpointSpanGroup.Encloses(nodeSpan) {
+						initialResolved = checkpoint.Timestamp
+					}
+					watches[watchIdx] = execinfrapb.ChangeAggregatorSpec_Watch{
+						Span:            nodeSpan,
+						InitialResolved: initialResolved,
+					}
 				}
 			}
 
 			aggregatorSpecs[i] = &execinfrapb.ChangeAggregatorSpec{
-				Watches:    watches,
-				Checkpoint: aggregatorCheckpoint,
-				Feed:       details,
-				UserProto:  execCtx.User().EncodeProto(),
-				JobID:      jobID,
-				Select:     execinfrapb.Expression{Expr: details.Select},
+				Watches:             watches,
+				Checkpoint:          aggregatorCheckpoint,
+				InitialHighWater:    initialHighWaterPtr,
+				SpanLevelCheckpoint: spanLevelCheckpoint,
+				Feed:                details,
+				UserProto:           execCtx.User().EncodeProto(),
+				JobID:               jobID,
+				Select:              execinfrapb.Expression{Expr: details.Select},
+				Description:         description,
 			}
 		}
 
@@ -497,6 +528,7 @@ func makePlan(
 			Feed:         details,
 			JobID:        jobID,
 			UserProto:    execCtx.User().EncodeProto(),
+			Description:  description,
 		}
 
 		if haveKnobs && maybeCfKnobs.OnDistflowSpec != nil {
@@ -524,7 +556,8 @@ func makePlan(
 
 		// Log the plan diagram URL so that we don't have to rely on it being in system.job_info.
 		const maxLenDiagURL = 1 << 20 // 1 MiB
-		flowSpecs := p.GenerateFlowSpecs()
+		flowSpecs, cleanup := p.GenerateFlowSpecs()
+		defer cleanup(flowSpecs)
 		if _, diagURL, err := execinfrapb.GeneratePlanDiagramURL(
 			fmt.Sprintf("changefeed: %d", jobID),
 			flowSpecs,

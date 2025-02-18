@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package enginepb
 
@@ -67,7 +62,7 @@ func TxnSeqIsIgnored(seq TxnSeq, ignored []IgnoredSeqNumRange) bool {
 
 // Short returns a prefix of the transaction's ID.
 func (t TxnMeta) Short() redact.SafeString {
-	return redact.SafeString(t.ID.Short())
+	return redact.SafeString(t.ID.Short().String())
 }
 
 // Total returns the range size as the sum of the key and value

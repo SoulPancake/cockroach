@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowflow
 
@@ -463,20 +458,25 @@ func (f *rowBasedFlow) setupRouter(
 	}
 	// Create monitors after successfully connecting the streams.
 	memoryMonitors := make([]*mon.BytesMonitor, len(spec.Streams))
+	unlimitedMemMonitors := make([]*mon.BytesMonitor, len(spec.Streams))
 	diskMonitors := make([]*mon.BytesMonitor, len(spec.Streams))
 	for i := range spec.Streams {
 		memoryMonitors[i] = execinfra.NewLimitedMonitor(
 			ctx, f.Mon, &f.FlowCtx,
-			redact.Sprintf("router-limited-%d", spec.Streams[i].StreamID),
+			"router-limited-"+redact.SafeString(spec.Streams[i].StreamID.String()),
+		)
+		unlimitedMemMonitors[i] = execinfra.NewMonitor(
+			ctx, f.Mon, "router-unlimited-"+redact.SafeString(spec.Streams[i].StreamID.String()),
 		)
 		diskMonitors[i] = execinfra.NewMonitor(
 			ctx, f.DiskMonitor,
-			redact.Sprintf("router-disk-%d", spec.Streams[i].StreamID),
+			"router-disk-"+redact.SafeString(spec.Streams[i].StreamID.String()),
 		)
 	}
 	f.monitors = append(f.monitors, memoryMonitors...)
+	f.monitors = append(f.monitors, unlimitedMemMonitors...)
 	f.monitors = append(f.monitors, diskMonitors...)
-	return makeRouter(spec, streams, memoryMonitors, diskMonitors)
+	return makeRouter(spec, streams, memoryMonitors, unlimitedMemMonitors, diskMonitors)
 }
 
 // Release releases this rowBasedFlow back to the pool.
@@ -492,7 +492,7 @@ func (f *rowBasedFlow) Release() {
 func (f *rowBasedFlow) Cleanup(ctx context.Context) {
 	startCleanup, endCleanup := f.FlowBase.GetOnCleanupFns()
 	startCleanup()
-	defer endCleanup()
+	defer endCleanup(ctx)
 	for i := range f.monitors {
 		f.monitors[i].Stop(ctx)
 	}

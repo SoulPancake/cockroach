@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -56,7 +51,7 @@ func newDatabaseRegionChangeFinalizer(
 
 	var regionalByRowTables []*tabledesc.Mutable
 	if err := func() error {
-		dbDesc, err := txn.Descriptors().ByID(txn.KV()).WithoutNonPublic().Get().Database(ctx, dbID)
+		dbDesc, err := txn.Descriptors().ByIDWithoutLeased(txn.KV()).WithoutNonPublic().Get().Database(ctx, dbID)
 		if err != nil {
 			return err
 		}
@@ -162,7 +157,7 @@ func (r *databaseRegionChangeFinalizer) updateGlobalTablesZoneConfig(
 
 	descsCol := r.localPlanner.Descriptors()
 
-	dbDesc, err := descsCol.ByID(txn.KV()).WithoutNonPublic().Get().Database(ctx, r.dbID)
+	dbDesc, err := descsCol.ByIDWithoutLeased(txn.KV()).WithoutNonPublic().Get().Database(ctx, r.dbID)
 	if err != nil {
 		return err
 	}
@@ -218,11 +213,13 @@ func (r *databaseRegionChangeFinalizer) updateDatabaseZoneConfig(
 func (r *databaseRegionChangeFinalizer) repartitionRegionalByRowTables(
 	ctx context.Context, txn descs.Txn,
 ) (repartitioned []*tabledesc.Mutable, zoneConfigUpdates []*zoneConfigUpdate, _ error) {
-	var regionConfigOpts []SynthesizeRegionConfigOption
+	var regionConfigOpts []multiregion.SynthesizeRegionConfigOption
 	// For regional by row tables these will be forced as survive zone on
 	// the system database, even if the system database is survive region
 	if r.dbID == keys.SystemDatabaseID {
-		regionConfigOpts = []SynthesizeRegionConfigOption{SynthesizeRegionConfigOptionForceSurvivalZone}
+		regionConfigOpts = []multiregion.SynthesizeRegionConfigOption{
+			multiregion.SynthesizeRegionConfigOptionForceSurvivalZone,
+		}
 	}
 
 	regionConfig, err := SynthesizeRegionConfig(ctx, txn.KV(), r.dbID, r.localPlanner.Descriptors(), regionConfigOpts...)

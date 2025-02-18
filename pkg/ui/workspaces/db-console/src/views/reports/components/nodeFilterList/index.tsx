@@ -1,22 +1,17 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
 import { Location } from "history";
-import isEmpty from "lodash/isEmpty";
 import forEach from "lodash/forEach";
-import map from "lodash/map";
-import join from "lodash/join";
+import isEmpty from "lodash/isEmpty";
 import isNil from "lodash/isNil";
-import split from "lodash/split";
+import join from "lodash/join";
+import map from "lodash/map";
 import sortBy from "lodash/sortBy";
+import split from "lodash/split";
+import React from "react";
 
 import * as protos from "src/js/protos";
 

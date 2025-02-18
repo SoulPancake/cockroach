@@ -1,23 +1,10 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import moment from "moment-timezone";
 
-import {
-  filterStatementInsights,
-  filterTransactionInsights,
-  getAppsFromStatementInsights,
-  getAppsFromTransactionInsights,
-  getInsightsFromProblemsAndCauses,
-  mergeTxnInsightDetails,
-} from "./utils";
 import {
   ContentionDetails,
   failedExecutionInsight,
@@ -34,6 +21,14 @@ import {
   TxnInsightDetails,
   TxnInsightEvent,
 } from "./types";
+import {
+  filterStatementInsights,
+  filterTransactionInsights,
+  getAppsFromStatementInsights,
+  getAppsFromTransactionInsights,
+  getInsightsFromProblemsAndCauses,
+  mergeTxnInsightDetails,
+} from "./utils";
 
 const INTERNAL_APP_PREFIX = "$ internal";
 

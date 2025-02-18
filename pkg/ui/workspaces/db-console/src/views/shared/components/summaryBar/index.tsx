@@ -1,23 +1,18 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
 import classNames from "classnames";
 import isNumber from "lodash/isNumber";
 import last from "lodash/last";
 import sum from "lodash/sum";
+import React from "react";
 
-import * as protos from "src/js/protos";
-import { MetricsDataProvider } from "src/views/shared/containers/metricDataProvider";
-import { MetricsDataComponentProps } from "src/views/shared/components/metricQuery";
 import { InfoTooltip } from "src/components/infoTooltip";
+import * as protos from "src/js/protos";
+import { MetricsDataComponentProps } from "src/views/shared/components/metricQuery";
+import { MetricsDataProvider } from "src/views/shared/containers/metricDataProvider";
 
 import "./summarybar.styl";
 

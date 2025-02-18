@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package eval
 
@@ -18,7 +13,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/apd/v3"
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/geo"
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
@@ -606,11 +600,6 @@ func performCastWithoutPrecisionTruncation(
 		}
 
 	case types.PGVectorFamily:
-		if !evalCtx.Settings.Version.IsActive(ctx, clusterversion.V24_2) {
-			return nil, pgerror.Newf(pgcode.FeatureNotSupported,
-				"version %v must be finalized to use vector",
-				clusterversion.V24_2.Version())
-		}
 		switch d := d.(type) {
 		case *tree.DString:
 			return tree.ParseDPGVector(string(*d))

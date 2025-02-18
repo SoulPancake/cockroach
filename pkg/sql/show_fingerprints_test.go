@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -27,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/spanconfig/spanconfigptsreader"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -140,6 +136,11 @@ func TestShowTenantFingerprintsProtectsTimestamp(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	// Under deadlock there isn't enough time for the CREATE TENANT txn to commit
+	// due to the intervals we lower to speed up this test. There is no difference
+	// otherwise when running this test under deadlock
+	skip.UnderDeadlock(t, 121445, "Deadlock makes txns take too long to commit")
+
 	ctx := context.Background()
 
 	var exportStartedClosed atomic.Bool
@@ -148,8 +149,7 @@ func TestShowTenantFingerprintsProtectsTimestamp(t *testing.T) {
 	testingRequestFilter := func(_ context.Context, ba *kvpb.BatchRequest) *kvpb.Error {
 		for _, req := range ba.Requests {
 			if expReq := req.GetExport(); expReq != nil {
-				if expReq.ExportFingerprint && !exportStartedClosed.Load() {
-					exportStartedClosed.Store(true)
+				if expReq.ExportFingerprint && exportStartedClosed.CompareAndSwap(false, true) {
 					close(exportsStarted)
 					<-exportsResume
 				}
@@ -202,7 +202,7 @@ func TestShowTenantFingerprintsProtectsTimestamp(t *testing.T) {
 		t.Logf("udating PTS reader cache to %s", asOf)
 		require.NoError(
 			t,
-			spanconfigptsreader.TestingRefreshPTSState(ctx, t, ptsReader, asOf),
+			spanconfigptsreader.TestingRefreshPTSState(ctx, ptsReader, asOf),
 		)
 		require.NoError(t, repl.ReadProtectedTimestampsForTesting(ctx))
 	}

@@ -1,17 +1,12 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { api as clusterUiApi } from "@cockroachlabs/cluster-ui";
 import { expectSaga } from "redux-saga-test-plan";
 import { call } from "redux-saga-test-plan/matchers";
 import { throwError } from "redux-saga-test-plan/providers";
-import { api as clusterUiApi } from "@cockroachlabs/cluster-ui";
 
 import { PayloadAction, WithRequest } from "src/interfaces/action";
 import {
@@ -46,6 +41,7 @@ describe("statementsSagas", () => {
         minExecutionLatencySeconds: minExecLatency,
         expiresAfterSeconds: expiresAfter,
         planGist: planGist,
+        redacted: false,
       };
       const action = createStatementDiagnosticsReportAction(
         insertStmtDiagnosticsRequest,
@@ -77,6 +73,7 @@ describe("statementsSagas", () => {
       minExecutionLatencySeconds: minExecLatency,
       expiresAfterSeconds: expiresAfter,
       planGist: planGist,
+      redacted: false,
     };
     const action = createStatementDiagnosticsReportAction(
       insertStmtDiagnosticsRequest,

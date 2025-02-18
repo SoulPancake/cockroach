@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package randgen
 
@@ -16,6 +11,7 @@ import (
 	"math"
 	"math/bits"
 	"math/rand"
+	"strings"
 	"time"
 	"unicode"
 
@@ -25,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgrepl/lsn"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/bitarray"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/ipaddr"
@@ -267,6 +264,9 @@ func RandDatumWithNullChance(
 		if typ.Oid() == oid.T_name {
 			return tree.NewDName(string(p))
 		}
+		if typ.Oid() == oid.T_bpchar {
+			return tree.NewDString(strings.TrimRight(string(p), " "))
+		}
 		return tree.NewDString(string(p))
 	case types.BytesFamily:
 		p := make([]byte, rng.Intn(10))
@@ -330,7 +330,13 @@ func RandDatumWithNullChance(
 	case types.TSQueryFamily:
 		return tree.NewDTSQuery(tsearch.RandomTSQuery(rng))
 	case types.PGVectorFamily:
-		return tree.NewDPGVector(vector.Random(rng))
+		var maxDim = 1000
+		if util.RaceEnabled {
+			// Some tests might be significantly slower under race, so we reduce
+			// the dimensionality.
+			maxDim = 50
+		}
+		return tree.NewDPGVector(vector.Random(rng, maxDim))
 	default:
 		panic(errors.AssertionFailedf("invalid type %v", typ.DebugString()))
 	}

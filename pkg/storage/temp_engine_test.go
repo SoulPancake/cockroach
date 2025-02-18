@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
@@ -16,10 +11,12 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/storage/disk"
 	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/pebble/vfs"
 )
 
 func TestNewPebbleTempEngine(t *testing.T) {
@@ -30,10 +27,11 @@ func TestNewPebbleTempEngine(t *testing.T) {
 	tempDir, tempDirCleanup := testutils.TempDir(t)
 	defer tempDirCleanup()
 
+	diskWriteStats := disk.NewWriteStatsManager(vfs.Default)
 	db, filesystem, err := NewPebbleTempEngine(context.Background(), base.TempStorageConfig{
 		Path:     tempDir,
 		Settings: cluster.MakeTestingClusterSettings(),
-	}, base.StoreSpec{Path: tempDir}, nil /* statsCollector */)
+	}, base.StoreSpec{Path: tempDir}, diskWriteStats)
 	if err != nil {
 		t.Fatalf("error encountered when invoking NewRocksDBTempEngine: %+v", err)
 	}

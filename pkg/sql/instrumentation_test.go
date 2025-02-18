@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -38,7 +33,7 @@ func TestSampledStatsCollection(t *testing.T) {
 	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop(ctx)
 	tt := s.ApplicationLayer()
-	sv, sqlStats := &tt.ClusterSettings().SV, tt.SQLServer().(*Server).sqlStats
+	sv, sqlStats := &tt.ClusterSettings().SV, tt.SQLServer().(*Server).localSqlStats
 
 	sqlutils.CreateTable(
 		t, db, "test", "x INT", 10, sqlutils.ToRowFn(sqlutils.RowIdxFn),
@@ -59,7 +54,6 @@ func TestSampledStatsCollection(t *testing.T) {
 			}
 			var stats *appstatspb.CollectedStatementStatistics
 			require.NoError(t, sqlStats.
-				GetLocalMemProvider().
 				IterateStatementStats(
 					ctx,
 					sqlstats.IteratorOptions{},
@@ -86,7 +80,6 @@ func TestSampledStatsCollection(t *testing.T) {
 		var stats *appstatspb.CollectedTransactionStatistics
 
 		require.NoError(t, sqlStats.
-			GetLocalMemProvider().
 			IterateTransactionStats(
 				ctx,
 				sqlstats.IteratorOptions{},
@@ -246,7 +239,8 @@ func TestSampledStatsCollectionOnNewFingerprint(t *testing.T) {
 			"SELECT 1, 2, 3",
 			"CREATE TABLE IF NOT EXISTS foo (x INT)",
 			"SELECT * FROM foo",
-			// An explicit txn results in the queries inside being recorded as 'new' statements.
+			// Since the sampling key does not include the txn fingerprint, no
+			// statements in this txn should be sampled.
 			"BEGIN; SELECT 1; COMMIT;",
 		}
 
@@ -256,10 +250,11 @@ func TestSampledStatsCollectionOnNewFingerprint(t *testing.T) {
 
 		require.Equal(t, len(queries), len(collectedTxnStats))
 
-		// We should have collected stats for each of the queries.
-		for i := range collectedTxnStats {
+		// We should have collected stats for each of the queries except the last.
+		for i := range collectedTxnStats[:len(queries)-1] {
 			require.True(t, collectedTxnStats[i].CollectedExecStats)
 		}
+		require.False(t, collectedTxnStats[len(queries)-1].CollectedExecStats)
 	})
 
 	collectedTxnStats = nil

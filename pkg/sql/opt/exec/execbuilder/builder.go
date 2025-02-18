@@ -1,20 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package execbuilder
 
 import (
 	"context"
+	"slices"
+	"strconv"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
@@ -24,7 +20,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
-	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
@@ -41,7 +36,14 @@ var parallelScanResultThreshold = uint64(metamorphic.ConstantWithTestRange(
 	parallelScanResultThresholdProductionValue, /* max */
 ))
 
-const parallelScanResultThresholdProductionValue = 10000
+const (
+	parallelScanResultThresholdProductionValue = 10000
+
+	// NumRecordedJoinTypes includes all join types except for
+	// descpb.RightSemiJoin and descpb.RightAntiJoin, which are recorded as left
+	// joins.
+	NumRecordedJoinTypes = 8
+)
 
 func getParallelScanResultThreshold(forceProductionValue bool) uint64 {
 	if forceProductionValue {
@@ -71,7 +73,11 @@ type Builder struct {
 
 	// cascades accumulates cascades that run after the main query but before
 	// checks.
-	cascades []exec.Cascade
+	cascades []exec.PostQuery
+
+	// triggers accumulates triggers that run after the main query and after
+	// checks and cascades.
+	triggers []exec.PostQuery
 
 	// checks accumulates check queries that are run after the main query and
 	// any cascades.
@@ -99,10 +105,13 @@ type Builder struct {
 
 	allowInsertFastPath bool
 
-	// forceForUpdateLocking is a set of opt catalog table IDs that serve as input
-	// for mutation operators, and should be locked using forUpdateLocking to
-	// reduce query retries.
-	forceForUpdateLocking intsets.Fast
+	// forceForUpdateLocking, if set, is the table ID of the table being mutated
+	// that should be locked using forUpdateLocking in mutation's input
+	// operators to reduce query retries. In other words, it allows us to apply
+	// the implicit locking during the initial scan of the mutation. It will
+	// only be set if we are guaranteed to never scan data that won't be
+	// mutated.
+	forceForUpdateLocking opt.TableID
 
 	// planLazySubqueries is true if the builder should plan subqueries that are
 	// lazily evaluated as routines instead of a subquery which is evaluated
@@ -114,7 +123,11 @@ type Builder struct {
 	// tailCalls is used when building the last body statement of a routine. It
 	// identifies nested routines that are in tail-call position. This information
 	// is used to determine whether tail-call optimization is applicable.
-	tailCalls map[*memo.UDFCallExpr]struct{}
+	//
+	// tailCalls uses opt.ScalarExpr as the key to allow both UDFCall and Subquery
+	// expressions to be considered. Note that subqueries within a routine's body
+	// are planned as nested routines, and therefore it is useful to apply TCO.
+	tailCalls map[opt.ScalarExpr]struct{}
 
 	// -- output --
 
@@ -149,12 +162,12 @@ type Builder struct {
 	NanosSinceStatsForecasted time.Duration
 
 	// JoinTypeCounts records the number of times each type of logical join was
-	// used in the query.
-	JoinTypeCounts map[descpb.JoinType]int
+	// used in the query, up to 255.
+	JoinTypeCounts [NumRecordedJoinTypes]uint8
 
-	// JoinAlgorithmCounts records the number of times each type of join algorithm
-	// was used in the query.
-	JoinAlgorithmCounts map[exec.JoinAlgorithm]int
+	// JoinAlgorithmCounts records the number of times each type of join
+	// algorithm was used in the query, up to 255.
+	JoinAlgorithmCounts [exec.NumJoinAlgorithms]uint8
 
 	// ScanCounts records the number of times scans were used in the query.
 	ScanCounts [exec.NumScanCountTypes]int
@@ -173,7 +186,41 @@ type Builder struct {
 	IsANSIDML bool
 
 	// IndexesUsed list the indexes used in query with the format tableID@indexID.
-	IndexesUsed []string
+	IndexesUsed
+}
+
+// IndexesUsed is a list of indexes used in a query.
+type IndexesUsed struct {
+	indexes []struct {
+		tableID cat.StableID
+		indexID cat.StableID
+	}
+}
+
+// add adds the given index to the list, if it is not already present.
+func (iu *IndexesUsed) add(tableID, indexID cat.StableID) {
+	s := struct {
+		tableID cat.StableID
+		indexID cat.StableID
+	}{tableID, indexID}
+	if !slices.Contains(iu.indexes, s) {
+		iu.indexes = append(iu.indexes, s)
+	}
+}
+
+// Strings returns a slice of strings with the format tableID@indexID for each
+// index in the list.
+//
+// TODO(mgartner): Use a slice of struct{uint64, uint64} instead of converting
+// to strings.
+func (iu *IndexesUsed) Strings() []string {
+	res := make([]string, len(iu.indexes))
+	const base = 10
+	for i, u := range iu.indexes {
+		res[i] = strconv.FormatUint(uint64(u.tableID), base) + "@" +
+			strconv.FormatUint(uint64(u.indexID), base)
+	}
+	return res
 }
 
 // New constructs an instance of the execution node builder using the
@@ -234,6 +281,11 @@ func New(
 	return b
 }
 
+// DisableTelemetry disables telemetry on this Builder.
+func (b *Builder) DisableTelemetry() {
+	b.disableTelemetry = true
+}
+
 // Build constructs the execution node tree and returns its root node if no
 // error occurred.
 func (b *Builder) Build() (_ exec.Plan, err error) {
@@ -244,14 +296,18 @@ func (b *Builder) Build() (_ exec.Plan, err error) {
 
 	rootRowCount := int64(b.e.(memo.RelExpr).Relational().Statistics().RowCountIfAvailable())
 	return b.factory.ConstructPlan(
-		plan.root, b.subqueries, b.cascades, b.checks, rootRowCount, b.flags,
+		plan.root, b.subqueries, b.cascades, b.triggers, b.checks, rootRowCount, b.flags,
 	)
 }
 
-func (b *Builder) wrapFunction(fnName string) (tree.ResolvableFunctionReference, error) {
-	if b.evalCtx != nil && b.catalog != nil { // Some tests leave those unset.
+type functionLookupHelper func(context.Context, tree.UnresolvedRoutineName, tree.SearchPath) (*tree.ResolvedFunctionDefinition, error)
+
+func (b *Builder) wrapFunctionImpl(
+	fnName string, lookup functionLookupHelper,
+) (tree.ResolvableFunctionReference, error) {
+	if lookup != nil {
 		unresolved := tree.MakeUnresolvedName(fnName)
-		fnDef, err := b.catalog.ResolveFunction(
+		fnDef, err := lookup(
 			context.Background(),
 			tree.MakeUnresolvedFunctionName(&unresolved),
 			&b.evalCtx.SessionData().SearchPath,
@@ -262,6 +318,26 @@ func (b *Builder) wrapFunction(fnName string) (tree.ResolvableFunctionReference,
 		return tree.ResolvableFunctionReference{FunctionReference: fnDef}, nil
 	}
 	return tree.WrapFunction(fnName), nil
+}
+
+func (b *Builder) wrapBuiltinFunction(fnName string) (tree.ResolvableFunctionReference, error) {
+	lookup := func(_ context.Context, fn tree.UnresolvedRoutineName, path tree.SearchPath) (*tree.ResolvedFunctionDefinition, error) {
+		uname, err := fn.UnresolvedName().ToRoutineName()
+		if err != nil {
+			return nil, err
+		}
+		return tree.GetBuiltinFuncDefinitionOrFail(uname, path)
+	}
+	return b.wrapFunctionImpl(fnName, lookup)
+}
+
+func (b *Builder) wrapFunction(fnName string) (tree.ResolvableFunctionReference, error) {
+	var lookup functionLookupHelper = nil
+	// Some tests leave those unset.
+	if b.evalCtx != nil && b.catalog != nil {
+		lookup = b.catalog.ResolveFunction
+	}
+	return b.wrapFunctionImpl(fnName, lookup)
 }
 
 func (b *Builder) build(e opt.Expr) (_ execPlan, outputCols colOrdMap, err error) {

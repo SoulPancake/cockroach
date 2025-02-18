@@ -61,6 +61,7 @@ upsert descriptor #104
   -    name: t_expr_k_idx
   -    partitioning: {}
   -    sharded: {}
+  -    vecConfig: {}
   -    version: 3
   +  indexes: []
      modificationTime: {}
@@ -86,6 +87,7 @@ upsert descriptor #104
   +      name: t_expr_k_idx
   +      partitioning: {}
   +      sharded: {}
+  +      vecConfig: {}
   +      version: 3
   +    mutationId: 1
   +    state: WRITE_ONLY
@@ -112,6 +114,7 @@ upsert descriptor #104
   +      storeColumnNames:
   +      - k
   +      unique: true
+  +      vecConfig: {}
   +      version: 4
   +    mutationId: 1
   +    state: BACKFILLING
@@ -139,6 +142,7 @@ upsert descriptor #104
   +      - k
   +      unique: true
   +      useDeletePreservingEncoding: true
+  +      vecConfig: {}
   +      version: 4
   +    mutationId: 1
   +    state: DELETE_ONLY
@@ -214,6 +218,8 @@ upsert descriptor #104
   +        "1": i
   +        "3": k
   +        "4": crdb_internal_column_4_name_placeholder
+  +        "4294967292": crdb_internal_origin_timestamp
+  +        "4294967293": crdb_internal_origin_id
   +        "4294967294": tableoid
   +        "4294967295": crdb_internal_mvcc_timestamp
   +      families:
@@ -262,6 +268,7 @@ upsert descriptor #104
   -    name: t_expr_k_idx
   -    partitioning: {}
   -    sharded: {}
+  -    vecConfig: {}
   -    version: 3
   +  indexes: []
      modificationTime: {}
@@ -287,6 +294,7 @@ upsert descriptor #104
   +      name: t_expr_k_idx
   +      partitioning: {}
   +      sharded: {}
+  +      vecConfig: {}
   +      version: 3
   +    mutationId: 1
   +    state: WRITE_ONLY
@@ -313,6 +321,7 @@ upsert descriptor #104
   +      storeColumnNames:
   +      - k
   +      unique: true
+  +      vecConfig: {}
   +      version: 4
   +    mutationId: 1
   +    state: BACKFILLING
@@ -340,6 +349,7 @@ upsert descriptor #104
   +      - k
   +      unique: true
   +      useDeletePreservingEncoding: true
+  +      vecConfig: {}
   +      version: 4
   +    mutationId: 1
   +    state: DELETE_ONLY
@@ -489,6 +499,7 @@ upsert descriptor #104
   +      name: crdb_internal_index_2_name_placeholder
          partitioning: {}
          sharded: {}
+  ...
          version: 3
        mutationId: 1
   -    state: WRITE_ONLY
@@ -522,6 +533,7 @@ upsert descriptor #104
   -      - k
   -      unique: true
   -      useDeletePreservingEncoding: true
+  -      vecConfig: {}
   -      version: 4
   -    mutationId: 1
   -    state: DELETE_ONLY
@@ -540,11 +552,11 @@ upsert descriptor #104
   -  version: "6"
   +  version: "7"
 persist all catalog changes to storage
-update progress of schema change job #1: "PostCommitNonRevertiblePhase stage 2 of 10 with 17 MutationType ops pending"
+update progress of schema change job #1: "PostCommitNonRevertiblePhase stage 2 of 10 with 18 MutationType ops pending"
 set schema change job #1 to non-cancellable
 commit transaction #10
 begin transaction #11
-## PostCommitNonRevertiblePhase stage 2 of 10 with 19 MutationType ops
+## PostCommitNonRevertiblePhase stage 2 of 10 with 20 MutationType ops
 upsert descriptor #104
   ...
          oid: 20
@@ -591,6 +603,7 @@ upsert descriptor #104
   +      - crdb_internal_column_2_name_placeholder
   +      - k
   +      unique: true
+  +      vecConfig: {}
   +      version: 4
   +    mutationId: 1
   +    state: WRITE_ONLY
@@ -629,9 +642,10 @@ upsert descriptor #104
   +      name: idx
          partitioning: {}
          sharded: {}
-  -      version: 3
   +      storeColumnNames: []
   +      unique: true
+         vecConfig: {}
+  -      version: 3
   +      version: 4
        mutationId: 1
   -    state: DELETE_ONLY
@@ -668,6 +682,7 @@ upsert descriptor #104
   +      storeColumnNames: []
          unique: true
   +      useDeletePreservingEncoding: true
+         vecConfig: {}
          version: 4
        mutationId: 1
   -    state: WRITE_ONLY
@@ -800,6 +815,7 @@ upsert descriptor #104
   -      - crdb_internal_column_2_name_placeholder
   -      - k
   -      unique: true
+  -      vecConfig: {}
   -      version: 4
   -    mutationId: 1
   -    state: DELETE_ONLY
@@ -900,6 +916,8 @@ upsert descriptor #104
   -        "1": i
   -        "3": k
   -        "4": crdb_internal_column_4_name_placeholder
+  -        "4294967292": crdb_internal_origin_timestamp
+  -        "4294967293": crdb_internal_origin_id
   -        "4294967294": tableoid
   -        "4294967295": crdb_internal_mvcc_timestamp
   -      families:
@@ -949,6 +967,7 @@ upsert descriptor #104
   +    sharded: {}
   +    storeColumnNames: []
   +    unique: true
+  +    vecConfig: {}
   +    version: 4
      modificationTime: {}
   -  mutations:
@@ -974,6 +993,7 @@ upsert descriptor #104
   -      sharded: {}
   -      storeColumnNames: []
   -      unique: true
+  -      vecConfig: {}
   -      version: 4
   -    mutationId: 1
   -    state: WRITE_ONLY
@@ -999,6 +1019,7 @@ upsert descriptor #104
   -      storeColumnNames: []
   -      unique: true
   -      useDeletePreservingEncoding: true
+  -      vecConfig: {}
   -      version: 4
   -    mutationId: 1
   -    state: DELETE_ONLY

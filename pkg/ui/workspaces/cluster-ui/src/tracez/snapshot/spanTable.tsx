@@ -1,26 +1,21 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-import moment from "moment-timezone";
-import React, { useState } from "react";
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 import { Nodes, Caution, Plus, Minus } from "@cockroachlabs/icons";
 import classNames from "classnames/bind";
-import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
-import { Link } from "react-router-dom";
 import Long from "long";
+import moment from "moment-timezone";
+import React, { useState } from "react";
+import { Link } from "react-router-dom";
 
 import { Span, Snapshot } from "src/api/tracezApi";
+import { Dropdown } from "src/dropdown";
 import { EmptyTable } from "src/empty";
+import { CircleFilled } from "src/icon";
 import { ColumnDescriptor, SortSetting, SortedTable } from "src/sortedtable";
 import { TimestampToMoment } from "src/util";
-import { CircleFilled } from "src/icon";
-import { Dropdown } from "src/dropdown";
 
 import styles from "../snapshot.module.scss";
 

@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package ptstorage implements protectedts.Storage.
 package ptstorage
@@ -14,7 +9,6 @@ package ptstorage
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts/ptpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -293,7 +287,7 @@ func writeDeprecatedPTSRecord(knobs *protectedts.TestingKnobs, r *ptpb.Record) b
 func usePTSMetaTable(
 	ctx context.Context, st *cluster.Settings, knobs *protectedts.TestingKnobs,
 ) bool {
-	return knobs.UseMetaTable || !st.Version.IsActive(ctx, clusterversion.V24_1)
+	return knobs.UseMetaTable
 }
 
 // New creates a new Storage.

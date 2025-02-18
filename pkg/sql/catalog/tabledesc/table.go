@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tabledesc
 
@@ -285,6 +280,10 @@ func EvalShardBucketCount(
 		if paramVal != nil {
 			shardBuckets = paramVal
 		}
+		// Check if shardBuckets is NULL
+		if shardBuckets == tree.DNull {
+			return 0, pgerror.Newf(pgcode.InvalidParameterValue, invalidBucketCountMsg, "NULL")
+		}
 		typedExpr, err := schemaexpr.SanitizeVarFreeExpr(
 			ctx, shardBuckets, types.Int, "BUCKET_COUNT", semaCtx, volatility.Volatile, false, /*allowAssignmentCast*/
 		)
@@ -470,6 +469,12 @@ func ConstraintNamePlaceholder(id descpb.ConstraintID) string {
 	return fmt.Sprintf("crdb_internal_constraint_%d_name_placeholder", id)
 }
 
+// PolicyNamePlaceholder constructs a placeholder name for a policy based
+// on its id.
+func PolicyNamePlaceholder(id descpb.PolicyID) string {
+	return fmt.Sprintf("crdb_internal_policy_%d_name_placeholder", id)
+}
+
 // RenameColumnInTable will rename the column in tableDesc from oldName to
 // newName, including in expressions as well as shard columns.
 // The function is recursive because of this, but there should only be one level
@@ -525,8 +530,25 @@ func RenameColumnInTable(
 		}
 	}
 
+	// Rename the column in any policy expressions.
+	for i := range tableDesc.GetPolicies() {
+		p := &tableDesc.GetPolicies()[i]
+		if p.WithCheckExpr != "" {
+			if err := renameInExpr(&p.WithCheckExpr); err != nil {
+				return err
+			}
+		}
+		if p.UsingExpr != "" {
+			if err := renameInExpr(&p.UsingExpr); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Do all of the above renames inside check constraints, computed expressions,
-	// and idx predicates that are in mutations.
+	// idx predicates that are in mutations. Policies are excluded here,
+	// as they cannot be modified using the legacy schema changer. Therefore,
+	// no mutations exist for policies.
 	for i := range tableDesc.Mutations {
 		m := &tableDesc.Mutations[i]
 		if constraint := m.GetConstraint(); constraint != nil {

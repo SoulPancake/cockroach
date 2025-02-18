@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package parser_test
 
@@ -42,21 +37,27 @@ func TestParseDataDriven(t *testing.T) {
 		datadriven.RunTest(t, path, func(t *testing.T, d *datadriven.TestData) string {
 			switch d.Cmd {
 			case "parse":
-				return sqlutils.VerifyParseFormat(t, d.Input, true /* plpgsql */)
+				reParseWithoutLiterals := true
+				for _, arg := range d.CmdArgs {
+					if arg.Key == "no-parse-without-literals" {
+						reParseWithoutLiterals = false
+					}
+				}
+				return sqlutils.VerifyParseFormat(t, d.Input, d.Pos, sqlutils.PLpgSQL, reParseWithoutLiterals)
 			case "error":
 				_, err := plpgsql.Parse(d.Input)
 				if err == nil {
-					d.Fatalf(t, "expected error, found none")
+					d.Fatalf(t, "%s\nexpected error, found none", d.Pos)
 				}
 				return sqlutils.VerifyParseError(err)
 			case "feature-count":
 				fn, err := utils.CountPLpgSQLStmt(d.Input)
 				if err != nil {
-					d.Fatalf(t, "unexpected parse error: %v", err)
+					d.Fatalf(t, "%s\nunexpected parse error: %v", d.Pos, err)
 				}
 				return fn.String()
 			}
-			d.Fatalf(t, "unsupported command: %s", d.Cmd)
+			d.Fatalf(t, "%s\nunsupported command: %s", d.Pos, d.Cmd)
 			return ""
 		})
 	})

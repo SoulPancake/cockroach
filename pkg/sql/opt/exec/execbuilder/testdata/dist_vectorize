@@ -30,7 +30,7 @@ query TTTI rowsort
 SELECT start_key, end_key, replicas, lease_holder from [SHOW RANGES FROM TABLE kv WITH DETAILS]
 ORDER BY 1
 ----
-<before:/Table/66>  …/1/1                   {1}  1
+<before:/Table/72>  …/1/1                   {1}  1
 …/1/1               …/1/2                   {1}  1
 …/1/2               …/1/3                   {2}  2
 …/1/3               …/1/4                   {3}  3
@@ -56,6 +56,7 @@ planning time: 10µs
 execution time: 100µs
 distribution: <hidden>
 vectorized: <hidden>
+plan type: custom
 rows decoded from KV: 5 (40 B, 10 KVs, 5 gRPC calls)
 maximum memory usage: <hidden>
 network usage: <hidden>
@@ -94,6 +95,7 @@ planning time: 10µs
 execution time: 100µs
 distribution: <hidden>
 vectorized: <hidden>
+plan type: custom
 rows decoded from KV: 10 (80 B, 20 KVs, 10 gRPC calls)
 maximum memory usage: <hidden>
 network usage: <hidden>
@@ -223,7 +225,7 @@ EXPLAIN (VEC, VERBOSE) SELECT count(*) FROM kv NATURAL INNER HASH JOIN kv kv2
 │             │ └ *colexec.countOp
 │             │   └ *colexec.invariantsChecker
 │             │     └ *colexecbase.simpleProjectOp
-│             │       └ *colexecdisk.diskSpillerBase
+│             │       └ *colexecdisk.twoInputDiskSpiller
 │             │         ├ *colexecjoin.hashJoiner
 │             │         │ ├ *colexec.invariantsChecker
 │             │         │ │ └ *colexec.ParallelUnorderedSynchronizer
@@ -260,10 +262,7 @@ EXPLAIN (VEC, VERBOSE) SELECT count(*) FROM kv NATURAL INNER HASH JOIN kv kv2
 │             │         │     └ *colexec.invariantsChecker
 │             │         │       └ *colrpc.Inbox
 │             │         ├ *colexec.invariantsChecker
-│             │         ├ *colexec.invariantsChecker
-│             │         └ *colexecdisk.hashBasedPartitioner
-│             │           ├ *colexecdisk.bufferExportingOperator
-│             │           └ *colexecdisk.bufferExportingOperator
+│             │         └ *colexec.invariantsChecker
 │             ├ *colexec.invariantsChecker
 │             │ └ *colrpc.Inbox
 │             ├ *colexec.invariantsChecker
@@ -279,7 +278,7 @@ EXPLAIN (VEC, VERBOSE) SELECT count(*) FROM kv NATURAL INNER HASH JOIN kv kv2
 │       └ *colexec.countOp
 │         └ *colexec.invariantsChecker
 │           └ *colexecbase.simpleProjectOp
-│             └ *colexecdisk.diskSpillerBase
+│             └ *colexecdisk.twoInputDiskSpiller
 │               ├ *colexecjoin.hashJoiner
 │               │ ├ *colexec.invariantsChecker
 │               │ │ └ *colexec.ParallelUnorderedSynchronizer
@@ -316,10 +315,7 @@ EXPLAIN (VEC, VERBOSE) SELECT count(*) FROM kv NATURAL INNER HASH JOIN kv kv2
 │               │     └ *colexec.invariantsChecker
 │               │       └ *colrpc.Inbox
 │               ├ *colexec.invariantsChecker
-│               ├ *colexec.invariantsChecker
-│               └ *colexecdisk.hashBasedPartitioner
-│                 ├ *colexecdisk.bufferExportingOperator
-│                 └ *colexecdisk.bufferExportingOperator
+│               └ *colexec.invariantsChecker
 ├ Node 3
 │ └ *colrpc.Outbox
 │   └ *colexecutils.deselectorOp
@@ -327,7 +323,7 @@ EXPLAIN (VEC, VERBOSE) SELECT count(*) FROM kv NATURAL INNER HASH JOIN kv kv2
 │       └ *colexec.countOp
 │         └ *colexec.invariantsChecker
 │           └ *colexecbase.simpleProjectOp
-│             └ *colexecdisk.diskSpillerBase
+│             └ *colexecdisk.twoInputDiskSpiller
 │               ├ *colexecjoin.hashJoiner
 │               │ ├ *colexec.invariantsChecker
 │               │ │ └ *colexec.ParallelUnorderedSynchronizer
@@ -364,10 +360,7 @@ EXPLAIN (VEC, VERBOSE) SELECT count(*) FROM kv NATURAL INNER HASH JOIN kv kv2
 │               │     └ *colexec.invariantsChecker
 │               │       └ *colrpc.Inbox
 │               ├ *colexec.invariantsChecker
-│               ├ *colexec.invariantsChecker
-│               └ *colexecdisk.hashBasedPartitioner
-│                 ├ *colexecdisk.bufferExportingOperator
-│                 └ *colexecdisk.bufferExportingOperator
+│               └ *colexec.invariantsChecker
 ├ Node 4
 │ └ *colrpc.Outbox
 │   └ *colexecutils.deselectorOp
@@ -375,7 +368,7 @@ EXPLAIN (VEC, VERBOSE) SELECT count(*) FROM kv NATURAL INNER HASH JOIN kv kv2
 │       └ *colexec.countOp
 │         └ *colexec.invariantsChecker
 │           └ *colexecbase.simpleProjectOp
-│             └ *colexecdisk.diskSpillerBase
+│             └ *colexecdisk.twoInputDiskSpiller
 │               ├ *colexecjoin.hashJoiner
 │               │ ├ *colexec.invariantsChecker
 │               │ │ └ *colexec.ParallelUnorderedSynchronizer
@@ -412,10 +405,7 @@ EXPLAIN (VEC, VERBOSE) SELECT count(*) FROM kv NATURAL INNER HASH JOIN kv kv2
 │               │     └ *colexec.invariantsChecker
 │               │       └ *colrpc.Inbox
 │               ├ *colexec.invariantsChecker
-│               ├ *colexec.invariantsChecker
-│               └ *colexecdisk.hashBasedPartitioner
-│                 ├ *colexecdisk.bufferExportingOperator
-│                 └ *colexecdisk.bufferExportingOperator
+│               └ *colexec.invariantsChecker
 └ Node 5
   └ *colrpc.Outbox
     └ *colexecutils.deselectorOp
@@ -423,7 +413,7 @@ EXPLAIN (VEC, VERBOSE) SELECT count(*) FROM kv NATURAL INNER HASH JOIN kv kv2
         └ *colexec.countOp
           └ *colexec.invariantsChecker
             └ *colexecbase.simpleProjectOp
-              └ *colexecdisk.diskSpillerBase
+              └ *colexecdisk.twoInputDiskSpiller
                 ├ *colexecjoin.hashJoiner
                 │ ├ *colexec.invariantsChecker
                 │ │ └ *colexec.ParallelUnorderedSynchronizer
@@ -460,7 +450,4 @@ EXPLAIN (VEC, VERBOSE) SELECT count(*) FROM kv NATURAL INNER HASH JOIN kv kv2
                 │               └ *colexec.invariantsChecker
                 │                 └ *colfetcher.ColBatchScan
                 ├ *colexec.invariantsChecker
-                ├ *colexec.invariantsChecker
-                └ *colexecdisk.hashBasedPartitioner
-                  ├ *colexecdisk.bufferExportingOperator
-                  └ *colexecdisk.bufferExportingOperator
+                └ *colexec.invariantsChecker

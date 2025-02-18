@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -42,8 +37,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
-	"github.com/jackc/pgconn"
-	"github.com/jackc/pgtype"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/spf13/cobra"
 )
 
@@ -256,7 +251,7 @@ FROM system.descriptor ORDER BY id`
 		if vals[2] == nil {
 			row.ModTime = hlc.Timestamp{WallTime: timeutil.Now().UnixNano()}
 		} else if mt, ok := vals[2].(pgtype.Numeric); ok {
-			buf, err := mt.EncodeText(nil, nil)
+			buf, err := mt.MarshalJSON()
 			if err != nil {
 				return err
 			}
@@ -344,7 +339,7 @@ SELECT id, status, payload, progress FROM system.jobs
 	if err := selectRowsMap(sqlConn, stmt, make([]driver.Value, 4), func(vals []driver.Value) error {
 		md := jobs.JobMetadata{}
 		md.ID = jobspb.JobID(vals[0].(int64))
-		md.Status = jobs.Status(vals[1].(string))
+		md.State = jobs.State(vals[1].(string))
 		md.Payload = &jobspb.Payload{}
 		if err := protoutil.Unmarshal(vals[2].([]byte), md.Payload); err != nil {
 			return err
@@ -511,7 +506,7 @@ func fromZipDir(
 		if err := slurp(zipDirPath, "crdb_internal.system_jobs.txt", func(row string) error {
 			fields := strings.Fields(row)
 			md := jobs.JobMetadata{}
-			md.Status = jobs.Status(fields[1])
+			md.State = jobs.State(fields[1])
 
 			id, err := strconv.Atoi(fields[0])
 			if err != nil {
@@ -559,7 +554,7 @@ func fromZipDir(
 		}
 		for _, job := range jobsTableJSON {
 			row := jobs.JobMetadata{
-				Status: jobs.Status(job.Status),
+				State: jobs.State(job.Status),
 			}
 			id, err := strconv.ParseInt(job.ID, 10, 64)
 			if len(job.ID) > 0 && err != nil {

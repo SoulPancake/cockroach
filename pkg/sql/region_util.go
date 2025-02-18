@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -36,6 +31,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser/statements"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/regions"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -1057,7 +1053,7 @@ func (p *planner) refreshZoneConfigsForTables(
 	// as survive zone.
 	var surviveZoneCfg *multiregion.RegionConfig
 	if desc.GetID() == keys.SystemDatabaseID {
-		tempCfg, err := SynthesizeRegionConfig(ctx, p.txn, desc.GetID(), p.Descriptors(), SynthesizeRegionConfigOptionForceSurvivalZone)
+		tempCfg, err := SynthesizeRegionConfig(ctx, p.txn, desc.GetID(), p.Descriptors(), multiregion.SynthesizeRegionConfigOptionForceSurvivalZone)
 		if err != nil {
 			return err
 		}
@@ -1236,7 +1232,7 @@ func (p *planner) ValidateAllMultiRegionZoneConfigsInCurrentDatabase(ctx context
 		p.txn,
 		dbDesc.GetID(),
 		p.Descriptors(),
-		SynthesizeRegionConfigOptionForValidation,
+		multiregion.SynthesizeRegionConfigOptionForValidation,
 	)
 	if err != nil {
 		return err
@@ -1272,11 +1268,13 @@ func (p *planner) ResetMultiRegionZoneConfigsForTable(
 	if desc.LocalityConfig == nil {
 		return nil
 	}
-	var opts []SynthesizeRegionConfigOption
+	var opts []multiregion.SynthesizeRegionConfigOption
 	// System databases will have regional by row tables configured
 	// as survive zone.
 	if forceZoneSurvival {
-		opts = []SynthesizeRegionConfigOption{SynthesizeRegionConfigOptionForceSurvivalZone}
+		opts = []multiregion.SynthesizeRegionConfigOption{
+			multiregion.SynthesizeRegionConfigOptionForceSurvivalZone,
+		}
 	}
 	regionConfig, err := SynthesizeRegionConfig(ctx, p.txn, desc.GetParentID(), p.Descriptors(), opts...)
 	if err != nil {
@@ -1298,7 +1296,7 @@ func (p *planner) ResetMultiRegionZoneConfigsForTable(
 // database's zone configuration to match what would have originally been set by
 // the multi-region syntax.
 func (p *planner) ResetMultiRegionZoneConfigsForDatabase(ctx context.Context, id int64) error {
-	dbDesc, err := p.Descriptors().ByID(p.txn).WithoutNonPublic().Get().Database(ctx, descpb.ID(id))
+	dbDesc, err := p.Descriptors().ByIDWithoutLeased(p.txn).WithoutNonPublic().Get().Database(ctx, descpb.ID(id))
 	if err != nil {
 		return err
 	}
@@ -1406,122 +1404,22 @@ func (p *planner) CurrentDatabaseRegionConfig(
 		p.txn,
 		dbDesc.GetID(),
 		p.Descriptors(),
-		SynthesizeRegionConfigOptionUseCache,
+		multiregion.SynthesizeRegionConfigOptionUseCache,
 	)
 }
-
-type synthesizeRegionConfigOptions struct {
-	includeOffline    bool
-	forValidation     bool
-	useCache          bool
-	forceSurvivalGoal *descpb.SurvivalGoal
-}
-
-// SynthesizeRegionConfigOption is an option to pass into SynthesizeRegionConfig.
-type SynthesizeRegionConfigOption func(o *synthesizeRegionConfigOptions)
-
-// SynthesizeRegionConfigOptionIncludeOffline includes offline descriptors for use
-// in RESTORE.
-var SynthesizeRegionConfigOptionIncludeOffline SynthesizeRegionConfigOption = func(o *synthesizeRegionConfigOptions) {
-	o.includeOffline = true
-}
-
-// SynthesizeRegionConfigOptionForValidation includes descriptors which are being dropped
-// as part of the regions field, allowing validation to account for regions in the
-// process of being dropped.
-var SynthesizeRegionConfigOptionForValidation SynthesizeRegionConfigOption = func(o *synthesizeRegionConfigOptions) {
-	o.forValidation = true
-}
-
-// SynthesizeRegionConfigOptionUseCache uses a cache for synthesizing the region
-// config.
-var SynthesizeRegionConfigOptionUseCache SynthesizeRegionConfigOption = func(o *synthesizeRegionConfigOptions) {
-	o.useCache = true
-}
-
-// SynthesizeRegionConfigOptionForceSurvivalZone forces the zone survival goal
-// instead of inheriting from the system database.
-var SynthesizeRegionConfigOptionForceSurvivalZone SynthesizeRegionConfigOption = func(o *synthesizeRegionConfigOptions) {
-	z := descpb.SurvivalGoal_ZONE_FAILURE
-	o.forceSurvivalGoal = &z
-}
-
-// ErrNotMultiRegionDatabase is returned from SynthesizeRegionConfig when the
-// requested database is not a multi-region database.
-var ErrNotMultiRegionDatabase = errors.New(
-	"database is not a multi-region database",
-)
 
 // SynthesizeRegionConfig returns a RegionConfig representing the user
 // configured state of a multi-region database by coalescing state from both
 // the database descriptor and multi-region type descriptor. By default, it
 // avoids the cache and is intended for use by DDL statements.
-//
-// TODO(ajwerner): Refactor this to take the database descriptor rather than
-// the database ID.
 func SynthesizeRegionConfig(
 	ctx context.Context,
 	txn *kv.Txn,
 	dbID descpb.ID,
 	descsCol *descs.Collection,
-	opts ...SynthesizeRegionConfigOption,
+	opts ...multiregion.SynthesizeRegionConfigOption,
 ) (multiregion.RegionConfig, error) {
-	var o synthesizeRegionConfigOptions
-	for _, opt := range opts {
-		opt(&o)
-	}
-
-	dbDesc, regionEnumDesc, err := getDBAndRegionEnumDescs(
-		ctx, txn, dbID, descsCol, o.useCache, o.includeOffline,
-	)
-	if err != nil {
-		return multiregion.RegionConfig{}, err
-	}
-
-	var regionNames, transitioningRegionNames, addingRegionNames catpb.RegionNames
-	_ = regionEnumDesc.ForEachRegion(func(name catpb.RegionName, transition descpb.TypeDescriptor_EnumMember_Direction) error {
-		switch transition {
-		case descpb.TypeDescriptor_EnumMember_NONE:
-			regionNames = append(regionNames, name)
-		case descpb.TypeDescriptor_EnumMember_ADD:
-			transitioningRegionNames = append(transitioningRegionNames, name)
-			addingRegionNames = append(addingRegionNames, name)
-		case descpb.TypeDescriptor_EnumMember_REMOVE:
-			transitioningRegionNames = append(transitioningRegionNames, name)
-			if o.forValidation {
-				// Since the partitions and zone configs are only updated when a transaction
-				// commits, this must ignore all regions being added (since they will not be
-				// reflected in the zone configuration yet), but it must include all region
-				// being dropped (since they will not be dropped from the zone configuration
-				// until they are fully removed from the type descriptor, again, at the end
-				// of the transaction).
-				regionNames = append(regionNames, name)
-			}
-		}
-		return nil
-	})
-	survivalGoal := dbDesc.GetRegionConfig().SurvivalGoal
-	if o.forceSurvivalGoal != nil {
-		survivalGoal = *o.forceSurvivalGoal
-	}
-	regionConfig := multiregion.MakeRegionConfig(
-		regionNames,
-		dbDesc.GetRegionConfig().PrimaryRegion,
-		survivalGoal,
-		regionEnumDesc.GetID(),
-		dbDesc.GetRegionConfig().Placement,
-		regionEnumDesc.TypeDesc().RegionConfig.SuperRegions,
-		regionEnumDesc.TypeDesc().RegionConfig.ZoneConfigExtensions,
-		multiregion.WithTransitioningRegions(transitioningRegionNames),
-		multiregion.WithAddingRegions(addingRegionNames),
-		multiregion.WithSecondaryRegion(dbDesc.GetRegionConfig().SecondaryRegion),
-	)
-
-	if err := multiregion.ValidateRegionConfig(regionConfig, dbDesc.GetID() == keys.SystemDatabaseID); err != nil {
-		return multiregion.RegionConfig{}, err
-	}
-
-	return regionConfig, nil
+	return regions.SynthesizeRegionConfigInTxn(ctx, txn, dbID, descsCol, opts...)
 }
 
 // GetLocalityRegionEnumPhysicalRepresentation returns the physical
@@ -1602,7 +1500,7 @@ func getDBAndRegionEnumDescs(
 	if useCache {
 		b = descsCol.ByIDWithLeased(txn)
 	} else {
-		b = descsCol.ByID(txn)
+		b = descsCol.ByIDWithoutLeased(txn)
 	}
 	if !includeOffline {
 		b = b.WithoutOffline()
@@ -1613,7 +1511,7 @@ func getDBAndRegionEnumDescs(
 		return nil, nil, err
 	}
 	if !dbDesc.IsMultiRegion() {
-		return nil, nil, ErrNotMultiRegionDatabase
+		return nil, nil, regions.ErrNotMultiRegionDatabase
 	}
 	regionEnumID, err := dbDesc.MultiRegionEnumID()
 	if err != nil {
@@ -2044,7 +1942,7 @@ func (p *planner) validateZoneConfigForMultiRegionDatabaseWasNotModifiedByUser(
 		p.txn,
 		dbDesc.GetID(),
 		p.Descriptors(),
-		SynthesizeRegionConfigOptionForValidation,
+		multiregion.SynthesizeRegionConfigOptionForValidation,
 	)
 	if err != nil {
 		return err
@@ -2127,7 +2025,7 @@ func (p *planner) validateZoneConfigForMultiRegionTableWasNotModifiedByUser(
 		p.txn,
 		dbDesc.GetID(),
 		p.Descriptors(),
-		SynthesizeRegionConfigOptionForValidation,
+		multiregion.SynthesizeRegionConfigOptionForValidation,
 	)
 	if err != nil {
 		return err
@@ -2455,7 +2353,7 @@ func (p *planner) GetMultiregionConfig(
 		p.txn,
 		databaseID,
 		p.Descriptors(),
-		SynthesizeRegionConfigOptionUseCache,
+		multiregion.SynthesizeRegionConfigOptionUseCache,
 	)
 
 	if err != nil {
@@ -2626,7 +2524,7 @@ func (p *planner) optimizeSystemDatabase(ctx context.Context) error {
 		// System databases will have regional by row tables configured
 		// as survive zone.
 		regionConfig, err := SynthesizeRegionConfig(
-			ctx, p.txn, table.GetParentID(), p.Descriptors(), SynthesizeRegionConfigOptionForceSurvivalZone,
+			ctx, p.txn, table.GetParentID(), p.Descriptors(), multiregion.SynthesizeRegionConfigOptionForceSurvivalZone,
 		)
 		if err != nil {
 			return err

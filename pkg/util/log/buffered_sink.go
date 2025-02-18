@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package log
 
@@ -330,6 +325,7 @@ func (bs *bufferedSink) exitCode() exit.Code {
 // See: https://github.com/cockroachdb/cockroach/issues/72458
 func (bs *bufferedSink) runFlusher(stopC <-chan struct{}) {
 	buf := &bs.mu.buf
+	loggingErr := Every(time.Minute)
 	for {
 		done := false
 		select {
@@ -358,7 +354,9 @@ func (bs *bufferedSink) runFlusher(stopC <-chan struct{}) {
 		if errC != nil {
 			errC <- err
 		} else if err != nil {
-			Ops.Errorf(context.Background(), "logging error from %T: %v", bs.child, err)
+			if loggingErr.ShouldLog() {
+				Ops.Errorf(context.Background(), "logging error from %T: %v", bs.child, err)
+			}
 			if bs.crashOnAsyncFlushFailure {
 				f := func() func(exit.Code, error) {
 					logging.mu.Lock()

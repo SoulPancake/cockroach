@@ -1,16 +1,14 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
-import "github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+import (
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/tests/perturbation"
+)
 
 // RegisterTests registers all tests to the Registry. This powers `roachtest run`.
 func RegisterTests(r registry.Registry) {
@@ -23,12 +21,12 @@ func RegisterTests(r registry.Registry) {
 	registerAllocationBench(r)
 	registerAlterPK(r)
 	registerAsyncpg(r)
-	registerAutoUpgrade(r)
 	registerBackup(r)
 	registerBackupMixedVersion(r)
 	registerBackupNodeShutdown(r)
 	registerBackupRestoreRoundTrip(r)
 	registerBackupFixtures(r)
+	registerBackupS3Clones(r)
 	registerCDC(r)
 	registerCDCBench(r)
 	registerCDCFiltering(r)
@@ -40,6 +38,7 @@ func RegisterTests(r registry.Registry) {
 	registerClockJumpTests(r)
 	registerClockMonotonicTests(r)
 	registerClusterToCluster(r)
+	registerC2CMixedVersions(r)
 	registerClusterReplicationResilience(r)
 	registerClusterReplicationDisconnect(r)
 	registerConnectionLatencyTest(r)
@@ -65,6 +64,7 @@ func RegisterTests(r registry.Registry) {
 	registerHibernate(r, hibernateOpts)
 	registerHibernate(r, hibernateSpatialOpts)
 	registerHotSpotSplits(r)
+	registerHTTPRestart(r)
 	registerImportCancellation(r)
 	registerImportDecommissioned(r)
 	registerImportMixedVersions(r)
@@ -76,6 +76,8 @@ func RegisterTests(r registry.Registry) {
 	registerJasyncSQL(r)
 	registerJepsen(r)
 	registerJobs(r)
+	registerJobsMixedVersions(r)
+	registerKerberosConnectionStressTest(r)
 	registerKV(r)
 	registerKVBench(r)
 	registerKVContention(r)
@@ -85,18 +87,23 @@ func RegisterTests(r registry.Registry) {
 	registerKVScalability(r)
 	registerKVSplits(r)
 	registerKVRestartImpact(r)
+	registerKVStopAndCopy(r)
 	registerKnex(r)
 	registerLOQRecovery(r)
 	registerLargeRange(r)
+	registerLDAPConnectionLatencyTest(r)
+	registerLDAPConnectionScaleTest(r)
 	registerLeasePreferences(r)
 	registerLedger(r)
 	registerLibPQ(r)
 	registerLiquibase(r)
 	registerLoadSplits(r)
 	registerLogicalDataReplicationTests(r)
+	registerLDRMixedVersions(r)
 	registerMVCCGC(r)
 	registerMultiStoreRemove(r)
 	registerMultiTenantDistSQL(r)
+	registerMultiTenantMultiregion(r)
 	registerMultiTenantTPCH(r)
 	registerMultiTenantUpgrade(r)
 	registerMultiTenantSharedProcess(r)
@@ -114,6 +121,7 @@ func RegisterTests(r registry.Registry) {
 	registerProcessLock(r)
 	registerPsycopg(r)
 	registerPruneDanglingSnapshotsAndDisks(r)
+	registerPTP(r)
 	registerQueue(r)
 	registerQuitTransfersLeases(r)
 	registerRebalanceLoad(r)
@@ -138,12 +146,8 @@ func RegisterTests(r registry.Registry) {
 	registerSchemaChangeMixedVersions(r)
 	registerDeclSchemaChangeCompatMixedVersions(r)
 	registerSchemaChangeRandomLoad(r)
-	registerSchemaChangeMultiRegionBenchmarkLeasing(r)
-	registerSchemaChangeBenchmarkLargeSchema(r, 500)
-	registerSchemaChangeBenchmarkLargeSchema(r, 1000)
-	registerSchemaChangeBenchmarkLargeSchema(r, 10000)
-	registerSchemaChangeBenchmarkLargeSchema(r, 25000)
-	registerSchemaChangeBenchmarkLargeSchema(r, 40000)
+	registerLargeSchemaBackupRestores(r)
+	registerLargeSchemaBenchmarks(r)
 	registerScrubAllChecksTPCC(r)
 	registerScrubIndexOnlyTPCC(r)
 	registerSecondaryIndexesMultiVersionCluster(r)
@@ -159,9 +163,12 @@ func RegisterTests(r registry.Registry) {
 	registerTPCHVec(r)
 	registerTypeORM(r)
 	registerUnoptimizedQueryOracle(r)
+	registerValidateSystemSchemaAfterVersionUpgradeSeparateProcess(r)
 	registerYCSB(r)
 	registerDeclarativeSchemaChangerJobCompatibilityInMixedVersion(r)
 	registerMultiRegionMixedVersion(r)
 	registerMultiRegionSystemDatabase(r)
 	registerSqlStatsMixedVersion(r)
+	registerDbConsole(r)
+	perturbation.RegisterTests(r)
 }

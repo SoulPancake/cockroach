@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvnemesis
 
@@ -229,6 +224,22 @@ type observedRead struct {
 	SkipLocked bool
 	Value      roachpb.Value
 	ValidTimes disjointTimeSpans
+	// AlwaysValid indicates whether a read should be considered valid in the
+	// entire interval [hlc.MinTimestamp, hlc.MaxTimestamp].
+	//
+	// A lock acquired by a locking read is kept until commit time, unless it's
+	// rolled back by a savepoint; in that case, the lock is not released eagerly,
+	// but it's also not guaranteed to be held (if the transaction is pushed, the
+	// lock may be released). Serializable transactions refresh all reads at
+	// commit time, so their reads should be validated even if they were rolled
+	// back. Weaker-isolation transaction don't refresh their reads at commit
+	// time, so if a locking read from such a transaction is rolled back, we
+	// don't need to validate the read; it's valid at all times.
+	AlwaysValid bool
+	// DoNotObserveOnSavepointRollback indicates whether a read should be skipped
+	// from validation if it's rolled back by a savepoint. It's set to true for
+	// all locking reads from weak-isolation transactions.
+	DoNotObserveOnSavepointRollback bool
 }
 
 func (*observedRead) observedMarker() {}
@@ -437,6 +448,7 @@ func (v *validator) processOp(op Operation) {
 			// otherwise no lock would have been acquired on the non-existent key.
 			// Gets do not acquire gap locks.
 			observe = t.GuaranteedDurability && read.Value.IsPresent()
+			read.DoNotObserveOnSavepointRollback = true
 		default:
 			panic("unexpected")
 		}
@@ -753,9 +765,10 @@ func (v *validator) processOp(op Operation) {
 			if t.GuaranteedDurability {
 				for _, kv := range t.Result.Values {
 					read := &observedRead{
-						Key:        kv.Key,
-						SkipLocked: t.SkipLocked,
-						Value:      roachpb.Value{RawBytes: kv.Value},
+						Key:                             kv.Key,
+						SkipLocked:                      t.SkipLocked,
+						Value:                           roachpb.Value{RawBytes: kv.Value},
+						DoNotObserveOnSavepointRollback: true,
 					}
 					v.curObservations = append(v.curObservations, read)
 				}
@@ -796,10 +809,7 @@ func (v *validator) processOp(op Operation) {
 		//
 		// So we ignore the results of failIfError, calling it only for its side
 		// effect of perhaps registering a failure with the validator.
-		v.failIfError(
-			op, t.Result,
-			exceptRollback, exceptAmbiguous, exceptSharedLockPromotionError,
-		)
+		v.failIfError(op, t.Result, exceptRollback, exceptAmbiguous)
 
 		ops := t.Ops
 		if t.CommitInBatch != nil {
@@ -877,6 +887,14 @@ func (v *validator) processOp(op Operation) {
 		execTimestampStrictlyOptional = true
 		if !transferLeaseResultIsIgnorable(t.Result) {
 			v.failIfError(op, t.Result) // fail on all other errors
+		}
+	case *ChangeSettingOperation:
+		execTimestampStrictlyOptional = true
+		// It's possible that reading the modified setting times out. Ignore these
+		// errors for now, at least until we do some validation that depends on the
+		// cluster settings being fully propagated.
+		if !resultIsErrorStr(t.Result, `setting updated but timed out waiting to read new value`) {
+			v.failIfError(op, t.Result)
 		}
 	case *ChangeZoneOperation:
 		execTimestampStrictlyOptional = true
@@ -1116,14 +1134,10 @@ func (v *validator) checkAtomicCommitted(
 				}
 			}
 		case *observedRead:
-			// If v.observationFilter == observeLocking, this must be a locking read
-			// from a weak-isolation transaction. If this locking read is rolled back
-			// by a savepoint, there is no guarantee that the lock will be present
-			// after the savepoint rollback. Since the read is not part of a
-			// serializatble transaction and is no longer locking, it's valid at all
-			// times. Alternatively, we can remove the read from txnObservations.
-			if rollbackSp != nil && v.observationFilter == observeLocking {
-				o.ValidTimes = disjointTimeSpans{{Start: hlc.MinTimestamp, End: hlc.MaxTimestamp}}
+			// If this read should not be observed on savepoint rollback, and there is
+			// a savepoint being rolled back, mark the read as valid at all times.
+			if rollbackSp != nil && o.DoNotObserveOnSavepointRollback {
+				o.AlwaysValid = true
 			}
 		case *observedSavepoint:
 			switch o.Type {
@@ -1197,9 +1211,9 @@ func (v *validator) checkAtomicCommitted(
 				}
 			}
 		case *observedRead:
-			// For rolled back locking reads from weak-isolation transactions, the
-			// ValidTimes are already set above.
-			if len(o.ValidTimes) == 0 {
+			if o.AlwaysValid {
+				o.ValidTimes = disjointTimeSpans{{Start: hlc.MinTimestamp, End: hlc.MaxTimestamp}}
+			} else {
 				o.ValidTimes = validReadTimes(batch, o.Key, o.Value.RawBytes, o.SkipLocked /* missingKeyValid */)
 			}
 		case *observedScan:
@@ -1390,9 +1404,7 @@ func (v *validator) checkError(
 	op Operation, r Result, extraExceptions ...func(err error) bool,
 ) (ambiguous, hadError bool) {
 	sl := []func(error) bool{
-		exceptAmbiguous, exceptOmitted, exceptRetry,
-		exceptDelRangeUsingTombstoneStraddlesRangeBoundary,
-		exceptSharedLockPromotionError,
+		exceptAmbiguous, exceptOmitted, exceptRetry, exceptDelRangeUsingTombstoneStraddlesRangeBoundary,
 	}
 	sl = append(sl, extraExceptions...)
 	return v.failIfError(op, r, sl...)

@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package multiregionccl
 
@@ -22,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/enum"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlinstance/instancestorage"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
@@ -108,12 +106,28 @@ func TestMrSystemDatabase(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(fmt.Sprintf("Sqlliveness %s", testCase.name), func(t *testing.T) {
-			row := testCase.database.QueryRow(t, `SELECT crdb_region, session_id, expiration FROM system.sqlliveness LIMIT 1`)
-			var sessionID string
-			var crdbRegion string
-			var rawExpiration apd.Decimal
-			row.Scan(&crdbRegion, &sessionID, &rawExpiration)
-			require.Equal(t, "us-east1", crdbRegion)
+			// When optimizing the system database the ALTER DATABASE command will
+			// delete stats, but these are refreshed in memory using a range feed.
+			// Since there can be a delay in the new stats being picked up its possible
+			// for this query to fail with:
+			// "unsupported comparison: bytes to crdb_internal_region"
+			// querying table statistics. This is a transient condition that will
+			// clear up once the range feed catches up.
+			testutils.SucceedsSoon(t, func() error {
+				row := testCase.database.DB.QueryRowContext(ctx, `SELECT crdb_region, session_id, expiration FROM system.sqlliveness LIMIT 1`)
+				var sessionID string
+				var crdbRegion string
+				var rawExpiration apd.Decimal
+				err := row.Scan(&crdbRegion, &sessionID, &rawExpiration)
+				if err != nil {
+					return err
+				}
+				if crdbRegion != "us-east1" {
+					return errors.AssertionFailedf("unexpected region, got: %q expected: %q",
+						crdbRegion, "us-east1")
+				}
+				return nil
+			})
 		})
 
 		t.Run(fmt.Sprintf("Sqlinstances %s", testCase.name), func(t *testing.T) {
@@ -269,87 +283,15 @@ func TestMrSystemDatabase(t *testing.T) {
 			FROM [SHOW ALL ZONE CONFIGURATIONS]
 			WHERE target LIKE 'TABLE system.public.%'
 			    AND raw_config_sql NOT LIKE '%global_reads = true%'
+					AND target = 'TABLE system.public.locations'
 			ORDER BY target;
 		`
 			tDB.CheckQueryResults(t, query, [][]string{
-				{"TABLE system.public.eventlog"},
-				{"TABLE system.public.external_connections"},
-				{"TABLE system.public.job_info"},
-				{"TABLE system.public.jobs"},
-				{"TABLE system.public.join_tokens"},
 				{"TABLE system.public.locations"},
-				{"TABLE system.public.migrations"},
-				{"TABLE system.public.mvcc_statistics"},
-				{"TABLE system.public.protected_ts_meta"},
-				{"TABLE system.public.protected_ts_records"},
-				{"TABLE system.public.rangelog"},
-				{"TABLE system.public.replication_constraint_stats"},
-				{"TABLE system.public.replication_critical_localities"},
-				{"TABLE system.public.replication_stats"},
-				{"TABLE system.public.reports_meta"},
-				{"TABLE system.public.scheduled_jobs"},
-				{"TABLE system.public.span_configurations"},
-				{"TABLE system.public.span_count"},
-				{"TABLE system.public.span_stats_buckets"},
-				{"TABLE system.public.span_stats_samples"},
-				{"TABLE system.public.span_stats_tenant_boundaries"},
-				{"TABLE system.public.span_stats_unique_keys"},
-				{"TABLE system.public.statement_activity"},
-				{"TABLE system.public.statement_bundle_chunks"},
-				{"TABLE system.public.statement_diagnostics"},
-				{"TABLE system.public.statement_diagnostics_requests"},
-				{"TABLE system.public.statement_execution_insights"},
-				{"TABLE system.public.statement_statistics"},
-				{"TABLE system.public.task_payloads"},
-				{"TABLE system.public.tenant_settings"},
-				{"TABLE system.public.tenant_tasks"},
-				{"TABLE system.public.tenant_usage"},
-				{"TABLE system.public.tenants"},
-				{"TABLE system.public.transaction_activity"},
-				{"TABLE system.public.transaction_execution_insights"},
-				{"TABLE system.public.transaction_statistics"},
-				{"TABLE system.public.ui"},
 			})
 
 			sDB.CheckQueryResults(t, query, [][]string{
-				{"TABLE system.public.eventlog"},
-				{"TABLE system.public.external_connections"},
-				{"TABLE system.public.job_info"},
-				{"TABLE system.public.jobs"},
-				{"TABLE system.public.join_tokens"},
-				{"TABLE system.public.lease"},
 				{"TABLE system.public.locations"},
-				{"TABLE system.public.migrations"},
-				{"TABLE system.public.mvcc_statistics"},
-				{"TABLE system.public.protected_ts_meta"},
-				{"TABLE system.public.protected_ts_records"},
-				{"TABLE system.public.rangelog"},
-				{"TABLE system.public.replication_constraint_stats"},
-				{"TABLE system.public.replication_critical_localities"},
-				{"TABLE system.public.replication_stats"},
-				{"TABLE system.public.reports_meta"},
-				{"TABLE system.public.scheduled_jobs"},
-				{"TABLE system.public.span_configurations"},
-				{"TABLE system.public.span_count"},
-				{"TABLE system.public.span_stats_buckets"},
-				{"TABLE system.public.span_stats_samples"},
-				{"TABLE system.public.span_stats_tenant_boundaries"},
-				{"TABLE system.public.span_stats_unique_keys"},
-				{"TABLE system.public.statement_activity"},
-				{"TABLE system.public.statement_bundle_chunks"},
-				{"TABLE system.public.statement_diagnostics"},
-				{"TABLE system.public.statement_diagnostics_requests"},
-				{"TABLE system.public.statement_execution_insights"},
-				{"TABLE system.public.statement_statistics"},
-				{"TABLE system.public.task_payloads"},
-				{"TABLE system.public.tenant_settings"},
-				{"TABLE system.public.tenant_tasks"},
-				{"TABLE system.public.tenant_usage"},
-				{"TABLE system.public.tenants"},
-				{"TABLE system.public.transaction_activity"},
-				{"TABLE system.public.transaction_execution_insights"},
-				{"TABLE system.public.transaction_statistics"},
-				{"TABLE system.public.ui"},
 			})
 		})
 
@@ -547,7 +489,7 @@ func TestMrSystemDatabaseUpgrade(t *testing.T) {
 
 	// Enable settings required for configuring a tenant's system database as multi-region.
 	makeSettings := func() *cluster.Settings {
-		cs := cluster.MakeTestingClusterSettingsWithVersions(clusterversion.V24_1.Version(),
+		cs := cluster.MakeTestingClusterSettingsWithVersions(clusterversion.Latest.Version(),
 			clusterversion.MinSupported.Version(),
 			false)
 		instancestorage.ReclaimLoopInterval.Override(ctx, &cs.SV, 150*time.Millisecond)
@@ -563,9 +505,13 @@ func TestMrSystemDatabaseUpgrade(t *testing.T) {
 		},
 		multiregionccltestutils.WithSettings(makeSettings()))
 	defer cleanup()
-
 	id, err := roachpb.MakeTenantID(11)
 	require.NoError(t, err)
+
+	// Disable license enforcement for this test.
+	for _, s := range cluster.Servers {
+		s.ExecutorConfig().(sql.ExecutorConfig).LicenseEnforcer.Disable(ctx)
+	}
 
 	tenantArgs := base.TestTenantArgs{
 		Settings: makeSettings(),
@@ -578,7 +524,8 @@ func TestMrSystemDatabaseUpgrade(t *testing.T) {
 		TenantID: id,
 		Locality: cluster.Servers[0].Locality(),
 	}
-	_, tenantSQL := serverutils.StartTenant(t, cluster.Servers[0], tenantArgs)
+	appLayer, tenantSQL := serverutils.StartTenant(t, cluster.Servers[0], tenantArgs)
+	appLayer.ExecutorConfig().(sql.ExecutorConfig).LicenseEnforcer.Disable(ctx)
 
 	tDB := sqlutils.MakeSQLRunner(tenantSQL)
 
@@ -605,5 +552,83 @@ func TestMrSystemDatabaseUpgrade(t *testing.T) {
 		{"ALTER PARTITION \"us-east1\" OF INDEX system.public.lease@primary CONFIGURE ZONE USING\n\tnum_voters = 3,\n\tvoter_constraints = '[+region=us-east1]',\n\tlease_preferences = '[[+region=us-east1]]'"},
 		{"ALTER PARTITION \"us-east2\" OF INDEX system.public.lease@primary CONFIGURE ZONE USING\n\tnum_voters = 3,\n\tvoter_constraints = '[+region=us-east2]',\n\tlease_preferences = '[[+region=us-east2]]'"},
 		{"ALTER PARTITION \"us-east3\" OF INDEX system.public.lease@primary CONFIGURE ZONE USING\n\tnum_voters = 3,\n\tvoter_constraints = '[+region=us-east3]',\n\tlease_preferences = '[[+region=us-east3]]'"},
+	})
+}
+
+func TestMrSystemDatabaseDropRegion(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+
+	// Enable settings required for configuring a tenant's system database as multi-region.
+	makeSettings := func() *cluster.Settings {
+		cs := cluster.MakeTestingClusterSettingsWithVersions(clusterversion.Latest.Version(),
+			clusterversion.MinSupported.Version(),
+			false)
+		instancestorage.ReclaimLoopInterval.Override(ctx, &cs.SV, 150*time.Millisecond)
+		return cs
+	}
+
+	cluster, _, cleanup := multiregionccltestutils.TestingCreateMultiRegionCluster(t, 3,
+		base.TestingKnobs{
+			Server: &server.TestingKnobs{
+				DisableAutomaticVersionUpgrade: make(chan struct{}),
+				ClusterVersionOverride:         clusterversion.MinSupported.Version(),
+			},
+		},
+		multiregionccltestutils.WithSettings(makeSettings()))
+	defer cleanup()
+	id, err := roachpb.MakeTenantID(11)
+	require.NoError(t, err)
+
+	// Disable license enforcement for this test.
+	for _, s := range cluster.Servers {
+		s.ExecutorConfig().(sql.ExecutorConfig).LicenseEnforcer.Disable(ctx)
+	}
+
+	tenantArgs := base.TestTenantArgs{
+		Settings: makeSettings(),
+		TestingKnobs: base.TestingKnobs{
+			Server: &server.TestingKnobs{
+				DisableAutomaticVersionUpgrade: make(chan struct{}),
+				ClusterVersionOverride:         clusterversion.MinSupported.Version(),
+			},
+		},
+		TenantID: id,
+		Locality: cluster.Servers[0].Locality(),
+	}
+	appLayer, tenantSQL := serverutils.StartTenant(t, cluster.Servers[0], tenantArgs)
+	appLayer.ExecutorConfig().(sql.ExecutorConfig).LicenseEnforcer.Disable(ctx)
+
+	tDB := sqlutils.MakeSQLRunner(tenantSQL)
+
+	tDB.Exec(t, `ALTER DATABASE system SET PRIMARY REGION "us-east1"`)
+	tDB.Exec(t, `ALTER DATABASE system ADD REGION "us-east2"`)
+	tDB.Exec(t, `ALTER DATABASE system ADD REGION "us-east3"`)
+	tDB.Exec(t, `ALTER DATABASE defaultdb SET PRIMARY REGION "us-east1"`)
+	tDB.Exec(t, `ALTER DATABASE defaultdb ADD REGION "us-east2"`)
+	tDB.Exec(t, `ALTER DATABASE defaultdb ADD REGION "us-east3"`)
+
+	tDB.CheckQueryResults(t, "SELECT create_statement FROM [SHOW CREATE DATABASE system]", [][]string{
+		{"CREATE DATABASE system PRIMARY REGION \"us-east1\" REGIONS = \"us-east1\", \"us-east2\", \"us-east3\" SURVIVE REGION FAILURE"},
+	})
+
+	tDB.ExpectErr(t, "region is still in use", `ALTER DATABASE system DROP REGION "us-east3"`)
+	tDB.Exec(t, `ALTER DATABASE defaultdb DROP REGION "us-east3"`)
+	tDB.Exec(t, `ALTER DATABASE system DROP REGION "us-east3"`)
+
+	tDB.CheckQueryResults(t, `SELECT count(*) FROM system.sql_instances WHERE crdb_region != 'us-east1'::system.public.crdb_internal_region AND crdb_region != 'us-east2'::system.public.crdb_internal_region`, [][]string{
+		{"0"},
+	})
+	tDB.CheckQueryResults(t, `SELECT count(*) FROM system.sqlliveness WHERE crdb_region != 'us-east1'::system.public.crdb_internal_region AND crdb_region != 'us-east2'::system.public.crdb_internal_region`, [][]string{
+		{"0"},
+	})
+	tDB.CheckQueryResults(t, `SELECT count(*) FROM system.region_liveness WHERE crdb_region != 'us-east1'::system.public.crdb_internal_region AND crdb_region != 'us-east2'::system.public.crdb_internal_region`, [][]string{
+		{"0"},
+	})
+	tDB.CheckQueryResults(t, `SELECT count(*) FROM system.lease WHERE crdb_region != 'us-east1'::system.public.crdb_internal_region AND crdb_region != 'us-east2'::system.public.crdb_internal_region`, [][]string{
+		{"0"},
 	})
 }

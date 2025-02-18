@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
@@ -23,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/storage/pebbleiter"
-	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -37,13 +31,6 @@ import (
 	"github.com/cockroachdb/redact"
 	prometheusgo "github.com/prometheus/client_model/go"
 )
-
-// DefaultStorageEngine represents the default storage engine to use.
-var DefaultStorageEngine enginepb.EngineType
-
-func init() {
-	_ = DefaultStorageEngine.Set(envutil.EnvOrDefaultString("COCKROACH_STORAGE_ENGINE", "pebble"))
-}
 
 // SimpleMVCCIterator is an interface for iterating over key/value pairs in an
 // engine. SimpleMVCCIterator implementations are thread safe unless otherwise
@@ -1024,8 +1011,6 @@ type Engine interface {
 	// in the passed-in keyRanges; reads are not guaranteed to be consistent
 	// outside of these bounds.
 	NewEventuallyFileOnlySnapshot(keyRanges []roachpb.Span) EventuallyFileOnlyReader
-	// Type returns engine type.
-	Type() enginepb.EngineType
 	// IngestLocalFiles atomically links a slice of files into the RocksDB
 	// log-structured merge-tree.
 	IngestLocalFiles(ctx context.Context, paths []string) error
@@ -1128,6 +1113,21 @@ type Engine interface {
 	// just copies the backing bytes to a local file of if it rewrites the file
 	// key-by-key to a new file.
 	Download(ctx context.Context, span roachpb.Span, copy bool) error
+
+	// RegisterDiskSlowCallback registers a callback that will be run when a
+	// write operation on the disk has been seen to be slow. This callback
+	// needs to be thread-safe as it could be called repeatedly in multiple threads
+	// over a short period of time.
+	RegisterDiskSlowCallback(cb func(info pebble.DiskSlowInfo))
+
+	// RegisterLowDiskSpaceCallback registers a callback that will be run when a
+	// disk is running out of space. This callback needs to be thread-safe as it
+	// could be called repeatedly in multiple threads over a short period of time.
+	RegisterLowDiskSpaceCallback(cb func(info pebble.LowDiskSpaceInfo))
+
+	// GetPebbleOptions returns the options used when creating the engine. The
+	// caller must not modify these.
+	GetPebbleOptions() *pebble.Options
 }
 
 // Batch is the interface for batch specific operations.

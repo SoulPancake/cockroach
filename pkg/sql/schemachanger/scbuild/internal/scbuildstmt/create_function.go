@@ -1,19 +1,13 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scbuildstmt
 
 import (
 	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/funcinfo"
@@ -173,6 +167,15 @@ func CreateFunction(b BuildCtx, n *tree.CreateRoutine) {
 			lang = v
 		case tree.RoutineBodyStr:
 			fnBodyStr = string(t)
+		case tree.RoutineSecurity:
+			s, err := funcinfo.SecurityToProto(t)
+			if err != nil {
+				panic(err)
+			}
+			b.Add(&scpb.FunctionSecurity{
+				FunctionID: fnID,
+				Security:   catpb.FunctionSecurity{Security: s},
+			})
 		}
 	}
 	owner, ups := b.BuildUserPrivilegesFromDefaultPrivileges(
@@ -190,7 +193,7 @@ func CreateFunction(b BuildCtx, n *tree.CreateRoutine) {
 	validateTypeReferences(b, refProvider, db.DatabaseID)
 	validateFunctionRelationReferences(b, refProvider, db.DatabaseID)
 	validateFunctionToFunctionReferences(b, refProvider, db.DatabaseID)
-	b.Add(b.WrapFunctionBody(fnID, fnBodyStr, lang, refProvider))
+	b.Add(b.WrapFunctionBody(fnID, fnBodyStr, lang, typ, refProvider))
 	b.LogEventForExistingTarget(&fn)
 }
 
@@ -239,10 +242,6 @@ func validateFunctionToFunctionReferences(
 	b BuildCtx, refProvider ReferenceProvider, parentDBID descpb.ID,
 ) {
 	err := refProvider.ForEachFunctionReference(func(id descpb.ID) error {
-		if !b.ClusterSettings().Version.IsActive(b, clusterversion.V24_1) {
-			return pgerror.Newf(pgcode.FeatureNotSupported,
-				"user defined functions cannot reference other user defined functions")
-		}
 		funcElts := b.QueryByID(id)
 		funcName := funcElts.FilterFunctionName().MustGetOneElement()
 		schemaParent := funcElts.FilterSchemaChild().MustGetOneElement()

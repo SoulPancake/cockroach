@@ -972,7 +972,7 @@ func (loggerDev) Shoutf(ctx context.Context, sev Severity, format string, args .
 // sensitive operational data.
 // See [Configure logs](configure-logs.html#dev-channel).
 func (loggerDev) VEvent(ctx context.Context, level Level, msg string) {
-	vEventf(ctx, false /* isErr */, 1, level, channel.DEV, msg)
+	vEvent(ctx, false /* isErr */, 1, level, channel.DEV, msg)
 }
 
 // VEventf either logs a message to the channel (which also outputs to the
@@ -1504,7 +1504,7 @@ func (loggerOps) Shoutf(ctx context.Context, sev Severity, format string, args .
 //   - [Cluster setting](cluster-settings.html) changes
 //   - [Zone configuration](configure-replication-zones.html) changes
 func (loggerOps) VEvent(ctx context.Context, level Level, msg string) {
-	vEventf(ctx, false /* isErr */, 1, level, channel.OPS, msg)
+	vEvent(ctx, false /* isErr */, 1, level, channel.OPS, msg)
 }
 
 // VEventf either logs a message to the channel (which also outputs to the
@@ -1939,7 +1939,7 @@ func (loggerHealth) Shoutf(ctx context.Context, sev Severity, format string, arg
 //   - Range and table leasing events
 //   - Up- and down-replication, range unavailability
 func (loggerHealth) VEvent(ctx context.Context, level Level, msg string) {
-	vEventf(ctx, false /* isErr */, 1, level, channel.HEALTH, msg)
+	vEvent(ctx, false /* isErr */, 1, level, channel.HEALTH, msg)
 }
 
 // VEventf either logs a message to the channel (which also outputs to the
@@ -2248,7 +2248,7 @@ func (loggerStorage) Shoutf(ctx context.Context, sev Severity, format string, ar
 // The `STORAGE` channel is used to report low-level storage
 // layer events (RocksDB/Pebble).
 func (loggerStorage) VEvent(ctx context.Context, level Level, msg string) {
-	vEventf(ctx, false /* isErr */, 1, level, channel.STORAGE, msg)
+	vEvent(ctx, false /* isErr */, 1, level, channel.STORAGE, msg)
 }
 
 // VEventf either logs a message to the channel (which also outputs to the
@@ -2705,7 +2705,7 @@ func (loggerSessions) Shoutf(ctx context.Context, sev Severity, format string, a
 // This is typically configured in "audit" mode, with event
 // numbering and synchronous writes.
 func (loggerSessions) VEvent(ctx context.Context, level Level, msg string) {
-	vEventf(ctx, false /* isErr */, 1, level, channel.SESSIONS, msg)
+	vEvent(ctx, false /* isErr */, 1, level, channel.SESSIONS, msg)
 }
 
 // VEventf either logs a message to the channel (which also outputs to the
@@ -3238,7 +3238,7 @@ func (loggerSqlSchema) Shoutf(ctx context.Context, sev Severity, format string, 
 // `SQL_SCHEMA` events generally comprise changes to the schema that affect the
 // functional behavior of client apps using stored objects.
 func (loggerSqlSchema) VEvent(ctx context.Context, level Level, msg string) {
-	vEventf(ctx, false /* isErr */, 1, level, channel.SQL_SCHEMA, msg)
+	vEvent(ctx, false /* isErr */, 1, level, channel.SQL_SCHEMA, msg)
 }
 
 // VEventf either logs a message to the channel (which also outputs to the
@@ -3717,7 +3717,7 @@ func (loggerUserAdmin) Shoutf(ctx context.Context, sev Severity, format string, 
 // This is typically configured in "audit" mode, with event
 // numbering and synchronous writes.
 func (loggerUserAdmin) VEvent(ctx context.Context, level Level, msg string) {
-	vEventf(ctx, false /* isErr */, 1, level, channel.USER_ADMIN, msg)
+	vEvent(ctx, false /* isErr */, 1, level, channel.USER_ADMIN, msg)
 }
 
 // VEventf either logs a message to the channel (which also outputs to the
@@ -4150,7 +4150,7 @@ func (loggerPrivileges) Shoutf(ctx context.Context, sev Severity, format string,
 // This is typically configured in "audit" mode, with event
 // numbering and synchronous writes.
 func (loggerPrivileges) VEvent(ctx context.Context, level Level, msg string) {
-	vEventf(ctx, false /* isErr */, 1, level, channel.PRIVILEGES, msg)
+	vEvent(ctx, false /* isErr */, 1, level, channel.PRIVILEGES, msg)
 }
 
 // VEventf either logs a message to the channel (which also outputs to the
@@ -4659,7 +4659,7 @@ func (loggerSensitiveAccess) Shoutf(ctx context.Context, sev Severity, format st
 // This is typically configured in "audit" mode, with event
 // numbering and synchronous writes.
 func (loggerSensitiveAccess) VEvent(ctx context.Context, level Level, msg string) {
-	vEventf(ctx, false /* isErr */, 1, level, channel.SENSITIVE_ACCESS, msg)
+	vEvent(ctx, false /* isErr */, 1, level, channel.SENSITIVE_ACCESS, msg)
 }
 
 // VEventf either logs a message to the channel (which also outputs to the
@@ -5056,7 +5056,7 @@ func (loggerSqlExec) Shoutf(ctx context.Context, sev Severity, format string, ar
 //     `sql.log.all_statements.enabled` [cluster setting](cluster-settings.html))
 //   - uncaught Go panic errors during the execution of a SQL statement.
 func (loggerSqlExec) VEvent(ctx context.Context, level Level, msg string) {
-	vEventf(ctx, false /* isErr */, 1, level, channel.SQL_EXEC, msg)
+	vEvent(ctx, false /* isErr */, 1, level, channel.SQL_EXEC, msg)
 }
 
 // VEventf either logs a message to the channel (which also outputs to the
@@ -5501,7 +5501,7 @@ func (loggerSqlPerf) Shoutf(ctx context.Context, sev Severity, format string, ar
 // with versions prior to v21.1, where the corresponding events
 // were redirected to separate files.
 func (loggerSqlPerf) VEvent(ctx context.Context, level Level, msg string) {
-	vEventf(ctx, false /* isErr */, 1, level, channel.SQL_PERF, msg)
+	vEvent(ctx, false /* isErr */, 1, level, channel.SQL_PERF, msg)
 }
 
 // VEventf either logs a message to the channel (which also outputs to the
@@ -5852,7 +5852,7 @@ func (loggerSqlInternalPerf) Shoutf(ctx context.Context, sev Severity, format st
 // channel so as to not pollute the `SQL_PERF` logging output with
 // internal troubleshooting details.
 func (loggerSqlInternalPerf) VEvent(ctx context.Context, level Level, msg string) {
-	vEventf(ctx, false /* isErr */, 1, level, channel.SQL_INTERNAL_PERF, msg)
+	vEvent(ctx, false /* isErr */, 1, level, channel.SQL_INTERNAL_PERF, msg)
 }
 
 // VEventf either logs a message to the channel (which also outputs to the
@@ -6173,7 +6173,7 @@ func (loggerTelemetry) Shoutf(ctx context.Context, sev Severity, format string, 
 // feature usage within CockroachDB and anonymizes any application-
 // specific data.
 func (loggerTelemetry) VEvent(ctx context.Context, level Level, msg string) {
-	vEventf(ctx, false /* isErr */, 1, level, channel.TELEMETRY, msg)
+	vEvent(ctx, false /* isErr */, 1, level, channel.TELEMETRY, msg)
 }
 
 // VEventf either logs a message to the channel (which also outputs to the
@@ -6492,7 +6492,7 @@ func (loggerKvDistribution) Shoutf(ctx context.Context, sev Severity, format str
 // replicas between stores in the cluster, or adding (removing) replicas to
 // ranges.
 func (loggerKvDistribution) VEvent(ctx context.Context, level Level, msg string) {
-	vEventf(ctx, false /* isErr */, 1, level, channel.KV_DISTRIBUTION, msg)
+	vEvent(ctx, false /* isErr */, 1, level, channel.KV_DISTRIBUTION, msg)
 }
 
 // VEventf either logs a message to the channel (which also outputs to the
@@ -6512,301 +6512,4 @@ func (loggerKvDistribution) VEventf(ctx context.Context, level Level, format str
 // ranges.
 func (loggerKvDistribution) VEventfDepth(ctx context.Context, depth int, level Level, format string, args ...interface{}) {
 	vEventf(ctx, false /* isErr */, 1+depth, level, channel.KV_DISTRIBUTION, format, args...)
-}
-
-// loggerStructuredEvents is the logger type for the STRUCTURED_EVENTS channel.
-type loggerStructuredEvents struct{}
-
-// StructuredEvents is a logger that logs to the STRUCTURED_EVENTS channel.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-var StructuredEvents loggerStructuredEvents
-
-// StructuredEvents and loggerStructuredEvents implement ChannelLogger.
-//
-// We do not force use of ChannelLogger when instantiating the logger
-// object above (e.g. by giving it the interface type), to ensure
-// the calls to the API methods remain inlinable in the common case.
-var _ ChannelLogger = StructuredEvents
-
-// Infof logs to the STRUCTURED_EVENTS channel with severity INFO.
-// It extracts log tags from the context and logs them along with the given
-// message. Arguments are handled in the manner of fmt.Printf.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-//
-// The `INFO` severity is used for informational messages that do not
-// require action.
-func (loggerStructuredEvents) Infof(ctx context.Context, format string, args ...interface{}) {
-	logfDepth(ctx, 1, severity.INFO, channel.STRUCTURED_EVENTS, format, args...)
-}
-
-// VInfof logs to the STRUCTURED_EVENTS channel with severity INFO,
-// if logging has been enabled for the source file where the call is
-// performed at the provided verbosity level, via the vmodule setting.
-// It extracts log tags from the context and logs them along with the given
-// message. Arguments are handled in the manner of fmt.Printf.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-//
-// The `INFO` severity is used for informational messages that do not
-// require action.
-func (loggerStructuredEvents) VInfof(ctx context.Context, level Level, format string, args ...interface{}) {
-	if VDepth(level, 1) {
-		logfDepth(ctx, 1, severity.INFO, channel.STRUCTURED_EVENTS, format, args...)
-	}
-}
-
-// Info logs to the STRUCTURED_EVENTS channel with severity INFO.
-// It extracts log tags from the context and logs them along with the given
-// message.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-//
-// The `INFO` severity is used for informational messages that do not
-// require action.
-func (loggerStructuredEvents) Info(ctx context.Context, msg string) {
-	logfDepth(ctx, 1, severity.INFO, channel.STRUCTURED_EVENTS, msg)
-}
-
-// InfofDepth logs to the STRUCTURED_EVENTS channel with severity INFO,
-// offsetting the caller's stack frame by 'depth'.
-// It extracts log tags from the context and logs them along with the given
-// message. Arguments are handled in the manner of fmt.Printf.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-//
-// The `INFO` severity is used for informational messages that do not
-// require action.
-func (loggerStructuredEvents) InfofDepth(ctx context.Context, depth int, format string, args ...interface{}) {
-	logfDepth(ctx, depth+1, severity.INFO, channel.STRUCTURED_EVENTS, format, args...)
-}
-
-// Warningf logs to the STRUCTURED_EVENTS channel with severity WARNING.
-// It extracts log tags from the context and logs them along with the given
-// message. Arguments are handled in the manner of fmt.Printf.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-//
-// The `WARNING` severity is used for situations which may require special handling,
-// where normal operation is expected to resume automatically.
-func (loggerStructuredEvents) Warningf(ctx context.Context, format string, args ...interface{}) {
-	logfDepth(ctx, 1, severity.WARNING, channel.STRUCTURED_EVENTS, format, args...)
-}
-
-// VWarningf logs to the STRUCTURED_EVENTS channel with severity WARNING,
-// if logging has been enabled for the source file where the call is
-// performed at the provided verbosity level, via the vmodule setting.
-// It extracts log tags from the context and logs them along with the given
-// message. Arguments are handled in the manner of fmt.Printf.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-//
-// The `WARNING` severity is used for situations which may require special handling,
-// where normal operation is expected to resume automatically.
-func (loggerStructuredEvents) VWarningf(ctx context.Context, level Level, format string, args ...interface{}) {
-	if VDepth(level, 1) {
-		logfDepth(ctx, 1, severity.WARNING, channel.STRUCTURED_EVENTS, format, args...)
-	}
-}
-
-// Warning logs to the STRUCTURED_EVENTS channel with severity WARNING.
-// It extracts log tags from the context and logs them along with the given
-// message.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-//
-// The `WARNING` severity is used for situations which may require special handling,
-// where normal operation is expected to resume automatically.
-func (loggerStructuredEvents) Warning(ctx context.Context, msg string) {
-	logfDepth(ctx, 1, severity.WARNING, channel.STRUCTURED_EVENTS, msg)
-}
-
-// WarningfDepth logs to the STRUCTURED_EVENTS channel with severity WARNING,
-// offsetting the caller's stack frame by 'depth'.
-// It extracts log tags from the context and logs them along with the given
-// message. Arguments are handled in the manner of fmt.Printf.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-//
-// The `WARNING` severity is used for situations which may require special handling,
-// where normal operation is expected to resume automatically.
-func (loggerStructuredEvents) WarningfDepth(ctx context.Context, depth int, format string, args ...interface{}) {
-	logfDepth(ctx, depth+1, severity.WARNING, channel.STRUCTURED_EVENTS, format, args...)
-}
-
-// Errorf logs to the STRUCTURED_EVENTS channel with severity ERROR.
-// It extracts log tags from the context and logs them along with the given
-// message. Arguments are handled in the manner of fmt.Printf.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-//
-// The `ERROR` severity is used for situations that require special handling,
-// where normal operation could not proceed as expected.
-// Other operations can continue mostly unaffected.
-func (loggerStructuredEvents) Errorf(ctx context.Context, format string, args ...interface{}) {
-	logfDepth(ctx, 1, severity.ERROR, channel.STRUCTURED_EVENTS, format, args...)
-}
-
-// VErrorf logs to the STRUCTURED_EVENTS channel with severity ERROR,
-// if logging has been enabled for the source file where the call is
-// performed at the provided verbosity level, via the vmodule setting.
-// It extracts log tags from the context and logs them along with the given
-// message. Arguments are handled in the manner of fmt.Printf.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-//
-// The `ERROR` severity is used for situations that require special handling,
-// where normal operation could not proceed as expected.
-// Other operations can continue mostly unaffected.
-func (loggerStructuredEvents) VErrorf(ctx context.Context, level Level, format string, args ...interface{}) {
-	if VDepth(level, 1) {
-		logfDepth(ctx, 1, severity.ERROR, channel.STRUCTURED_EVENTS, format, args...)
-	}
-}
-
-// Error logs to the STRUCTURED_EVENTS channel with severity ERROR.
-// It extracts log tags from the context and logs them along with the given
-// message.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-//
-// The `ERROR` severity is used for situations that require special handling,
-// where normal operation could not proceed as expected.
-// Other operations can continue mostly unaffected.
-func (loggerStructuredEvents) Error(ctx context.Context, msg string) {
-	logfDepth(ctx, 1, severity.ERROR, channel.STRUCTURED_EVENTS, msg)
-}
-
-// ErrorfDepth logs to the STRUCTURED_EVENTS channel with severity ERROR,
-// offsetting the caller's stack frame by 'depth'.
-// It extracts log tags from the context and logs them along with the given
-// message. Arguments are handled in the manner of fmt.Printf.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-//
-// The `ERROR` severity is used for situations that require special handling,
-// where normal operation could not proceed as expected.
-// Other operations can continue mostly unaffected.
-func (loggerStructuredEvents) ErrorfDepth(ctx context.Context, depth int, format string, args ...interface{}) {
-	logfDepth(ctx, depth+1, severity.ERROR, channel.STRUCTURED_EVENTS, format, args...)
-}
-
-// Fatalf logs to the STRUCTURED_EVENTS channel with severity FATAL.
-// It extracts log tags from the context and logs them along with the given
-// message. Arguments are handled in the manner of fmt.Printf.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-//
-// The `FATAL` severity is used for situations that require an immedate, hard
-// server shutdown. A report is also sent to telemetry if telemetry
-// is enabled.
-func (loggerStructuredEvents) Fatalf(ctx context.Context, format string, args ...interface{}) {
-	logfDepth(ctx, 1, severity.FATAL, channel.STRUCTURED_EVENTS, format, args...)
-}
-
-// VFatalf logs to the STRUCTURED_EVENTS channel with severity FATAL,
-// if logging has been enabled for the source file where the call is
-// performed at the provided verbosity level, via the vmodule setting.
-// It extracts log tags from the context and logs them along with the given
-// message. Arguments are handled in the manner of fmt.Printf.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-//
-// The `FATAL` severity is used for situations that require an immedate, hard
-// server shutdown. A report is also sent to telemetry if telemetry
-// is enabled.
-func (loggerStructuredEvents) VFatalf(ctx context.Context, level Level, format string, args ...interface{}) {
-	if VDepth(level, 1) {
-		logfDepth(ctx, 1, severity.FATAL, channel.STRUCTURED_EVENTS, format, args...)
-	}
-}
-
-// Fatal logs to the STRUCTURED_EVENTS channel with severity FATAL.
-// It extracts log tags from the context and logs them along with the given
-// message.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-//
-// The `FATAL` severity is used for situations that require an immedate, hard
-// server shutdown. A report is also sent to telemetry if telemetry
-// is enabled.
-func (loggerStructuredEvents) Fatal(ctx context.Context, msg string) {
-	logfDepth(ctx, 1, severity.FATAL, channel.STRUCTURED_EVENTS, msg)
-}
-
-// FatalfDepth logs to the STRUCTURED_EVENTS channel with severity FATAL,
-// offsetting the caller's stack frame by 'depth'.
-// It extracts log tags from the context and logs them along with the given
-// message. Arguments are handled in the manner of fmt.Printf.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-//
-// The `FATAL` severity is used for situations that require an immedate, hard
-// server shutdown. A report is also sent to telemetry if telemetry
-// is enabled.
-func (loggerStructuredEvents) FatalfDepth(ctx context.Context, depth int, format string, args ...interface{}) {
-	logfDepth(ctx, depth+1, severity.FATAL, channel.STRUCTURED_EVENTS, format, args...)
-}
-
-// Shout logs to channel STRUCTURED_EVENTS, and also to the real stderr if logging
-// is currently redirected to a file.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-func (loggerStructuredEvents) Shout(ctx context.Context, sev Severity, msg string) {
-	shoutfDepth(ctx, 1, sev, channel.STRUCTURED_EVENTS, msg)
-}
-
-// Shoutf logs to channel STRUCTURED_EVENTS, and also to the real stderr if
-// logging is currently redirected to a file. Arguments are handled in
-// the manner of fmt.Printf.
-//
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-func (loggerStructuredEvents) Shoutf(ctx context.Context, sev Severity, format string, args ...interface{}) {
-	shoutfDepth(ctx, 1, sev, channel.STRUCTURED_EVENTS, format, args...)
-}
-
-// VEvent either logs a message to the channel (which also outputs to the
-// active trace) or to the trace alone, depending on whether the specified
-// verbosity level is active.
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-func (loggerStructuredEvents) VEvent(ctx context.Context, level Level, msg string) {
-	vEventf(ctx, false /* isErr */, 1, level, channel.STRUCTURED_EVENTS, msg)
-}
-
-// VEventf either logs a message to the channel (which also outputs to the
-// active trace) or to the trace alone, depending on whether the specified
-// verbosity level is active.
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-func (loggerStructuredEvents) VEventf(ctx context.Context, level Level, format string, args ...interface{}) {
-	vEventf(ctx, false /* isErr */, 1, level, channel.STRUCTURED_EVENTS, format, args...)
-}
-
-// VEventfDepth performs the same as VEventf but checks the verbosity level
-// at the given depth in the call stack.
-// The `STRUCTURED_EVENTS` channel is used to send log events with messages containing structured
-// JSON, which can be consumed externally to power o11y features.
-func (loggerStructuredEvents) VEventfDepth(ctx context.Context, depth int, level Level, format string, args ...interface{}) {
-	vEventf(ctx, false /* isErr */, 1+depth, level, channel.STRUCTURED_EVENTS, format, args...)
 }

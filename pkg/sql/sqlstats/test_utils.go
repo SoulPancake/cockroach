@@ -1,22 +1,11 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlstats
 
-import (
-	"context"
-	"time"
-
-	"github.com/cockroachdb/cockroach/pkg/sql/clusterunique"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/insights"
-)
+import "time"
 
 // TestingKnobs provides hooks and knobs for unit tests.
 type TestingKnobs struct {
@@ -27,16 +16,6 @@ type TestingKnobs struct {
 	// OnTxnStatsFlushFinished is a callback that is triggered when txn stats
 	// finishes flushing.
 	OnTxnStatsFlushFinished func()
-
-	// InsightsWriterTxnInterceptor is a callback that's triggered when a txn insight
-	// is observed when recording txn stats. The callback is called instead of the legitimate
-	// insights.Writer.
-	InsightsWriterTxnInterceptor func(ctx context.Context, sessionID clusterunique.ID, transaction *insights.Transaction)
-
-	// InsightsWriterStmtInterceptor is a callback that's triggered when a stmt insight
-	// is observed when recording stmt stats. The callback is called instead of the legitimate
-	// insights.Writer.
-	InsightsWriterStmtInterceptor func(sessionID clusterunique.ID, statement *insights.Statement)
 
 	// OnCleanupStartForShard is a callback that is triggered when background
 	// cleanup job starts to delete data from a shard from the system table.

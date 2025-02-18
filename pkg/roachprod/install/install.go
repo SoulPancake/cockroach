@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package install
 
@@ -109,6 +104,11 @@ rm /tmp/otelcol-contrib.deb;
 	"side-eye": `
 	curl https://sh.side-eye.io/ | SIDE_EYE_API_TOKEN=%API_KEY% SIDE_EYE_ENVIRONMENT="%ROACHPROD_CLUSTER_NAME%" sh
 	`,
+
+	"bzip2": `
+sudo apt-get update;
+sudo apt-get install -y bzip2;
+`,
 }
 
 // installLocalCmds is a map from software name to a map of strings that
@@ -120,7 +120,9 @@ var installLocalCmds = map[string]map[string]*exec.Cmd{
 	},
 }
 
-var sideEyeSecretCmd = exec.Command("gcloud", "secrets", "versions", "access", "latest", "--secret", "side-eye-key")
+var sideEyeSecretCmd = exec.Command("gcloud",
+	"--project", "cockroach-ephemeral",
+	"secrets", "versions", "access", "latest", "--secret", "side-eye-key")
 
 // SortedCmds TODO(peter): document
 func SortedCmds() []string {

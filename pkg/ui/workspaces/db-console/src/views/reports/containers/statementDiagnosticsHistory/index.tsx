@@ -1,19 +1,8 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
-import { Helmet } from "react-helmet";
-import { connect } from "react-redux";
-import moment from "moment-timezone";
-import { Link } from "react-router-dom";
-import isUndefined from "lodash/isUndefined";
 import {
   api as clusterUiApi,
   DownloadFile,
@@ -28,25 +17,31 @@ import {
   util,
   Timestamp,
 } from "@cockroachlabs/cluster-ui";
+import isUndefined from "lodash/isUndefined";
+import moment from "moment-timezone";
+import React from "react";
+import { Helmet } from "react-helmet";
+import { connect } from "react-redux";
+import { Link } from "react-router-dom";
 
 import { Anchor, Button, Text, TextTypes, Tooltip } from "src/components";
-import HeaderSection from "src/views/shared/components/headerSection";
+import { trackCancelDiagnosticsBundleAction } from "src/redux/analyticsActions";
+import {
+  invalidateStatementDiagnosticsRequests,
+  refreshStatementDiagnosticsRequests,
+} from "src/redux/apiReducers";
 import { AdminUIState, AppDispatch } from "src/redux/state";
-import { trustIcon } from "src/util/trust";
+import { cancelStatementDiagnosticsReportAction } from "src/redux/statements";
 import {
   selectStatementDiagnosticsReports,
   selectStatementByFingerprint,
   statementDiagnosticsReportsInFlight,
 } from "src/redux/statements/statementsSelectors";
-import {
-  invalidateStatementDiagnosticsRequests,
-  refreshStatementDiagnosticsRequests,
-} from "src/redux/apiReducers";
+import { trackDownloadDiagnosticsBundle } from "src/util/analytics";
 import { statementDiagnostics } from "src/util/docs";
 import { summarize } from "src/util/sql/summarize";
-import { trackDownloadDiagnosticsBundle } from "src/util/analytics";
-import { cancelStatementDiagnosticsReportAction } from "src/redux/statements";
-import { trackCancelDiagnosticsBundleAction } from "src/redux/analyticsActions";
+import { trustIcon } from "src/util/trust";
+import HeaderSection from "src/views/shared/components/headerSection";
 
 import "./statementDiagnosticsHistoryView.styl";
 

@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowexec
 
@@ -38,7 +33,8 @@ type sorterBase struct {
 	i    rowcontainer.RowIterator
 
 	// Only set if the ability to spill to disk is enabled.
-	diskMonitor *mon.BytesMonitor
+	unlimitedMemMonitor *mon.BytesMonitor
+	diskMonitor         *mon.BytesMonitor
 }
 
 func (s *sorterBase) init(
@@ -46,7 +42,7 @@ func (s *sorterBase) init(
 	self execinfra.RowSource,
 	flowCtx *execinfra.FlowCtx,
 	processorID int32,
-	processorName redact.RedactableString,
+	processorName redact.SafeString,
 	input execinfra.RowSource,
 	post *execinfrapb.PostProcessSpec,
 	ordering colinfo.ColumnOrdering,
@@ -60,7 +56,7 @@ func (s *sorterBase) init(
 
 	// Limit the memory use by creating a child monitor with a hard limit.
 	// The processor will overflow to disk if this limit is not enough.
-	memMonitor := execinfra.NewLimitedMonitor(ctx, flowCtx.Mon, flowCtx, redact.Sprintf("%s-limited", processorName))
+	memMonitor := execinfra.NewLimitedMonitor(ctx, flowCtx.Mon, flowCtx, processorName+"-limited")
 	if err := s.ProcessorBase.Init(
 		ctx, self, post, input.OutputTypes(), flowCtx, processorID, memMonitor, opts,
 	); err != nil {
@@ -68,7 +64,8 @@ func (s *sorterBase) init(
 		return err
 	}
 
-	s.diskMonitor = execinfra.NewMonitor(ctx, flowCtx.DiskMonitor, redact.Sprintf("%s-disk", processorName))
+	s.unlimitedMemMonitor = execinfra.NewMonitor(ctx, flowCtx.Mon, processorName+"-unlimited")
+	s.diskMonitor = execinfra.NewMonitor(ctx, flowCtx.DiskMonitor, processorName+"-disk")
 	rc := rowcontainer.DiskBackedRowContainer{}
 	rc.Init(
 		ordering,
@@ -76,6 +73,7 @@ func (s *sorterBase) init(
 		s.FlowCtx.EvalCtx,
 		flowCtx.Cfg.TempStorage,
 		memMonitor,
+		s.unlimitedMemMonitor,
 		s.diskMonitor,
 	)
 	s.rows = &rc
@@ -118,6 +116,9 @@ func (s *sorterBase) close() {
 		}
 		s.rows.Close(s.Ctx())
 		s.MemMonitor.Stop(s.Ctx())
+		if s.unlimitedMemMonitor != nil {
+			s.unlimitedMemMonitor.Stop(s.Ctx())
+		}
 		if s.diskMonitor != nil {
 			s.diskMonitor.Stop(s.Ctx())
 		}
@@ -133,7 +134,7 @@ func (s *sorterBase) execStatsForTrace() *execinfrapb.ComponentStats {
 	return &execinfrapb.ComponentStats{
 		Inputs: []execinfrapb.InputStats{is},
 		Exec: execinfrapb.ExecStats{
-			MaxAllocatedMem:  optional.MakeUint(uint64(s.MemMonitor.MaximumBytes())),
+			MaxAllocatedMem:  optional.MakeUint(uint64(s.MemMonitor.MaximumBytes() + s.unlimitedMemMonitor.MaximumBytes())),
 			MaxAllocatedDisk: optional.MakeUint(uint64(s.diskMonitor.MaximumBytes())),
 		},
 		Output: s.OutputHelper.Stats(),

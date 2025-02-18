@@ -1,32 +1,26 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { Loading } from "@cockroachlabs/cluster-ui";
+import isEmpty from "lodash/isEmpty";
+import isEqual from "lodash/isEqual";
+import isNil from "lodash/isNil";
+import map from "lodash/map";
+import sortBy from "lodash/sortBy";
 import React from "react";
 import { Helmet } from "react-helmet";
 import { connect } from "react-redux";
 import { RouteComponentProps, withRouter } from "react-router-dom";
 import { createSelector } from "reselect";
-import { Loading } from "@cockroachlabs/cluster-ui";
-import isEqual from "lodash/isEqual";
-import isEmpty from "lodash/isEmpty";
-import map from "lodash/map";
-import isNil from "lodash/isNil";
-import sortBy from "lodash/sortBy";
 
 import * as protos from "src/js/protos";
 import { storesRequestKey, refreshStores } from "src/redux/apiReducers";
 import { AdminUIState } from "src/redux/state";
 import { nodeIDAttr } from "src/util/constants";
-import EncryptionStatus from "src/views/reports/containers/stores/encryption";
 import { getMatchParamByName } from "src/util/query";
-
+import EncryptionStatus from "src/views/reports/containers/stores/encryption";
 
 import { BackToAdvanceDebug } from "../util";
 
@@ -140,9 +134,7 @@ function selectStoresState(state: AdminUIState, props: StoresProps) {
 }
 
 const selectStoresLoading = createSelector(selectStoresState, stores => {
-  return (
-    isEmpty(stores) || (isEmpty(stores.data) && isNil(stores.lastError))
-  );
+  return isEmpty(stores) || (isEmpty(stores.data) && isNil(stores.lastError));
 });
 
 const selectSortedStores = createSelector(

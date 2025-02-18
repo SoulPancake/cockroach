@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package valueside
 
@@ -192,7 +187,7 @@ func MarshalLegacy(colType *types.T, val tree.Datum) (roachpb.Value, error) {
 		}
 	case types.TupleFamily:
 		if v, ok := val.(*tree.DTuple); ok {
-			b, err := encodeUntaggedTuple(v, nil /* appendTo */, 0 /* colID */, nil /* scratch */)
+			b, _, err := encodeUntaggedTuple(v, nil /* appendTo */, nil /* scratch */)
 			if err != nil {
 				return r, err
 			}
@@ -437,7 +432,7 @@ func UnmarshalLegacy(a *tree.DatumAlloc, typ *types.T, value roachpb.Value) (tre
 		if err != nil {
 			return nil, err
 		}
-		vec, err := vector.Decode(v)
+		_, vec, err := vector.Decode(v)
 		if err != nil {
 			return nil, err
 		}

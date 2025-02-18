@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cdcevent
 
@@ -12,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
@@ -25,10 +23,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/cache"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
+	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
@@ -173,6 +173,26 @@ func (r Row) DebugString() string {
 	return sb.String()
 }
 
+func (r Row) ToJSON() (*tree.DJSON, error) {
+	builder := json.NewObjectBuilder(len(r.cols))
+	err := r.ForAllColumns().Datum(func(d tree.Datum, col ResultColumn) error {
+		val, err := tree.AsJSON(
+			d,
+			sessiondatapb.DataConversionConfig{},
+			time.UTC,
+		)
+		if err != nil {
+			return err
+		}
+		builder.Add(col.Name, val)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return tree.NewDJSON(builder.Build()), nil
+}
+
 // forEachColumn is a helper which invokes fn for reach column in the ordColumn list.
 func (r Row) forEachDatum(fn DatumFn, colIndexes []int) error {
 	for _, colIdx := range colIndexes {
@@ -298,16 +318,25 @@ func NewEventDescriptor(
 	// appear in the primary key index.
 	primaryIdx := desc.GetPrimaryIndex()
 	colOrd := catalog.ColumnIDToOrdinalMap(desc.PublicColumns())
-	sd.keyCols = make([]int, primaryIdx.NumKeyColumns())
+	writeOnlyAndPublic := catalog.ColumnIDToOrdinalMap(desc.WritableColumns())
 	var primaryKeyOrdinal catalog.TableColMap
 
+	ordIdx := 0
 	for i := 0; i < primaryIdx.NumKeyColumns(); i++ {
 		ord, ok := colOrd.Get(primaryIdx.GetKeyColumnID(i))
+		// Columns going through mutation can exist in the PK, but not
+		// be public, since a later primary index will make these fully
+		// public.
 		if !ok {
+			if _, isWriteOnlyColumn := writeOnlyAndPublic.Get(primaryIdx.GetKeyColumnID(i)); isWriteOnlyColumn {
+				continue
+			}
 			return nil, errors.AssertionFailedf("expected to find column %d", ord)
 		}
-		primaryKeyOrdinal.Set(desc.PublicColumns()[ord].GetID(), i)
+		primaryKeyOrdinal.Set(desc.PublicColumns()[ord].GetID(), ordIdx)
+		ordIdx += 1
 	}
+	sd.keyCols = make([]int, ordIdx)
 
 	switch {
 	case keyOnly:
@@ -510,6 +539,11 @@ func (d *eventDecoder) DecodeKV(
 	if err == nil {
 		return r, nil
 	}
+	// Unwatched family errors aren't terminal so return early and let caller
+	// decide what to do with it.
+	if errors.Is(err, ErrUnwatchedFamily) {
+		return Row{}, err
+	}
 
 	// Failure to decode roachpb.KeyValue we received from rangefeed is pretty bad.
 	// At this point, we only have guesses why this happened (schema change? data corruption?).
@@ -588,7 +622,10 @@ func (d *eventDecoder) initForKey(
 // In particular, when decoding previous row, we strip table OID column
 // since it makes little sense to include it in the previous row value.
 var systemColumns = []descpb.ColumnDescriptor{
-	colinfo.MVCCTimestampColumnDesc, colinfo.TableOIDColumnDesc,
+	colinfo.MVCCTimestampColumnDesc,
+	colinfo.TableOIDColumnDesc,
+	colinfo.OriginIDColumnDesc,
+	colinfo.OriginTimestampColumnDesc,
 }
 
 type fetcher struct {

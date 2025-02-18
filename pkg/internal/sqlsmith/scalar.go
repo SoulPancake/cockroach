@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlsmith
 
@@ -337,9 +332,18 @@ func makeBinOp(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
 		return nil, false
 	}
 	op := ops[s.rnd.Intn(len(ops))]
-	for s.simpleScalarTypes && !(isSimpleSeedType(op.LeftType) && isSimpleSeedType(op.RightType)) {
-		// We must work harder to pick some other op.
-		op = ops[s.rnd.Intn(len(ops))]
+	if s.simpleScalarTypes {
+		attempts := 0
+		for !(isSimpleSeedType(op.LeftType) && isSimpleSeedType(op.RightType)) {
+			// We must work harder to pick some other op. Some types may not have ops for
+			// simple types (e.g., pgvector), so we limit the number of attempts before
+			// giving up.
+			attempts++
+			if attempts >= len(ops) {
+				return nil, false
+			}
+			op = ops[s.rnd.Intn(len(ops))]
+		}
 	}
 
 	if s.postgres {
@@ -440,6 +444,13 @@ func makeFunc(s *Smither, ctx Context, typ *types.T, refs colRefs) (tree.TypedEx
 		if ignore.MatchString(fn.def.Name) {
 			return nil, false
 		}
+	}
+	if fn.def.Name == "abs" && typ.Identical(types.Float4) {
+		// The 'abs' function is known to return somewhat unpredictable results
+		// on FLOAT4 type (different precision depending on the execution engine
+		// and the optimizer plan), so we choose to never use it in this
+		// context.
+		return nil, false
 	}
 
 	args := make(tree.TypedExprs, 0)

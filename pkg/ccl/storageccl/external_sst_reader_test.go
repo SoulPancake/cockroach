@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storageccl
 
@@ -21,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/storageutils"
+	"github.com/cockroachdb/cockroach/pkg/util/cidr"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/ioctx"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -170,7 +168,7 @@ func TestNewExternalSSTReaderFailure(t *testing.T) {
 
 	ctx := context.Background()
 	settings := cluster.MakeTestingClusterSettings()
-	metrics := cloud.MakeMetrics()
+	metrics := cloud.MakeMetrics(cidr.NewLookup(&settings.SV))
 
 	const localFoo = "nodelocal://1/foo"
 

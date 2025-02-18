@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -23,10 +18,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/task"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
+	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
@@ -80,7 +77,7 @@ func runMVCCGC(ctx context.Context, t test.Test, c cluster.Cluster) {
 	const gcRetryTimeout = 7 * time.Minute
 
 	var randomSeed int64
-	if UsingRuntimeAssertions(t) {
+	if roachtestutil.UsingRuntimeAssertions(t) {
 		// Do not use `0` as that is reserved to mean that we are running
 		// without runtime assertions.
 		for randomSeed == 0 {
@@ -119,7 +116,7 @@ func runMVCCGC(ctx context.Context, t test.Test, c cluster.Cluster) {
 	// rebalancing is better than increasing wait time further.
 	setClusterSetting("kv.allocator.load_based_lease_rebalancing.enabled", false)
 
-	if err := WaitFor3XReplication(ctx, t, t.L(), conn); err != nil {
+	if err := roachtestutil.WaitFor3XReplication(ctx, t.L(), conn); err != nil {
 		t.Fatalf("failed to up-replicate cluster: %s", err)
 	}
 
@@ -138,8 +135,8 @@ func runMVCCGC(ctx context.Context, t test.Test, c cluster.Cluster) {
 
 		wlCtx, wlCancel := context.WithCancel(ctx)
 		defer wlCancel()
-		wlFailure := make(chan error)
-		go func() {
+		wlFailure := make(chan error, 1)
+		t.Go(func(context.Context, *logger.Logger) error {
 			defer close(wlFailure)
 			cmd = roachtestutil.NewCommand("./cockroach workload run kv").
 				Flag("cycle-length", 20000).
@@ -151,7 +148,8 @@ func runMVCCGC(ctx context.Context, t test.Test, c cluster.Cluster) {
 				String()
 			err := c.RunE(wlCtx, option.WithNodes(c.Node(1)), cmd)
 			wlFailure <- err
-		}()
+			return nil
+		}, task.Name("workload"))
 
 		m := queryTableMetaOrFatal(t, conn, "kv", "kv")
 
@@ -637,7 +635,7 @@ func sendBatchRequest(
 		debugEnv = fmt.Sprintf("COCKROACH_RANDOM_SEED=%d ", randomSeed)
 	}
 	cmd := roachtestutil.NewCommand("./cockroach debug send-kv-batch").
-		Arg(requestFileName).
+		Arg("%s", requestFileName).
 		Flag("certs-dir", install.CockroachNodeCertsDir).
 		Flag("host", fmt.Sprintf("localhost:{pgport:%d}", node)).
 		String()

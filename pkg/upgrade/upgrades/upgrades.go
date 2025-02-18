@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package upgrades contains the implementation of upgrades. It is imported
 // by the server library.
@@ -64,97 +59,39 @@ var upgrades = []upgradebase.Upgrade{
 		bootstrapCluster,
 		upgrade.RestoreActionNotRequired("initialization runs before restore")),
 
-	newFirstUpgrade(clusterversion.V24_1Start.Version()),
+	newFirstUpgrade(clusterversion.V25_1_Start.Version()),
 
 	upgrade.NewTenantUpgrade(
-		"hide unused payload and progress columns from system.jobs table",
-		clusterversion.V24_1_DropPayloadAndProgressFromSystemJobsTable.Version(),
+		"add new jobs tables",
+		clusterversion.V25_1_AddJobsTables.Version(),
 		upgrade.NoPrecondition,
-		hidePayloadProgressFromSystemJobs,
-		upgrade.RestoreActionNotRequired("cluster restore does not restore the system.jobs table"),
-	),
-
-	upgrade.NewTenantUpgrade(
-		"migrate old-style PTS records to the new style",
-		clusterversion.V24_1_MigrateOldStylePTSRecords.Version(),
-		upgrade.NoPrecondition,
-		migrateOldStylePTSRecords,
-		upgrade.RestoreActionNotRequired("restore does not restore the PTS table"),
-	),
-
-	upgrade.NewTenantUpgrade(
-		"stop writing expiration based leases to system.lease table (equivalent to experimental_use_session_based_leasing=drain)",
-		clusterversion.V24_1_SessionBasedLeasingDrain.Version(),
-		upgrade.NoPrecondition,
-		disableWritesForExpiryBasedLeases,
-		upgrade.RestoreActionNotRequired("cluster restore does not restore the system.lease table"),
-	),
-
-	upgrade.NewTenantUpgrade(
-		"only use session based leases  (equivalent to experimental_use_session_based_leasing=session)",
-		clusterversion.V24_1_SessionBasedLeasingOnly.Version(),
-		upgrade.NoPrecondition,
-		adoptUsingOnlySessionBasedLeases,
-		upgrade.RestoreActionNotRequired("cluster restore does not restore the system.lease table"),
-	),
-
-	upgrade.NewTenantUpgrade(
-		"update system.lease descriptor to be session base",
-		clusterversion.V24_1_SessionBasedLeasingUpgradeDescriptor.Version(),
-		upgrade.NoPrecondition,
-		upgradeSystemLeasesDescriptor,
-		upgrade.RestoreActionNotRequired("cluster restore does not restore the system.lease table"),
-	),
-
-	upgrade.NewTenantUpgrade(
-		"set survivability goal on MR system database; fix-up gc.ttl and exclude_data_from_backup",
-		clusterversion.V24_1_SystemDatabaseSurvivability.Version(),
-		upgrade.NoPrecondition,
-		alterSystemDatabaseSurvivalGoal,
-		upgrade.RestoreActionNotRequired("cluster restore does not preserve the multiregion configuration of the system database"),
-	),
-
-	upgrade.NewTenantUpgrade(
-		"add the span_counts table to the system tenant",
-		clusterversion.V24_1_AddSpanCounts.Version(),
-		upgrade.NoPrecondition,
-		addSpanCountTable,
-		upgrade.RestoreActionNotRequired("cluster restore does not restore this table"),
-	),
-
-	newFirstUpgrade(clusterversion.V24_2Start.Version()),
-
-	upgrade.NewTenantUpgrade(
-		"add the redacted column to system.statement_diagnostics_requests table",
-		clusterversion.V24_2_StmtDiagRedacted.Version(),
-		upgrade.NoPrecondition,
-		stmtDiagRedactedMigration,
-		upgrade.RestoreActionNotRequired("cluster restore does not restore this table"),
-	),
-
-	upgrade.NewTenantUpgrade(
-		"create all missing system tables in app tenants",
-		clusterversion.V24_2_TenantSystemTables.Version(),
-		upgrade.NoPrecondition,
-		createTenantSystemTables,
-		upgrade.RestoreActionNotRequired("cluster restore does not restore these tables"),
-	),
-
-	upgrade.NewTenantUpgrade(
-		"add new columns to the system.tenant_usage table to store tenant consumption rates",
-		clusterversion.V24_2_TenantRates.Version(),
-		upgrade.NoPrecondition,
-		tenantRatesMigration,
+		addJobsTables,
 		upgrade.RestoreActionNotRequired("cluster restore does not restore the new field"),
 	),
 
 	upgrade.NewTenantUpgrade(
-		"delete version row in system.tenant_settings",
-		clusterversion.V24_2_DeleteTenantSettingsVersion.Version(),
+		"create prepared_transactions table",
+		clusterversion.V25_1_PreparedTransactionsTable.Version(),
 		upgrade.NoPrecondition,
-		deleteVersionTenantSettings,
-		upgrade.RestoreActionImplemented("bad row skipped when restoring system.tenant_settings"),
+		createPreparedTransactionsTable,
+		upgrade.RestoreActionNotRequired("cluster restore does not restore this table"),
 	),
+	upgrade.NewTenantUpgrade(
+		"add new jobs tables",
+		clusterversion.V25_1_AddJobsColumns.Version(),
+		upgrade.NoPrecondition,
+		addJobsColumns,
+		upgrade.RestoreActionNotRequired("cluster restore does not restore the new field"),
+	),
+	upgrade.NewTenantUpgrade(
+		"backfill new jobs tables",
+		clusterversion.V25_1_JobsBackfill.Version(),
+		upgrade.NoPrecondition,
+		backfillJobsTablesAndColumns,
+		upgrade.RestoreActionNotRequired("cluster restore does not restore jobs tables"),
+	),
+
+	newFirstUpgrade(clusterversion.V25_2_Start.Version()),
 
 	// Note: when starting a new release version, the first upgrade (for
 	// Vxy_zStart) must be a newFirstUpgrade. Keep this comment at the bottom.

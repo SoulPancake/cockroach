@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package eval_test
 
@@ -85,7 +80,7 @@ func TestEval(t *testing.T) {
 		walkExpr(t, func(e tree.Expr) (tree.TypedExpr, error) {
 			// expr.TypeCheck to avoid constant folding.
 			semaCtx := tree.MakeSemaContext(nil /* resolver */)
-			typedExpr, err := e.TypeCheck(ctx, &semaCtx, types.Any)
+			typedExpr, err := e.TypeCheck(ctx, &semaCtx, types.AnyElement)
 			if err != nil {
 				return nil, err
 			}
@@ -364,7 +359,7 @@ func TestEvalError(t *testing.T) {
 			t.Fatalf("%s: %v", d.expr, err)
 		}
 		semaCtx := tree.MakeSemaContext(nil /* resolver */)
-		typedExpr, err := tree.TypeCheck(ctx, expr, &semaCtx, types.Any)
+		typedExpr, err := tree.TypeCheck(ctx, expr, &semaCtx, types.AnyElement)
 		if err == nil {
 			evalCtx := eval.NewTestingEvalContext(cluster.MakeTestingClusterSettings())
 			defer evalCtx.Stop(ctx)

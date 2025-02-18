@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowflow
 
@@ -63,7 +58,7 @@ func setupRouter(
 		memoryMonitors[i] = evalCtx.TestingMon
 		diskMonitors[i] = diskMonitor
 	}
-	r, err := makeRouter(&spec, streams, memoryMonitors, diskMonitors)
+	r, err := makeRouter(&spec, streams, memoryMonitors, memoryMonitors, diskMonitors)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -687,6 +682,7 @@ func TestRouterBlocks(t *testing.T) {
 				&tc.spec,
 				recvs,
 				[]*mon.BytesMonitor{evalCtx.TestingMon, evalCtx.TestingMon},
+				[]*mon.BytesMonitor{evalCtx.TestingMon, evalCtx.TestingMon},
 				[]*mon.BytesMonitor{diskMonitor, diskMonitor},
 			)
 			if err != nil {
@@ -788,7 +784,7 @@ func TestRouterDiskSpill(t *testing.T) {
 	// rowContainer. This is a bytes value that will ensure we fall back to disk
 	// but use memory for at least a couple of rows.
 	monitor := mon.NewMonitor(mon.Options{
-		Name:      "test-monitor",
+		Name:      mon.MakeMonitorName("test-monitor"),
 		Limit:     (numRows - routerRowBufSize) / 2,
 		Increment: 1,
 		Settings:  st,
@@ -826,7 +822,10 @@ func TestRouterDiskSpill(t *testing.T) {
 		// Initialize the RowChannel with the minimal buffer size so as to block
 		// writes to the channel (after the first one).
 		rowChan.InitWithBufSizeAndNumSenders(types.OneIntCol, 1 /* chanBufSize */, 1 /* numSenders */)
-		rb.setupStreams(&spec, []execinfra.RowReceiver{&rowChan}, []*mon.BytesMonitor{monitor}, []*mon.BytesMonitor{diskMonitor})
+		rb.setupStreams(
+			&spec, []execinfra.RowReceiver{&rowChan}, []*mon.BytesMonitor{monitor},
+			[]*mon.BytesMonitor{extraMemMonitor}, []*mon.BytesMonitor{diskMonitor},
+		)
 		rb.init(ctx, &flowCtx, 0 /* processorID */, types.OneIntCol)
 		// output is the sole router output in this test.
 		output := &rb.outputs[0]
@@ -1002,7 +1001,7 @@ func TestRangeRouterInit(t *testing.T) {
 				recvs[i] = &chans[i]
 				spec.Streams[i] = execinfrapb.StreamEndpointSpec{StreamID: execinfrapb.StreamID(i)}
 			}
-			_, err := makeRouter(&spec, recvs, []*mon.BytesMonitor{nil, nil}, []*mon.BytesMonitor{nil, nil})
+			_, err := makeRouter(&spec, recvs, []*mon.BytesMonitor{nil, nil}, []*mon.BytesMonitor{nil, nil}, []*mon.BytesMonitor{nil, nil})
 			if !testutils.IsError(err, tc.err) {
 				t.Fatalf("got %v, expected %v", err, tc.err)
 			}

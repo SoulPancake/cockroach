@@ -1,13 +1,9 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { util } from "@cockroachlabs/cluster-ui";
 import moment from "moment-timezone";
 import { Action } from "redux";
 import { channel, Task, Channel } from "redux-saga";
@@ -21,7 +17,6 @@ import {
   take,
   delay,
 } from "redux-saga/effects";
-import { util } from "@cockroachlabs/cluster-ui";
 
 import { queryBegin, queryComplete, queryError } from "./reducer";
 

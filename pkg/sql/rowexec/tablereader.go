@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowexec
 
@@ -85,7 +80,7 @@ func newTableReader(
 ) (*tableReader, error) {
 	// NB: we hit this with a zero NodeID (but !ok) with multi-tenancy.
 	if nodeID, ok := flowCtx.NodeID.OptionalNodeID(); ok && nodeID == 0 {
-		return nil, errors.Errorf("attempting to create a tableReader with uninitialized NodeID")
+		return nil, errors.AssertionFailedf("attempting to create a tableReader with uninitialized NodeID")
 	}
 
 	if spec.LimitHint > 0 || spec.BatchBytesLimit > 0 {
@@ -155,6 +150,7 @@ func newTableReader(
 			LockWaitPolicy:             spec.LockingWaitPolicy,
 			LockDurability:             spec.LockingDurability,
 			LockTimeout:                flowCtx.EvalCtx.SessionData().LockTimeout,
+			DeadlockTimeout:            flowCtx.EvalCtx.SessionData().DeadlockTimeout,
 			Alloc:                      &tr.alloc,
 			MemMonitor:                 flowCtx.Mon,
 			Spec:                       &spec.FetchSpec,

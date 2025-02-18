@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package config
 
@@ -58,6 +53,10 @@ var (
 
 	// EmailDomain used to form fully qualified usernames for gcloud and slack.
 	EmailDomain string
+
+	// UseSharedUser is used to determine if config.SharedUser should be used for SSH.
+	// By default, this is true, otherwise config.OSUser will be used.
+	UseSharedUser = true
 
 	// DNSRequiredProviders is the list of cloud providers that must be active for
 	// DNS records to be synced when roachprod syncs its state.
@@ -149,6 +148,10 @@ const (
 	// DefaultNumFilesLimit is the default limit on the number of files that can
 	// be opened by the process.
 	DefaultNumFilesLimit = 65 << 13
+
+	// DisableMetamorphicTestingEnvVar is the env var needed to disable metamorphic testing
+	// from being eligible.
+	DisableMetamorphicTestingEnvVar = "COCKROACH_INTERNAL_DISABLE_METAMORPHIC_TESTING=true"
 )
 
 // DefaultEnvVars returns default environment variables used in conjunction with CLI and MakeClusterSettings.
@@ -162,6 +165,13 @@ func DefaultEnvVars() []string {
 		// in testing the upgrade logic that users would actually run when
 		// they upgrade from one release to another.
 		"COCKROACH_TESTING_FORCE_RELEASE_BRANCH=true",
+		// Disable metamorphic testing to reduce flakiness as most metamorphic
+		// constants are not fully tested for compatibility in roachtests.
+		// Passing this in when the cluster is started would suffice in terms
+		// of correctness, but the metamorphic framework logs constants during
+		// init. This leads to a lot of noise in the logs, even if metamorphic
+		// constants aren't used in the test itself.
+		DisableMetamorphicTestingEnvVar,
 	}
 }
 
@@ -186,6 +196,7 @@ var DefaultPubKeyNames = []string{
 	"id_ed25519",
 	"id_ed25519_sk",
 	"id_dsa",
+	"google_compute_engine",
 }
 
 // SSHPublicKeyPath returns the path to the default public key expected by

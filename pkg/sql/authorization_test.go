@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -127,13 +122,20 @@ func TestConcurrentGrants(t *testing.T) {
 		cg.Go(func() error {
 			wg.Wait()
 			// txn2
-			_, err := db.Exec(fmt.Sprintf("BEGIN PRIORITY %s; GRANT developer TO user2; COMMIT", priority))
+			_, err := db.Exec(fmt.Sprintf(`
+BEGIN PRIORITY %s;
+SET LOCAL autocommit_before_ddl = false;
+GRANT developer TO user2;
+COMMIT`,
+				priority))
 			return err
 		})
 
 		txn1, err := db.Begin()
 		require.NoError(t, err)
 		_, err = txn1.Exec(fmt.Sprintf("SET TRANSACTION PRIORITY %s", priority))
+		require.NoError(t, err)
+		_, err = txn1.Exec("SET LOCAL autocommit_before_ddl = false;")
 		require.NoError(t, err)
 		_, err = txn1.Exec("GRANT developer TO user1")
 		require.NoError(t, err)

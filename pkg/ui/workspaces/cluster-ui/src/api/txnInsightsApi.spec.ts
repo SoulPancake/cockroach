@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import moment from "moment-timezone";
 
@@ -18,15 +13,15 @@ import {
 import { MockSqlResponse } from "../util/testing";
 
 import {
-  TxnStmtFingerprintsResponseColumns,
-  FingerprintStmtsResponseColumns,
-} from "./txnInsightsApi";
-import * as sqlApi from "./sqlApi";
-import { SqlExecutionResponse } from "./sqlApi";
-import {
   ContentionResponseColumns,
   getTxnInsightsContentionDetailsApi,
 } from "./contentionApi";
+import * as sqlApi from "./sqlApi";
+import { SqlExecutionResponse } from "./sqlApi";
+import {
+  TxnStmtFingerprintsResponseColumns,
+  FingerprintStmtsResponseColumns,
+} from "./txnInsightsApi";
 
 type TxnContentionDetailsTests = {
   name: string;

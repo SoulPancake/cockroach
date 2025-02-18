@@ -1,37 +1,32 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { util } from "@cockroachlabs/cluster-ui";
 import classNames from "classnames";
-import toLower from "lodash/toLower";
+import concat from "lodash/concat";
+import flow from "lodash/flow";
+import forEach from "lodash/forEach";
+import head from "lodash/head";
+import isEqual from "lodash/isEqual";
+import isNil from "lodash/isNil";
 import isNull from "lodash/isNull";
+import join from "lodash/join";
+import map from "lodash/map";
+import size from "lodash/size";
+import sortBy from "lodash/sortBy";
+import toLower from "lodash/toLower";
 import Long from "long";
 import moment from "moment-timezone";
 import React from "react";
-import { util } from "@cockroachlabs/cluster-ui";
-import isNil from "lodash/isNil";
-import concat from "lodash/concat";
-import join from "lodash/join";
-import isEqual from "lodash/isEqual";
-import map from "lodash/map";
-import head from "lodash/head";
-import flow from "lodash/flow";
-import sortBy from "lodash/sortBy";
-import forEach from "lodash/forEach";
-import size from "lodash/size";
 
-import RangeInfo from "src/views/reports/containers/range/rangeInfo";
-import Print from "src/views/reports/containers/range/print";
-import Lease from "src/views/reports/containers/range/lease";
-import { FixLong } from "src/util/fixLong";
 import { cockroach } from "src/js/protos";
 import * as protos from "src/js/protos";
+import { FixLong } from "src/util/fixLong";
+import Lease from "src/views/reports/containers/range/lease";
+import Print from "src/views/reports/containers/range/print";
+import RangeInfo from "src/views/reports/containers/range/rangeInfo";
 
 import IRangeInfo = cockroach.server.serverpb.IRangeInfo;
 
@@ -74,6 +69,7 @@ const rangeTableDisplayList: RangeTableRow[] = [
   { variable: "leaseState", display: "Lease State", compareToLeader: true },
   { variable: "leaseHolder", display: "Lease Holder", compareToLeader: true },
   { variable: "leaseEpoch", display: "Lease Epoch", compareToLeader: true },
+  { variable: "leaseTerm", display: "Lease Term", compareToLeader: true },
   {
     variable: "isLeaseholder",
     display: "Is Leaseholder",
@@ -90,6 +86,11 @@ const rangeTableDisplayList: RangeTableRow[] = [
     variable: "leaseMinExpiration",
     display: "Lease Minimum Expiration",
     compareToLeader: true,
+  },
+  {
+    variable: "leadSupportUntil",
+    display: "Lead Support Until",
+    compareToLeader: false,
   },
   {
     variable: "leaseAppliedIndex",
@@ -491,6 +492,9 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
     if (problems.raft_log_too_large) {
       results = concat(results, "Raft log too large");
     }
+    if (problems.range_too_large) {
+      results = concat(results, "Range too large");
+    }
     if (awaitingGC) {
       results = concat(results, "Awaiting GC");
     }
@@ -678,7 +682,7 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
     // We want to display ordered by store ID.
     const sortedStoreIDs = flow(
       (infos: IRangeInfo[]) => map(infos, info => info.source_store_id),
-      (storeIds) => sortBy(storeIds, id => id)
+      storeIds => sortBy(storeIds, id => id),
     )(infos);
 
     const dormantStoreIDs: Set<number> = new Set();
@@ -692,7 +696,9 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
       const localReplica = RangeInfo.GetLocalReplica(info);
       const awaitingGC = isNil(localReplica);
       const lease = info.state.state.lease;
-      const epoch = Lease.IsEpoch(lease);
+      const leaseEpoch = Lease.IsEpoch(lease);
+      const leaseLeader = Lease.IsLeader(lease);
+      const leaseExpiration = !leaseEpoch && !leaseLeader;
       const raftLeader =
         !awaitingGC &&
         FixLong(info.raft_state.lead).eq(localReplica.replica_id);
@@ -734,6 +740,10 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
           ? this.createContent("") // `problems` above will report "Awaiting GC" in this case
           : this.createContent(contentReplicaType(localReplica.type)),
         raftState: raftState,
+        leadSupportUntil: this.contentTimestamp(
+          info.raft_state.lead_support_until,
+          now,
+        ),
         quiescent: info.quiescent
           ? rangeTableQuiescent
           : rangeTableEmptyContent,
@@ -745,17 +755,22 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
             ? "range-table__cell--lease-holder"
             : "range-table__cell--lease-follower",
         ),
-        leaseType: this.createContent(epoch ? "epoch" : "expiration"),
-        leaseEpoch: epoch
+        leaseType: this.createContent(
+          leaseEpoch ? "epoch" : leaseLeader ? "leader" : "expiration",
+        ),
+        leaseEpoch: leaseEpoch
           ? this.createContent(lease.epoch)
+          : rangeTableEmptyContent,
+        leaseTerm: leaseLeader
+          ? this.createContent(lease.term)
           : rangeTableEmptyContent,
         isLeaseholder: this.createContent(String(info.is_leaseholder)),
         leaseValid: this.createContent(String(info.lease_valid)),
         leaseStart: this.contentTimestamp(lease.start, now),
-        leaseExpiration: epoch
-          ? rangeTableEmptyContent
-          : this.contentTimestamp(lease.expiration, now),
-        leaseMinExpiration: epoch
+        leaseExpiration: leaseExpiration
+          ? this.contentTimestamp(lease.expiration, now)
+          : rangeTableEmptyContent,
+        leaseMinExpiration: !leaseExpiration
           ? this.contentTimestamp(lease.min_expiration, now)
           : rangeTableEmptyContent,
         leaseAppliedIndex: this.createContent(
@@ -919,10 +934,7 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
           info.state.circuit_breaker_error,
         ),
         locality: this.contentIf(size(info.locality.tiers) > 0, () => ({
-          value: map(
-            info.locality.tiers,
-            tier => `${tier.key}: ${tier.value}`,
-          ),
+          value: map(info.locality.tiers, tier => `${tier.key}: ${tier.value}`),
         })),
         pausedFollowers: this.createContent(
           info.state.paused_replicas?.join(", "),

@@ -1,12 +1,7 @@
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -33,7 +28,6 @@ const (
 func registerMultiStoreRemove(r registry.Registry) {
 	r.Add(registry.TestSpec{
 		Name:              "multi-store-remove",
-		Skip:              "#123989",
 		Owner:             registry.OwnerStorage,
 		Cluster:           r.MakeClusterSpec(multiStoreNodes, spec.SSD(multiStoreStoresPerNode)),
 		CompatibleClouds:  registry.OnlyGCE,
@@ -58,6 +52,11 @@ func runMultiStoreRemove(ctx context.Context, t test.Test, c cluster.Cluster) {
 	t.Status("starting cluster")
 	startOpts := option.DefaultStartOpts()
 	startOpts.RoachprodOpts.StoreCount = multiStoreStoresPerNode
+	// TODO(jackson): Allow WAL failover to be enabled once it's able to
+	// tolerate the removal of a store. Today, the mapping of failover
+	// secondaries is fixed, making WAL failover incompatible with the removal
+	// of a store.
+	startOpts.RoachprodOpts.WALFailover = ""
 	startSettings := install.MakeClusterSettings()
 	// Speed up the replicate queue.
 	startSettings.Env = append(startSettings.Env, "COCKROACH_SCAN_INTERVAL=30s")
@@ -144,7 +143,7 @@ func runMultiStoreRemove(ctx context.Context, t test.Test, c cluster.Cluster) {
 		if err := conn.QueryRowContext(ctx,
 			`SELECT
 			    (SELECT count(1) FROM crdB_internal.ranges) AS ranges
-			  , (SELECT count(range_count) FROM crdb_internal.kv_store_status) AS replicas`,
+			  , (SELECT sum(range_count) FROM crdb_internal.kv_store_status) AS replicas`,
 		).Scan(&ranges, &replicas); err != nil {
 			t.Fatalf("replication status: %s", err)
 		}

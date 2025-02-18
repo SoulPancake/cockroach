@@ -1,32 +1,27 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { TimeScale, toRoundedDateRange, util } from "@cockroachlabs/cluster-ui";
+import * as H from "history";
+import merge from "lodash/merge";
 import Long from "long";
 import moment from "moment-timezone";
 import { RouteComponentProps } from "react-router-dom";
-import * as H from "history";
-import merge from "lodash/merge";
-import { TimeScale, toRoundedDateRange, util } from "@cockroachlabs/cluster-ui";
 
 import "src/protobufInit";
 import * as protos from "src/js/protos";
+import { AdminUIState, createAdminUIStore } from "src/redux/state";
 import {
   appAttr,
   appNamesAttr,
   statementAttr,
   unset,
 } from "src/util/constants";
-import { AdminUIState, createAdminUIStore } from "src/redux/state";
 
-import { selectLastReset } from "./statementsPage";
 import { selectStatementDetails } from "./statementDetails";
+import { selectLastReset } from "./statementsPage";
 
 import ISensitiveInfo = protos.cockroach.sql.ISensitiveInfo;
 

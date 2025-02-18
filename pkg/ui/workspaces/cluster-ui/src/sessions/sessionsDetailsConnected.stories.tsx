@@ -1,23 +1,18 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
 import { storiesOf } from "@storybook/react";
-import { createMemoryHistory } from "history";
-import createSagaMiddleware from "redux-saga";
-import { Provider } from "react-redux";
 import {
   ConnectedRouter,
   connectRouter,
   routerMiddleware,
 } from "connected-react-router";
+import { createMemoryHistory } from "history";
+import React from "react";
+import { Provider } from "react-redux";
+import { Route } from "react-router-dom";
 import {
   applyMiddleware,
   combineReducers,
@@ -26,7 +21,7 @@ import {
   Store,
   StoreEnhancer,
 } from "redux";
-import { Route } from "react-router-dom";
+import createSagaMiddleware from "redux-saga";
 
 import { AppState, sagas, rootReducer } from "../store";
 

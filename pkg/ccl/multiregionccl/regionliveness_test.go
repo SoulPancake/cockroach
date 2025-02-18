@@ -1,10 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package multiregionccl_test
 
@@ -65,13 +62,13 @@ const (
 func TestRegionLivenessProber(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	// Force extra logging to diagnose flakes.
+	require.NoError(t, log.SetVModule("prober=2"))
 	// This test forces the SQL liveness TTL be a small number,
 	// which makes the heartbeats even more critical. Under stress and
 	// race environments this test becomes even more sensitive, if
 	// we can't send heartbeats within 20 seconds.
-	skip.UnderStress(t)
-	skip.UnderRace(t)
-	skip.UnderDeadlock(t)
+	skip.UnderDuress(t)
 
 	ctx := context.Background()
 
@@ -128,11 +125,6 @@ func TestRegionLivenessProber(t *testing.T) {
 		_, err = tenantSQL[0].Exec(fmt.Sprintf("ALTER DATABASE system ADD REGION '%s'", expectedRegions[i]))
 		require.NoError(t, err)
 	}
-	// Override the table timeout probe for testing.
-	for _, ts := range tenants {
-		regionliveness.RegionLivenessProbeTimeout.Override(ctx, &ts.ClusterSettings().SV, testingRegionLivenessProbeTimeout)
-	}
-
 	var cachedRegionProvider *regions.CachedDatabaseRegions
 	cachedRegionProvider, err = regions.NewCachedDatabaseRegions(ctx, tenants[0].DB(), tenants[0].LeaseManager().(*lease.Manager))
 	require.NoError(t, err)
@@ -284,7 +276,9 @@ func TestRegionLivenessProberForLeases(t *testing.T) {
 				keyToBlockMu.Lock()
 				keyPrefix := keyToBlock
 				keyToBlockMu.Unlock()
-				if keyPrefix == nil || !deleteRequest.Key[:len(keyPrefix)].Equal(keyPrefix) {
+				isPrefixToDelReq := len(deleteRequest.Key) >= len(keyPrefix) &&
+					!deleteRequest.Key[:len(keyPrefix)].Equal(keyPrefix)
+				if keyPrefix == nil || isPrefixToDelReq {
 					return nil
 				}
 				recoveryStart <- struct{}{}

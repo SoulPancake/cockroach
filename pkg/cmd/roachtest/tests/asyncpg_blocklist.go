@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -57,14 +52,11 @@ var asyncpgBlocklist = blocklist{
 	`test_listeners.TestListeners.test_listen_notletters`:                                                 "LISTEN - https://github.com/cockroachdb/cockroach/issues/41522",
 	`test_listeners.TestLogListeners.test_log_listener_01`:                                                "unsupported feature - https://github.com/cockroachdb/cockroach/issues/17511",
 	`test_listeners.TestLogListeners.test_log_listener_02`:                                                "unsupported feature - https://github.com/cockroachdb/cockroach/issues/17511",
-	`test_listeners.TestLogListeners.test_log_listener_03`:                                                "unsupported feature - https://github.com/cockroachdb/cockroach/issues/17511",
 	`test_pool.TestPool.test_pool_remote_close`:                                                           "unsupported pg_terminate_backend() function",
-	`test_prepare.TestPrepare.test_prepare_09_raise_error`:                                                "unsupported feature - https://github.com/cockroachdb/cockroach/issues/17511",
 	`test_prepare.TestPrepare.test_prepare_14_explain`:                                                    "unknown",
 	`test_prepare.TestPrepare.test_prepare_16_command_result`:                                             "unknown",
 	`test_prepare.TestPrepare.test_prepare_19_concurrent_calls`:                                           "unknown",
 	`test_prepare.TestPrepare.test_prepare_28_max_args`:                                                   "unknown",
-	`test_prepare.TestPrepare.test_prepare_31_pgbouncer_note`:                                             "unsupported feature - https://github.com/cockroachdb/cockroach/issues/17511",
 	`test_prepare.TestPrepare.test_prepare_statement_invalid`:                                             "experimental feature - https://github.com/cockroachdb/cockroach/issues/49329",
 	`test_timeout.TestTimeout.test_timeout_06`:                                                            "unknown",
 	`test_utils.TestUtils.test_mogrify_simple`:                                                            "multi-dim arrays - https://github.com/cockroachdb/cockroach/issues/32552",

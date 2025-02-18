@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -103,7 +98,7 @@ func TestStoreCheckpointSpans(t *testing.T) {
 	addReplica := func(rangeID roachpb.RangeID, start, end string) {
 		desc := makeDesc(rangeID, start, end)
 		r := &Replica{RangeID: rangeID, startKey: desc.StartKey}
-		r.mu.state.Desc = &desc
+		r.shMu.state.Desc = &desc
 		r.isInitialized.Store(desc.IsInitialized())
 		require.NoError(t, s.addToReplicasByRangeIDLocked(r))
 		if r.IsInitialized() {
@@ -333,7 +328,7 @@ func TestReplicaChecksumSHA512(t *testing.T) {
 	for i, l := range locks {
 		txnID := uuid.FromUint128(uint128.FromInts(0, uint64(l.txnID)))
 		txn := &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{ID: txnID}}
-		require.NoError(t, storage.MVCCAcquireLock(ctx, eng, txn, l.str, roachpb.Key(l.key), nil, 0, 0))
+		require.NoError(t, storage.MVCCAcquireLock(ctx, eng, &txn.TxnMeta, txn.IgnoredSeqNums, l.str, roachpb.Key(l.key), nil, 0, 0))
 
 		rd, err = CalcReplicaDigest(ctx, desc, eng, kvpb.ChecksumMode_CHECK_FULL, unlim, nil /* settings */)
 		require.NoError(t, err)

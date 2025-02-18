@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rditer
 
@@ -404,7 +399,7 @@ func IterateReplicaKeySpans(
 	reader storage.Reader,
 	replicatedOnly bool,
 	replicatedSpansFilter ReplicatedSpansFilter,
-	visitor func(storage.EngineIterator, roachpb.Span, storage.IterKeyType) error,
+	visitor func(storage.EngineIterator, roachpb.Span) error,
 ) error {
 	if !reader.ConsistentIterators() {
 		panic("reader must provide consistent iterators")
@@ -426,28 +421,25 @@ func IterateReplicaKeySpans(
 			UnreplicatedByRangeID: true,
 		})
 	}
-	keyTypes := []storage.IterKeyType{storage.IterKeyTypePointsOnly, storage.IterKeyTypeRangesOnly}
 	for _, span := range spans {
-		for _, keyType := range keyTypes {
-			err := func() error {
-				iter, err := reader.NewEngineIterator(ctx, storage.IterOptions{
-					KeyTypes:   keyType,
-					LowerBound: span.Key,
-					UpperBound: span.EndKey,
-				})
-				if err != nil {
-					return err
-				}
-				defer iter.Close()
-				ok, err := iter.SeekEngineKeyGE(storage.EngineKey{Key: span.Key})
-				if err == nil && ok {
-					err = visitor(iter, span, keyType)
-				}
-				return err
-			}()
+		err := func() error {
+			iter, err := reader.NewEngineIterator(ctx, storage.IterOptions{
+				KeyTypes:   storage.IterKeyTypePointsAndRanges,
+				LowerBound: span.Key,
+				UpperBound: span.EndKey,
+			})
 			if err != nil {
-				return iterutil.Map(err)
+				return err
 			}
+			defer iter.Close()
+			ok, err := iter.SeekEngineKeyGE(storage.EngineKey{Key: span.Key})
+			if err == nil && ok {
+				err = visitor(iter, span)
+			}
+			return err
+		}()
+		if err != nil {
+			return iterutil.Map(err)
 		}
 	}
 	return nil

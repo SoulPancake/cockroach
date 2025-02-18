@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package exec contains execution-related utilities. (See README.md.)
 package exec
@@ -81,16 +76,19 @@ const (
 	PlanFlagCheckContainsLocking
 )
 
-func (pf PlanFlags) IsSet(flag PlanFlags) bool {
-	return (pf & flag) != 0
+// IsSet returns true if the receiver has all of the given flags set.
+func (pf PlanFlags) IsSet(flags PlanFlags) bool {
+	return (pf & flags) == flags
 }
 
-func (pf *PlanFlags) Set(flag PlanFlags) {
-	*pf |= flag
+// Set sets all of the given flags in the receiver.
+func (pf *PlanFlags) Set(flags PlanFlags) {
+	*pf |= flags
 }
 
-func (pf *PlanFlags) Unset(flag PlanFlags) {
-	*pf &^= flag
+// Unset unsets all of the given flags in the receiver.
+func (pf *PlanFlags) Unset(flags PlanFlags) {
+	*pf &^= flags
 }
 
 // ScanParams contains all the parameters for a table scan.
@@ -177,6 +175,10 @@ const (
 	// SubqueryAllRows - the subquery is an argument to ARRAY. The result is a
 	// tuple of rows.
 	SubqueryAllRows
+	// SubqueryDiscardAllRows - the subquery is executed for its side effects
+	// (e.g. it is adding to a bufferNode). The result is empty, and will never be
+	// used.
+	SubqueryDiscardAllRows
 )
 
 // TableColumnOrdinal is the 0-based ordinal index of a cat.Table column.
@@ -273,19 +275,25 @@ type RecursiveCTEIterationFn func(ef Factory, bufferRef Node) (Plan, error)
 // rightColumns passed to ConstructApplyJoin (in order).
 type ApplyJoinPlanRightSideFn func(ctx context.Context, ef Factory, leftRow tree.Datums) (Plan, error)
 
-// Cascade describes a cascading query. The query uses a node created by
-// ConstructBuffer as an input; it should only be triggered if this buffer is
-// not empty.
-type Cascade struct {
+// PostQuery describes a cascading query or an AFTER trigger action. The query
+// uses a node created by ConstructBuffer as an input; it should only be
+// triggered if this buffer is not empty.
+type PostQuery struct {
+	// FKConstraint is used for logging and EXPLAIN purposes. It is nil if this
+	// PostQuery describes a set of AFTER triggers.
 	FKConstraint cat.ForeignKeyConstraint
+
+	// Triggers is used for logging and EXPLAIN purposes. It is nil if this
+	// PostQuery describes a foreign-key cascade action.
+	Triggers []cat.Trigger
 
 	// Buffer is the Node returned by ConstructBuffer which stores the input to
 	// the mutation. It is nil if the cascade does not require a buffer.
 	Buffer Node
 
-	// PlanFn builds the cascade query and creates the plan for it.
-	// Note that the generated Plan can in turn contain more cascades (as well as
-	// checks, which should run after all cascades are executed).
+	// PlanFn builds the cascade/trigger query and creates the plan for it.
+	// Note that the generated Plan can in turn contain more cascades, triggers,
+	// and checks.
 	//
 	// The bufferRef is a reference that can be used with ConstructWithBuffer to
 	// read the mutation input. It is conceptually the same as the Buffer field;
@@ -293,8 +301,8 @@ type Cascade struct {
 	// implementation of the node (e.g. to facilitate early cleanup of the
 	// original plan).
 	//
-	// If the cascade does not require input buffering (Buffer is nil), then
-	// bufferRef should be nil and numBufferedRows should be 0.
+	// If the cascade/trigger does not require input buffering (Buffer is nil),
+	// then bufferRef should be nil and numBufferedRows should be 0.
 	//
 	// This method does not mutate any captured state; it is ok to call PlanFn
 	// methods concurrently (provided that they don't use a single non-thread-safe
@@ -309,10 +317,10 @@ type Cascade struct {
 		allowAutoCommit bool,
 	) (Plan, error)
 
-	// GetExplainPlan returns the explain plan for the cascade query. It will
-	// always return a cached plan if there is one, and the boolean argument
-	// controls whether this function can create a new plan (which will be
-	// cached going forward). If createPlanIfMissing is false and there is no
+	// GetExplainPlan returns the explain plan for the cascade or trigger query.
+	// It will always return a cached plan if there is one, and the boolean
+	// argument controls whether this function can create a new plan (which will
+	// be cached going forward). If createPlanIfMissing is false and there is no
 	// cached plan, then nil, nil is returned.
 	GetExplainPlan func(_ context.Context, createPlanIfMissing bool) (Plan, error)
 }
@@ -375,6 +383,9 @@ const (
 
 	// ExecutionStatsID is an annotation with a *ExecutionStats value.
 	ExecutionStatsID
+
+	// PolicyInfoID is an annotation with a *RLSPoliciesApplied value.
+	PolicyInfoID
 )
 
 // EstimatedStats contains estimated statistics about a given operator.
@@ -512,6 +523,19 @@ type ExecutionStats struct {
 	// UsedFollowerRead indicates whether at least some reads were served by the
 	// follower replicas.
 	UsedFollowerRead bool
+}
+
+// RLSPoliciesApplied contains information about the row-level security policies
+// that were applied during the query.
+type RLSPoliciesApplied struct {
+	// PoliciesSkippedForRole is true if the user is a member of a role that is
+	// exempt from all policies (e.g., admin).
+	PoliciesSkippedForRole bool
+	// Policies is the list of policy IDs applied to the scan of a single table.
+	// This applies to the table that this annotation was attached to. If this is
+	// empty, it either means policies were skipped due to the role, or none were
+	// applied.
+	Policies opt.PolicyIDSet
 }
 
 // BuildPlanForExplainFn builds an execution plan against the given

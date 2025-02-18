@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -20,6 +15,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/mixedversion"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 )
@@ -28,12 +24,14 @@ func registerSchemaChangeMixedVersions(r registry.Registry) {
 	r.Add(registry.TestSpec{
 		// schemachange/mixed-versions tests random schema changes (via the schemachange workload)
 		// in a mixed version state, validating that the cluster is still healthy (via debug doctor examine).
-		Name:             "schemachange/mixed-versions",
-		Owner:            registry.OwnerSQLFoundations,
-		Cluster:          r.MakeClusterSpec(4),
-		CompatibleClouds: registry.AllExceptAWS,
-		Suites:           registry.Suites(registry.Nightly),
-		NativeLibs:       registry.LibGEOS,
+		Name:                       "schemachange/mixed-versions",
+		Owner:                      registry.OwnerSQLFoundations,
+		Cluster:                    r.MakeClusterSpec(4, spec.WorkloadNode()),
+		CompatibleClouds:           registry.AllExceptAWS,
+		Suites:                     registry.Suites(registry.MixedVersion, registry.Nightly),
+		Randomized:                 true,
+		NativeLibs:                 registry.LibGEOS,
+		RequiresDeprecatedWorkload: true, // uses schemachange
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			maxOps := 1000
 			concurrency := 5
@@ -52,15 +50,15 @@ func runSchemaChangeMixedVersions(
 	numFeatureRuns := 0
 	mvt := mixedversion.NewTest(
 		ctx, t, t.L(), c, c.All(),
+		// Disable version skipping and limit the test to only one upgrade as the workload is only
+		// compatible with the branch it was built from and the major version before that.
 		mixedversion.NumUpgrades(1),
+		mixedversion.DisableSkipVersionUpgrades,
 		// Always use latest predecessors, since mixed-version bug fixes only
 		// appear in the latest patch of the predecessor version.
 		// See: https://github.com/cockroachdb/cockroach/issues/121411.
 		mixedversion.AlwaysUseLatestPredecessors,
 	)
-
-	workloadNode := c.Node(c.Spec().NodeCount)
-	c.Put(ctx, t.DeprecatedWorkload(), "./workload", workloadNode)
 
 	// Run the schemachange workload on a random node, along with validating the schema changes for the cluster on a random node.
 	schemaChangeAndValidationStep := func(
@@ -75,7 +73,7 @@ func runSchemaChangeMixedVersions(
 			Flag("concurrency", concurrency).
 			Arg("{pgurl%s}", c.All()).
 			String()
-		if err := c.RunE(ctx, option.WithNodes(workloadNode), runCmd); err != nil {
+		if err := c.RunE(ctx, option.WithNodes(c.WorkloadNode()), runCmd); err != nil {
 			return err
 		}
 
@@ -85,12 +83,12 @@ func runSchemaChangeMixedVersions(
 		runCmd = roachtestutil.NewCommand("%s debug doctor examine cluster", test.DefaultCockroachPath).
 			Flag("url", doctorURL).
 			String()
-		return c.RunE(ctx, option.WithNodes(workloadNode), runCmd)
+		return c.RunE(ctx, option.WithNodes(c.WorkloadNode()), runCmd)
 	}
 
 	// Stage our workload node with the schemachange workload.
 	mvt.OnStartup("set up schemachange workload", func(ctx context.Context, l *logger.Logger, r *rand.Rand, helper *mixedversion.Helper) error {
-		return c.RunE(ctx, option.WithNodes(workloadNode), fmt.Sprintf("./workload init schemachange {pgurl%s}", workloadNode))
+		return c.RunE(ctx, option.WithNodes(c.WorkloadNode()), fmt.Sprintf("./workload init schemachange {pgurl%s}", c.WorkloadNode()))
 	})
 
 	mvt.InMixedVersion("run schemachange workload and validation in mixed version", schemaChangeAndValidationStep)

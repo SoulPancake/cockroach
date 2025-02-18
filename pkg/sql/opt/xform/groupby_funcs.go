@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package xform
 
@@ -307,7 +302,7 @@ func (c *CustomFuncs) GenerateStreamingGroupByLimitOrderingHint(
 			Limit:    limitExpr.Limit,
 			Ordering: limitExpr.Ordering,
 		}
-	grp.Memo().AddLimitToGroup(newLimitExpr, grp)
+	c.e.mem.AddLimitToGroup(newLimitExpr, grp)
 }
 
 // GenerateStreamingGroupBy generates variants of a GroupBy, DistinctOn,
@@ -322,7 +317,7 @@ func (c *CustomFuncs) GenerateStreamingGroupBy(
 	aggs memo.AggregationsExpr,
 	private *memo.GroupingPrivate,
 ) {
-	orders := ordering.DeriveInterestingOrderings(input)
+	orders := ordering.DeriveInterestingOrderings(c.e.mem, input)
 	intraOrd := private.Ordering
 	for _, ord := range orders {
 		newOrd, fullPrefix, found := getPrefixFromOrdering(ord.ToOrdering(), intraOrd, input,
@@ -545,12 +540,13 @@ func (c *CustomFuncs) GenerateLimitedGroupByScans(
 	if !requiredOrdering.Any() && !requiredOrdering.Group(0).Intersects(gp.GroupingCols) && !requiredOrdering.Optional.Intersects(gp.GroupingCols) {
 		return
 	}
-	// Iterate over all non-inverted and non-partial secondary indexes.
+	// Iterate over all non-inverted and non-vector secondary indexes.
 	var pkCols opt.ColSet
 	var iter scanIndexIter
 	var sb indexScanBuilder
 	sb.Init(c, sp.Table)
-	iter.Init(c.e.evalCtx, c.e, c.e.mem, &c.im, sp, nil /* filters */, rejectPrimaryIndex|rejectInvertedIndexes)
+	reject := rejectPrimaryIndex | rejectInvertedIndexes | rejectVectorIndexes
+	iter.Init(c.e.evalCtx, c.e, c.e.mem, &c.im, sp, nil /* filters */, reject)
 	iter.ForEach(func(index cat.Index, filters memo.FiltersExpr, indexCols opt.ColSet, isCovering bool, constProj memo.ProjectionsExpr) {
 		// The iterator only produces pseudo-partial indexes (the predicate is
 		// true) because no filters are passed to iter.Init to imply a partial
@@ -608,6 +604,8 @@ func (c *CustomFuncs) GenerateLimitedGroupByScans(
 		// Reconstruct the GroupBy and Limit so the new expression in the memo is
 		// equivalent.
 		input = c.e.f.ConstructGroupBy(input, aggs, gp)
-		grp.Memo().AddLimitToGroup(&memo.LimitExpr{Limit: limit, Ordering: requiredOrdering, Input: input}, grp)
+		c.e.mem.AddLimitToGroup(
+			&memo.LimitExpr{Limit: limit, Ordering: requiredOrdering, Input: input}, grp,
+		)
 	})
 }

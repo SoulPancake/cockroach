@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kv
 
@@ -131,6 +126,16 @@ type TxnSender interface {
 	// SetOmitInRangefeeds sets the OmitInRangefeeds attribute to true in the
 	// Transaction proto.
 	SetOmitInRangefeeds()
+
+	// SetBufferedWritesEnabled toggles whether the writes are buffered on the
+	// gateway node until the commit time. Only allowed on the RootTxn. Buffered
+	// writes cannot be enabled on a txn that performed any requests. When
+	// disabling buffered writes, if there are any writes in the buffer, they
+	// are flushed.
+	SetBufferedWritesEnabled(bool)
+
+	// BufferedWritesEnabled returns whether the buffered writes are enabled.
+	BufferedWritesEnabled() bool
 
 	// String returns a string representation of the txn.
 	String() string
@@ -293,6 +298,10 @@ type TxnSender interface {
 	// TODO(knz): Remove this, see
 	// https://github.com/cockroachdb/cockroach/issues/15012
 	Active() bool
+
+	// Key returns the current "anchor" key of the transaction, or nil if no such
+	// key has been set because the transaction has not yet acquired any locks.
+	Key() roachpb.Key
 
 	// Epoch returns the txn's epoch.
 	Epoch() enginepb.TxnEpoch

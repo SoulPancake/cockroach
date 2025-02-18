@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -336,62 +331,11 @@ var zipInternalTablesPerCluster = DebugZipTableRegistry{
 			"resolved_age",
 		},
 	},
-	`"".crdb_internal.cluster_replication_node_streams`: {
+	`"".crdb_internal.logical_replication_spans`: {
 		nonSensitiveCols: NonSensitiveColumns{
-			"stream_id",
-			"consumer",
-			"spans",
-			"initial_ts",
-			"prev_ts",
-			"batches",
-			"checkpoints",
-			"megabytes",
-			"produce_wait",
-			"emit_wait",
-			"last_produce_wait",
-			"last_emit_wait",
-			"last_checkpoint",
-			"rf_checkpoints",
-			"rf_advances",
-			"rf_last_advance",
-			"rf_resolved",
-			"rf_resolved_age",
-		},
-	},
-	`"".crdb_internal.cluster_replication_node_stream_spans`: {
-		nonSensitiveCols: NonSensitiveColumns{
-			"stream_id",
-			"consumer",
-		},
-	},
-	`"".crdb_internal.cluster_replication_node_stream_checkpoints`: {
-		nonSensitiveCols: NonSensitiveColumns{
-			"stream_id",
-			"consumer",
+			"job_id",
 			"resolved",
 			"resolved_age",
-		},
-	},
-	`"".crdb_internal.logical_replication_node_processors`: {
-		nonSensitiveCols: NonSensitiveColumns{
-			"stream_id",
-			"consumer",
-			"recv_wait",
-			"last_recv_wait",
-			"flush_count",
-			"flush_time",
-			"flush_kvs",
-			"flush_bytes",
-			"flush_batches",
-			"last_time",
-			"last_kvs",
-			"last_bytes",
-			"last_slowest",
-			"cur_time",
-			"cur_kvs_done",
-			"cur_kvs_todo",
-			"cur_batches",
-			"cur_slowest",
 		},
 	},
 	"crdb_internal.default_privileges": {
@@ -444,9 +388,6 @@ var zipInternalTablesPerCluster = DebugZipTableRegistry{
 			"high_water_timestamp",
 			"coordinator_id",
 			"trace_id",
-			"last_run",
-			"next_run",
-			"num_runs",
 		},
 	},
 	"crdb_internal.system_jobs": {
@@ -609,26 +550,37 @@ var zipInternalTablesPerCluster = DebugZipTableRegistry{
 	},
 	"crdb_internal.transaction_contention_events": {
 		customQueryUnredacted: `
+with fingerprint_queries as (
+	SELECT distinct fingerprint_id, metadata->> 'query' as query  
+	FROM system.statement_statistics
+),
+transaction_fingerprints as (
+		SELECT distinct fingerprint_id, transaction_fingerprint_id
+		FROM system.statement_statistics
+), 
+transaction_queries as (
+		SELECT tf.transaction_fingerprint_id, array_agg(fq.query) as queries
+		FROM fingerprint_queries fq
+		JOIN transaction_fingerprints tf on tf.fingerprint_id = fq.fingerprint_id
+		GROUP BY tf.transaction_fingerprint_id
+)
 SELECT collection_ts,
        contention_duration,
        waiting_txn_id,
        waiting_txn_fingerprint_id,
        waiting_stmt_fingerprint_id,
-       s.metadata ->> 'query'                      AS waiting_stmt_query,
+       fq.query                      AS waiting_stmt_query,
        blocking_txn_id,
        blocking_txn_fingerprint_id,
-       array_agg(distinct ss.metadata ->> 'query') AS blocking_txn_queries_unordered,
+       tq.queries AS blocking_txn_queries_unordered,
        contending_pretty_key,
        index_name,
        table_name,
        database_name
 FROM crdb_internal.transaction_contention_events
-         LEFT JOIN system.statement_statistics AS s ON waiting_stmt_fingerprint_id = s.fingerprint_id
-         LEFT JOIN system.statement_statistics AS ss ON ss.transaction_fingerprint_id = blocking_txn_fingerprint_id
-WHERE ss.transaction_fingerprint_id != '\x0000000000000000' AND s.fingerprint_id != '\x0000000000000000'
-GROUP BY collection_ts, contention_duration, waiting_txn_id, waiting_txn_fingerprint_id, blocking_txn_id,
-         blocking_txn_fingerprint_id, waiting_stmt_fingerprint_id, contending_pretty_key, s.metadata ->> 'query',
-         index_name, table_name, database_name
+LEFT JOIN fingerprint_queries fq ON fq.fingerprint_id = waiting_stmt_fingerprint_id
+LEFT JOIN transaction_queries tq ON tq.transaction_fingerprint_id = blocking_txn_fingerprint_id
+WHERE fq.fingerprint_id != '\x0000000000000000' AND tq.transaction_fingerprint_id != '\x0000000000000000'
 `,
 		customQueryUnredactedFallback: `
 SELECT collection_ts,
@@ -987,9 +939,6 @@ var zipInternalTablesPerNode = DebugZipTableRegistry{
 			"index_recommendations",
 			"latency_seconds_min",
 			"latency_seconds_max",
-			"latency_seconds_p50",
-			"latency_seconds_p90",
-			"latency_seconds_p99",
 		},
 	},
 	"crdb_internal.node_transaction_statistics": {
@@ -1107,6 +1056,67 @@ var zipInternalTablesPerNode = DebugZipTableRegistry{
 			"capability_value",
 		},
 	},
+	"crdb_internal.cluster_replication_node_streams": {
+		nonSensitiveCols: NonSensitiveColumns{
+			"stream_id",
+			"consumer",
+			"spans",
+			"state",
+			"read",
+			"emit",
+			"last_read_ms",
+			"last_emit_ms",
+			"seq",
+			"chkpts",
+			"last_chkpt",
+			"batches",
+			"megabytes",
+			"last_kb",
+			"rf_chk",
+			"rf_adv",
+			"rf_last_adv",
+			"resolved_age",
+		},
+	},
+	"crdb_internal.cluster_replication_node_stream_spans": {
+		nonSensitiveCols: NonSensitiveColumns{
+			"stream_id",
+			"consumer",
+		},
+	},
+	"crdb_internal.cluster_replication_node_stream_checkpoints": {
+		nonSensitiveCols: NonSensitiveColumns{
+			"stream_id",
+			"consumer",
+			"resolved",
+			"resolved_age",
+		},
+	},
+	"crdb_internal.logical_replication_node_processors": {
+		nonSensitiveCols: NonSensitiveColumns{
+			"stream_id",
+			"consumer",
+			"state",
+			"recv_time",
+			"last_recv_time",
+			"ingest_time",
+			"flush_time",
+			"flush_count",
+			"flush_kvs",
+			"flush_bytes",
+			"flush_batches",
+			"last_flush_time",
+			"chunks_running",
+			"chunks_done",
+			"last_kvs_done",
+			"last_kvs_todo",
+			"last_batches",
+			"last_slowest",
+			"checkpoints",
+			"retry_size",
+			"resolved_age",
+		},
+	},
 }
 
 // NB: The following system tables explicitly forbidden:
@@ -1134,14 +1144,13 @@ var zipSystemTables = DebugZipTableRegistry{
 		},
 	},
 	"system.descriptor": {
-		// For readability, we unmarsal the descriptor into JSON format.
 		customQueryUnredacted: `SELECT
 				id,
-        crdb_internal.pb_to_json('cockroach.sql.sqlbase.Descriptor', descriptor, false) AS descriptor
+				descriptor
 			FROM system.descriptor`,
 		customQueryRedacted: `SELECT
 				id,
-        crdb_internal.pb_to_json('cockroach.sql.sqlbase.Descriptor', crdb_internal.redact_descriptor(descriptor), false) AS descriptor
+				crdb_internal.redact_descriptor(descriptor) AS descriptor
 			FROM system.descriptor`,
 	},
 	"system.eventlog": {
@@ -1189,6 +1198,18 @@ var zipSystemTables = DebugZipTableRegistry{
 			written,
 			'redacted' AS value
 			FROM system.job_info`,
+	},
+	"system.job_progress": {
+		nonSensitiveCols: NonSensitiveColumns{"job_id", "written", "fraction", "resolved"},
+	},
+	"system.job_progress_history": {
+		nonSensitiveCols: NonSensitiveColumns{"job_id", "written", "fraction", "resolved"},
+	},
+	"system.job_status": {
+		nonSensitiveCols: NonSensitiveColumns{"job_id", "written", "status"},
+	},
+	"system.job_message": {
+		nonSensitiveCols: NonSensitiveColumns{"job_id", "written", "kind", "message"},
 	},
 	"system.lease": {
 		nonSensitiveCols: NonSensitiveColumns{
@@ -1352,26 +1373,17 @@ var zipSystemTables = DebugZipTableRegistry{
     	)`,
 	},
 	"system.span_configurations": {
-		// For readability, we decode the config into JSON format and pretty print the start and end keys.
 		nonSensitiveCols: NonSensitiveColumns{
-			"crdb_internal.pb_to_json('cockroach.roachpb.SpanConfig', config) as config",
+			"config",
 			// Boundary keys for span configs, which are derived from zone configs, are typically on
 			// metadata object boundaries (database, table, or index), and not arbitrary range boundaries
 			// and therefore do not contain sensitive information. Therefore they can remain unredacted.
-			"crdb_internal.pretty_key(start_key, 0) as start_key",
+			"start_key",
 			// Boundary keys for span configs, which are derived from zone configs, are typically on
 			// metadata object boundaries (database, table, or index), and not arbitrary range boundaries
 			// and therefore do not contain sensitive information. Therefore they can remain unredacted.
-			"crdb_internal.pretty_key(end_key, 0) as end_key",
+			"end_key",
 		},
-		// Since we are decoding the columns while selecting them, we also need to
-		// provide a custom unredacted query to make sure it doesn't default to
-		// "TABLE system.span_configurations" when `--redact` flag is not set.
-		customQueryUnredacted: `SELECT
-    crdb_internal.pb_to_json('cockroach.roachpb.SpanConfig', config) as config,
-    crdb_internal.pretty_key(start_key, 0) as start_key,
-    crdb_internal.pretty_key(end_key, 0) as end_key
-		FROM system.span_configurations`,
 	},
 	"system.sql_instances": {
 		// Some fields are marked as `<redacted>` because we want to redact hostname, ip address and other sensitive fields

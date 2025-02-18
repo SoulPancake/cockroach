@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval
 
@@ -25,7 +20,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/storage"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
@@ -174,10 +168,7 @@ func evalExport(
 	}
 
 	// Only use resume timestamp if splitting mid key is enabled.
-	resumeKeyTS := hlc.Timestamp{}
-	if args.SplitMidKey {
-		resumeKeyTS = args.ResumeKeyTS
-	}
+	resumeKeyTS := args.ResumeKeyTS
 
 	maybeAnnotateExceedMaxSizeError := func(err error) error {
 		if errors.HasType(err, (*storage.ExceedMaxSizeError)(nil)) {

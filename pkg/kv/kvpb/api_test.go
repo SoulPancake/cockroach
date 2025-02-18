@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvpb
 
@@ -311,7 +306,7 @@ func TestContentionEvent_SafeFormat(t *testing.T) {
 		Key:     roachpb.Key("foo"),
 		TxnMeta: enginepb.TxnMeta{ID: uuid.FromStringOrNil("51b5ef6a-f18f-4e85-bc3f-c44e33f2bb27"), CoordinatorNodeID: 6},
 	}
-	const exp = redact.RedactableString(`conflicted with ‹51b5ef6a-f18f-4e85-bc3f-c44e33f2bb27› on ‹"foo"› for 0.000s`)
+	const exp = redact.RedactableString(`conflicted with 51b5ef6a-f18f-4e85-bc3f-c44e33f2bb27 on ‹"foo"› for 0.000s`)
 	require.Equal(t, exp, redact.Sprint(ce))
 }
 
@@ -436,4 +431,14 @@ func TestRequestHeaderRoundTrip(t *testing.T) {
 	require.NoError(t, protoutil.Unmarshal(sl, &rh))
 
 	require.Equal(t, exp, rh.KVNemesisSeq.Get())
+}
+
+func TestBatchRequestEmptySize(t *testing.T) {
+	ba := &BatchRequest{}
+	require.Equal(t, 22, ba.Size())
+}
+
+func TestBatchResponseEmptySize(t *testing.T) {
+	br := &BatchResponse{}
+	require.Equal(t, 6, br.Size())
 }

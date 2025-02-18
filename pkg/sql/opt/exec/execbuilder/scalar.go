@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package execbuilder
 
@@ -57,7 +52,7 @@ func init() {
 		opt.VariableOp:       (*Builder).buildVariable,
 		opt.ConstOp:          (*Builder).buildTypedExpr,
 		opt.NullOp:           (*Builder).buildNull,
-		opt.PlaceholderOp:    (*Builder).buildTypedExpr,
+		opt.PlaceholderOp:    (*Builder).buildPlaceholder,
 		opt.TupleOp:          (*Builder).buildTuple,
 		opt.FunctionOp:       (*Builder).buildFunction,
 		opt.CaseOp:           (*Builder).buildCase,
@@ -129,6 +124,15 @@ func (b *Builder) buildTypedExpr(
 	ctx *buildScalarCtx, scalar opt.ScalarExpr,
 ) (tree.TypedExpr, error) {
 	return scalar.Private().(tree.TypedExpr), nil
+}
+
+func (b *Builder) buildPlaceholder(
+	ctx *buildScalarCtx, scalar opt.ScalarExpr,
+) (tree.TypedExpr, error) {
+	if b.evalCtx != nil && b.evalCtx.Placeholders != nil {
+		return eval.Expr(b.ctx, b.evalCtx, scalar.Private().(*tree.Placeholder))
+	}
+	return b.buildTypedExpr(ctx, scalar)
 }
 
 func (b *Builder) buildNull(ctx *buildScalarCtx, scalar opt.ScalarExpr) (tree.TypedExpr, error) {
@@ -382,8 +386,9 @@ func (b *Builder) buildAssignmentCast(
 		// (though there could be cornercases where the type does matter).
 		return input, nil
 	}
+
 	const fnName = "crdb_internal.assignment_cast"
-	funcRef, err := b.wrapFunction(fnName)
+	funcRef, err := b.wrapBuiltinFunction(fnName)
 	if err != nil {
 		return nil, err
 	}
@@ -702,6 +707,7 @@ func (b *Builder) buildExistsSubquery(
 				false, /* generator */
 				false, /* tailCall */
 				false, /* procedure */
+				false, /* triggerFunc */
 				false, /* blockStart */
 				nil,   /* blockState */
 				nil,   /* cursorDeclaration */
@@ -812,6 +818,7 @@ func (b *Builder) buildSubquery(
 			true, /* allowOuterWithRefs */
 			nil,  /* wrapRootExpr */
 		)
+		_, tailCall := b.tailCalls[subquery]
 		return tree.NewTypedRoutineExpr(
 			"subquery",
 			args,
@@ -821,8 +828,9 @@ func (b *Builder) buildSubquery(
 			true,  /* calledOnNullInput */
 			false, /* multiColOutput */
 			false, /* generator */
-			false, /* tailCall */
+			tailCall,
 			false, /* procedure */
+			false, /* triggerFunc */
 			false, /* blockStart */
 			nil,   /* blockState */
 			nil,   /* cursorDeclaration */
@@ -841,27 +849,38 @@ func (b *Builder) buildSubquery(
 		planGen := func(
 			ctx context.Context, ref tree.RoutineExecFactory, args tree.Datums, fn tree.RoutinePlanGeneratedFunc,
 		) error {
+			// Analyze the input of the subquery to find tail calls, which will allow
+			// nested routines (including lazy subqueries) to be executed in the same
+			// context as this subquery.
+			tailCalls := make(map[opt.ScalarExpr]struct{})
+			memo.ExtractTailCalls(input, tailCalls)
+
 			ef := ref.(exec.Factory)
 			eb := New(ctx, ef, b.optimizer, b.mem, b.catalog, input, b.semaCtx, b.evalCtx, false /* allowAutoCommit */, b.IsANSIDML)
 			eb.withExprs = withExprs
 			eb.disableTelemetry = true
 			eb.planLazySubqueries = true
+			eb.tailCalls = tailCalls
 			ePlan, _, err := eb.buildRelational(input)
 			if err != nil {
 				return err
 			}
-			if len(eb.subqueries) > 0 {
-				return expectedLazyRoutineError("subquery")
+			for i := range eb.subqueries {
+				if eb.subqueries[i].Mode != exec.SubqueryDiscardAllRows {
+					return expectedLazyRoutineError("subquery")
+				}
 			}
 			if len(eb.cascades) > 0 {
 				return expectedLazyRoutineError("cascade")
+			}
+			if len(eb.triggers) > 0 {
+				return expectedLazyRoutineError("trigger")
 			}
 			if len(eb.checks) > 0 {
 				return expectedLazyRoutineError("check")
 			}
 			plan, err := b.factory.ConstructPlan(
-				ePlan.root, nil /* subqueries */, nil /* cascades */, nil /* checks */, inputRowCount,
-				eb.flags,
+				ePlan.root, eb.subqueries, eb.cascades, eb.triggers, eb.checks, inputRowCount, eb.flags,
 			)
 			if err != nil {
 				return err
@@ -872,6 +891,7 @@ func (b *Builder) buildSubquery(
 			}
 			return nil
 		}
+		_, tailCall := b.tailCalls[subquery]
 		return tree.NewTypedRoutineExpr(
 			"subquery",
 			nil, /* args */
@@ -881,8 +901,9 @@ func (b *Builder) buildSubquery(
 			true,  /* calledOnNullInput */
 			false, /* multiColOutput */
 			false, /* generator */
-			false, /* tailCall */
+			tailCall,
 			false, /* procedure */
+			false, /* triggerFunc */
 			false, /* blockStart */
 			nil,   /* blockState */
 			nil,   /* cursorDeclaration */
@@ -995,6 +1016,7 @@ func (b *Builder) buildUDF(ctx *buildScalarCtx, scalar opt.ScalarExpr) (tree.Typ
 		udf.Def.SetReturning,
 		tailCall,
 		false, /* procedure */
+		udf.Def.TriggerFunc,
 		udf.Def.BlockStart,
 		blockState,
 		udf.Def.CursorDeclaration,
@@ -1051,6 +1073,7 @@ func (b *Builder) initRoutineExceptionHandler(
 			action.SetReturning,
 			false, /* tailCall */
 			false, /* procedure */
+			false, /* triggerFunc */
 			false, /* blockStart */
 			nil,   /* blockState */
 			nil,   /* cursorDeclaration */
@@ -1108,6 +1131,7 @@ func (b *Builder) buildRoutinePlanGenerator(
 	//
 	// Note: we put o outside of the function so we allocate it only once.
 	var o xform.Optimizer
+	originalMemo := b.mem
 	planGen := func(
 		ctx context.Context, ref tree.RoutineExecFactory, args tree.Datums, fn tree.RoutinePlanGeneratedFunc,
 	) (err error) {
@@ -1141,7 +1165,6 @@ func (b *Builder) buildRoutinePlanGenerator(
 
 			// Copy the expression into a new memo. Replace parameter references
 			// with argument datums.
-			addedWithBindings := false
 			var replaceFn norm.ReplaceFunc
 			replaceFn = func(e opt.Expr) opt.Expr {
 				switch t := e.(type) {
@@ -1166,18 +1189,22 @@ func (b *Builder) buildRoutinePlanGenerator(
 					// We lazily add these With expressions to the metadata here
 					// because the call to Factory.CopyAndReplace below clears With
 					// expressions in the metadata.
-					if allowOuterWithRefs && !addedWithBindings {
+					if allowOuterWithRefs {
 						b.mem.Metadata().ForEachWithBinding(func(id opt.WithID, expr opt.Expr) {
-							f.Metadata().AddWithBinding(id, expr)
+							// Make sure to check for an existing With binding, since we may
+							// have already rewritten the bound expression and added it to the
+							// new memo if the associated WithExpr is part of the routine.
+							if !f.Metadata().HasWithBinding(id) {
+								f.Metadata().AddWithBinding(id, expr)
+							}
 						})
-						addedWithBindings = true
 					}
 					// Fall through.
 				}
 
 				return f.CopyAndReplaceDefault(e, replaceFn)
 			}
-			f.CopyAndReplace(stmt, props, replaceFn)
+			f.CopyAndReplace(originalMemo, stmt, props, replaceFn)
 
 			if wrapRootExpr != nil {
 				wrapped := wrapRootExpr(f, f.Memo().RootExpr().(memo.RelExpr)).(memo.RelExpr)
@@ -1194,9 +1221,9 @@ func (b *Builder) buildRoutinePlanGenerator(
 			// in the Builder. When a nested routine is evaluated, this information
 			// may be used to enable tail-call optimization.
 			isFinalPlan := i == len(stmts)-1
-			var tailCalls map[*memo.UDFCallExpr]struct{}
+			var tailCalls map[opt.ScalarExpr]struct{}
 			if isFinalPlan {
-				tailCalls = make(map[*memo.UDFCallExpr]struct{})
+				tailCalls = make(map[opt.ScalarExpr]struct{})
 				memo.ExtractTailCalls(optimizedExpr, tailCalls)
 			}
 
@@ -1219,8 +1246,10 @@ func (b *Builder) buildRoutinePlanGenerator(
 				}
 				return err
 			}
-			if len(eb.subqueries) > 0 {
-				return expectedLazyRoutineError("subquery")
+			for j := range eb.subqueries {
+				if eb.subqueries[j].Mode != exec.SubqueryDiscardAllRows {
+					return expectedLazyRoutineError("subquery")
+				}
 			}
 			var stmtForDistSQLDiagram string
 			if i < len(stmtStr) {

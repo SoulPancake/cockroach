@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package metamorphic
 
@@ -239,7 +234,10 @@ func (m mvccCPutOp) run(ctx context.Context) string {
 	txn.Sequence++
 
 	_, err := storage.MVCCConditionalPut(ctx, writer, m.key,
-		txn.ReadTimestamp, m.value, m.expVal, true, storage.MVCCWriteOptions{Txn: txn})
+		txn.ReadTimestamp, m.value, m.expVal, storage.ConditionalPutWriteOptions{
+			MVCCWriteOptions:    storage.MVCCWriteOptions{Txn: txn},
+			AllowIfDoesNotExist: true,
+		})
 	if err != nil {
 		if writeTooOldErr := (*kvpb.WriteTooOldError)(nil); errors.As(err, &writeTooOldErr) {
 			txn.WriteTimestamp.Forward(writeTooOldErr.ActualTimestamp)
@@ -318,7 +316,7 @@ func (m mvccAcquireLockOp) run(ctx context.Context) string {
 	txn := m.m.getTxn(m.txn)
 	writer := m.m.getReadWriter(m.writer)
 
-	err := storage.MVCCAcquireLock(ctx, writer, txn, m.strength, m.key, nil, int64(m.maxLockConflicts), m.targetLockConflictBytes)
+	err := storage.MVCCAcquireLock(ctx, writer, &txn.TxnMeta, txn.IgnoredSeqNums, m.strength, m.key, nil, int64(m.maxLockConflicts), m.targetLockConflictBytes)
 	if err != nil {
 		return fmt.Sprintf("error: %s", err)
 	}

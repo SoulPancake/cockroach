@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval
 
@@ -238,7 +233,7 @@ func acquireLockOnKey(
 		// conflicts with un-contended replicated locks -- we need to do so before
 		// we can acquire our own replicated lock; do that now, and also acquire
 		// the replicated lock if no conflicts are found.
-		if err := storage.MVCCAcquireLock(ctx, readWriter, txn, str, key, ms, maxLockConflicts, targetLockConflictBytes); err != nil {
+		if err := storage.MVCCAcquireLock(ctx, readWriter, &txn.TxnMeta, txn.IgnoredSeqNums, str, key, ms, maxLockConflicts, targetLockConflictBytes); err != nil {
 			return roachpb.LockAcquisition{}, err
 		}
 	default:

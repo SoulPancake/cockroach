@@ -37,8 +37,8 @@ go_library(
         "//pkg/sql/catalog",
         "//pkg/sql/catalog/descpb",
         "//pkg/storage",
+        "//pkg/testutils/pgurlutils",
         "//pkg/testutils/skip",
-        "//pkg/testutils/sqlutils",
         "//pkg/util/envutil",
         "//pkg/util/hlc",
         "//pkg/util/httputil",
@@ -50,7 +50,7 @@ go_library(
         "//pkg/util/tracing",
         "//pkg/util/uuid",
         "@com_github_cockroachdb_errors//:errors",
-        "@org_golang_google_grpc//:go_default_library",
+        "@org_golang_google_grpc//:grpc",
     ],
 )
 
@@ -64,8 +64,8 @@ genrule(
        ApplicationLayerInterface
 $(location @com_github_cockroachdb_gostdlib//x/tools/cmd/goimports) -w $@
 """,
-    exec_tools = [
-        "//pkg/testutils/serverutils/fwgen:fwgen",
+    tools = [
+        "//pkg/testutils/serverutils/fwgen",
         "@com_github_cockroachdb_gostdlib//x/tools/cmd/goimports",
     ],
     visibility = [
@@ -84,8 +84,8 @@ genrule(
        StorageLayerInterface
 $(location @com_github_cockroachdb_gostdlib//x/tools/cmd/goimports) -w $@
 """,
-    exec_tools = [
-        "//pkg/testutils/serverutils/fwgen:fwgen",
+    tools = [
+        "//pkg/testutils/serverutils/fwgen",
         "@com_github_cockroachdb_gostdlib//x/tools/cmd/goimports",
     ],
     visibility = [
@@ -104,8 +104,8 @@ genrule(
        TenantControlInterface
 $(location @com_github_cockroachdb_gostdlib//x/tools/cmd/goimports) -w $@
 """,
-    exec_tools = [
-        "//pkg/testutils/serverutils/fwgen:fwgen",
+    tools = [
+        "//pkg/testutils/serverutils/fwgen",
         "@com_github_cockroachdb_gostdlib//x/tools/cmd/goimports",
     ],
     visibility = [
@@ -124,8 +124,8 @@ genrule(
        TestServerController
 $(location @com_github_cockroachdb_gostdlib//x/tools/cmd/goimports) -w $@
 """,
-    exec_tools = [
-        "//pkg/testutils/serverutils/fwgen:fwgen",
+    tools = [
+        "//pkg/testutils/serverutils/fwgen",
         "@com_github_cockroachdb_gostdlib//x/tools/cmd/goimports",
     ],
     visibility = [

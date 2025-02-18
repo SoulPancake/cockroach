@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -26,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqltestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
@@ -76,7 +72,7 @@ CREATE FUNCTION f(INT) RETURNS INT VOLATILE LANGUAGE SQL AS $$ SELECT a FROM t $
 	sd.SessionData = m.SessionData
 	sd.LocalOnlySessionData = m.LocalOnlySessionData
 
-	err = sql.TestingDescsTxn(ctx, s, func(ctx context.Context, txn isql.Txn, col *descs.Collection) error {
+	err = sqltestutils.TestingDescsTxn(ctx, s, func(ctx context.Context, txn isql.Txn, col *descs.Collection) error {
 		execCfg := s.ExecutorConfig().(sql.ExecutorConfig)
 		planner, cleanup := sql.NewInternalPlanner(
 			"resolve-index", txn.KV(), username.NodeUserName(), &sql.MemoryMetrics{}, &execCfg, sd,
@@ -258,7 +254,7 @@ CREATE FUNCTION sc1.lower() RETURNS INT VOLATILE LANGUAGE SQL AS $$ SELECT 3 $$;
 	sd.SessionData = m.SessionData
 	sd.LocalOnlySessionData = m.LocalOnlySessionData
 
-	err = sql.TestingDescsTxn(ctx, s, func(ctx context.Context, txn isql.Txn, col *descs.Collection) error {
+	err = sqltestutils.TestingDescsTxn(ctx, s, func(ctx context.Context, txn isql.Txn, col *descs.Collection) error {
 		execCfg := s.ExecutorConfig().(sql.ExecutorConfig)
 		planner, cleanup := sql.NewInternalPlanner(
 			"resolve-index", txn.KV(), username.NodeUserName(), &sql.MemoryMetrics{}, &execCfg, sd,
@@ -401,7 +397,7 @@ CREATE FUNCTION sc1.lower(a STRING) RETURNS STRING VOLATILE LANGUAGE SQL AS $$ S
 	sd.SessionData = m.SessionData
 	sd.LocalOnlySessionData = m.LocalOnlySessionData
 
-	err = sql.TestingDescsTxn(ctx, s, func(ctx context.Context, txn isql.Txn, col *descs.Collection) error {
+	err = sqltestutils.TestingDescsTxn(ctx, s, func(ctx context.Context, txn isql.Txn, col *descs.Collection) error {
 		execCfg := s.ExecutorConfig().(sql.ExecutorConfig)
 		planner, cleanup := sql.NewInternalPlanner(
 			"resolve-index", txn.KV(), username.NodeUserName(), &sql.MemoryMetrics{}, &execCfg, sd,

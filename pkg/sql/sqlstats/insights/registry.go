@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package insights
 
@@ -23,13 +18,12 @@ import (
 // statement execution to determine which statements are outliers and
 // writes insights into the provided sink.
 type lockingRegistry struct {
-	statements map[clusterunique.ID]*statementBuf
-	detector   detector
-	causes     *causes
-	sink       sink
+	statements   map[clusterunique.ID]*statementBuf
+	detector     detector
+	causes       *causes
+	store        *LockingStore
+	testingKnobs *TestingKnobs
 }
-
-var _ Writer = (*lockingRegistry)(nil)
 
 func (r *lockingRegistry) Clear() {
 	r.statements = make(map[clusterunique.ID]*statementBuf)
@@ -184,7 +178,19 @@ func (r *lockingRegistry) ObserveTransaction(sessionID clusterunique.ID, transac
 		transaction.LastErrorCode = lastStmtErrCode
 	}
 
-	r.sink.AddInsight(insight)
+	r.store.addInsight(insight)
+}
+
+// clearSession removes the session from the registry and releases the
+// associated statement buffer.
+func (r *lockingRegistry) clearSession(sessionID clusterunique.ID) {
+	if b, ok := r.statements[sessionID]; ok {
+		delete(r.statements, sessionID)
+		b.release()
+		if r.testingKnobs != nil && r.testingKnobs.OnSessionClear != nil {
+			r.testingKnobs.OnSessionClear(sessionID)
+		}
+	}
 }
 
 // TODO(todd):
@@ -197,11 +203,14 @@ func (r *lockingRegistry) enabled() bool {
 	return r.detector.enabled()
 }
 
-func newRegistry(st *cluster.Settings, detector detector, sink sink) *lockingRegistry {
+func newRegistry(
+	st *cluster.Settings, detector detector, store *LockingStore, knobs *TestingKnobs,
+) *lockingRegistry {
 	return &lockingRegistry{
-		statements: make(map[clusterunique.ID]*statementBuf),
-		detector:   detector,
-		causes:     &causes{st: st},
-		sink:       sink,
+		statements:   make(map[clusterunique.ID]*statementBuf),
+		detector:     detector,
+		causes:       &causes{st: st},
+		store:        store,
+		testingKnobs: knobs,
 	}
 }

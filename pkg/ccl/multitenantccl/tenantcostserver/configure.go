@@ -1,17 +1,13 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tenantcostserver
 
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -35,12 +31,7 @@ func (s *instance) ReconfigureTokenBucket(
 		return err
 	}
 
-	// Check whether the consumption rates migration has run. If not, then do not
-	// attempt to write the new rates columns.
-	// TODO(andyk): Remove this after 24.3.
-	ratesAvailable := s.settings.Version.IsActive(ctx, clusterversion.V24_2_TenantRates)
-
-	h := makeSysTableHelper(ctx, tenantID, ratesAvailable)
+	h := makeSysTableHelper(ctx, tenantID)
 	state, err := h.readTenantState(txn)
 	if err != nil {
 		return err

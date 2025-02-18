@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package catconstants
 
@@ -63,6 +58,10 @@ const (
 	RangeEventTableName                    SystemTableName = "rangelog"
 	UITableName                            SystemTableName = "ui"
 	JobsTableName                          SystemTableName = "jobs"
+	JobsProgressTableName                  SystemTableName = "job_progress"
+	JobsProgressHistoryTableName           SystemTableName = "job_progress_history"
+	JobsStatusTableName                    SystemTableName = "job_status"
+	JobsMessageTableName                   SystemTableName = "job_message"
 	WebSessionsTableName                   SystemTableName = "web_sessions"
 	TableStatisticsTableName               SystemTableName = "table_statistics"
 	LocationsTableName                     SystemTableName = "locations"
@@ -106,6 +105,8 @@ const (
 	MVCCStatistics                         SystemTableName = "mvcc_statistics"
 	StmtExecInsightsTableName              SystemTableName = "statement_execution_insights"
 	TxnExecInsightsTableName               SystemTableName = "transaction_execution_insights"
+	TableMetadata                          SystemTableName = "table_metadata"
+	PreparedTransactionsTableName          SystemTableName = "prepared_transactions"
 )
 
 // Oid for virtual database and table.
@@ -205,16 +206,26 @@ const (
 	CrdbInternalInheritedRoleMembersTableID
 	CrdbInternalKVSystemPrivilegesViewID
 	CrdbInternalKVFlowControllerID
+	CrdbInternalKVFlowControllerIDV2
 	CrdbInternalKVFlowHandlesID
+	CrdbInternalKVFlowHandlesIDV2
 	CrdbInternalKVFlowTokenDeductions
+	CrdbInternalKVFlowTokenDeductionsV2
 	CrdbInternalRepairableCatalogCorruptionsViewID
 	CrdbInternalKVProtectedTS
 	CrdbInternalKVSessionBasedLeases
 	CrdbInternalClusterReplicationResolvedViewID
+	CrdbInternalLogicalReplicationResolvedViewID
 	CrdbInternalPCRStreamsTableID
 	CrdbInternalPCRStreamSpansTableID
 	CrdbInternalPCRStreamCheckpointsTableID
 	CrdbInternalLDRProcessorTableID
+	CrdbInternalFullyQualifiedNamesViewID
+	CrdbInternalStoreLivenessSupportFrom
+	CrdbInternalStoreLivenessSupportFor
+	// CrdbInternalTestID is reserved for tests that need to inject virtual tables
+	// into crdb_internal.
+	CrdbInternalTestID
 	InformationSchemaID
 	InformationSchemaAdministrableRoleAuthorizationsID
 	InformationSchemaApplicableRolesID

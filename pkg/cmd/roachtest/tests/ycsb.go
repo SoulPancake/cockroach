@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -14,18 +9,16 @@ import (
 	"context"
 	gosql "database/sql"
 	"fmt"
-	"os"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/stretchr/testify/require"
 )
-
-const envYCSBFlags = "ROACHTEST_YCSB_FLAGS"
 
 func registerYCSB(r registry.Registry) {
 	workloads := []string{"A", "B", "C", "D", "E", "F"}
@@ -62,8 +55,6 @@ func registerYCSB(r registry.Registry) {
 			t.Skip("YCSB zfs benchmark can only be run on GCE", "")
 		}
 
-		nodes := c.Spec().NodeCount - 1
-
 		conc, ok := concurrencyConfigs[wl][cpus]
 		if !ok {
 			t.Fatalf("missing concurrency for (workload, cpus) = (%s, %d)", wl, cpus)
@@ -74,37 +65,41 @@ func registerYCSB(r registry.Registry) {
 			settings.Env = append(settings.Env, "COCKROACH_GLOBAL_MVCC_RANGE_TOMBSTONE=true")
 		}
 
-		c.Put(ctx, t.DeprecatedWorkload(), "./workload", c.Node(nodes+1))
-		c.Start(ctx, t.L(), option.NewStartOpts(option.NoBackupSchedule), settings, c.Range(1, nodes))
+		c.Start(ctx, t.L(), option.NewStartOpts(option.NoBackupSchedule), settings, c.CRDBNodes())
 
 		db := c.Conn(ctx, t.L(), 1)
 		err := enableIsolationLevels(ctx, t, db)
 		require.NoError(t, err)
-		err = WaitFor3XReplication(ctx, t, t.L(), db)
+		err = roachtestutil.WaitFor3XReplication(ctx, t.L(), db)
 		require.NoError(t, err)
 		require.NoError(t, db.Close())
 
 		t.Status("running workload")
-		m := c.NewMonitor(ctx, c.Range(1, nodes))
+		m := c.NewMonitor(ctx, c.CRDBNodes())
 		m.Go(func(ctx context.Context) error {
 			var args string
-			args += " --ramp=" + ifLocal(c, "0s", "2m")
-			args += " --duration=" + ifLocal(c, "10s", "30m")
+			args += " --ramp=" + roachtestutil.IfLocal(c, "0s", "2m")
 			if opts.readCommitted {
 				args += " --isolation-level=read_committed"
 			}
 			if opts.uniformDistribution {
 				args += " --request-distribution=uniform"
 			}
-			if envFlags := os.Getenv(envYCSBFlags); envFlags != "" {
-				args += " " + envFlags
+
+			defaultDuration := roachtestutil.IfLocal(c, "10s", "30m")
+			args += roachtestutil.GetEnvWorkloadDurationValueOrDefault(defaultDuration)
+
+			labels := map[string]string{
+				"workload_ycsb_type": wl,
+				"concurrency":        fmt.Sprintf("%d", conc),
+				"cpu":                fmt.Sprintf("%d", cpus),
 			}
+
 			cmd := fmt.Sprintf(
-				"./workload run ycsb --init --insert-count=1000000 --workload=%s --concurrency=%d"+
-					" --splits=%d --histograms="+t.PerfArtifactsDir()+"/stats.json"+args+
-					" {pgurl:1-%d}",
-				wl, conc, nodes, nodes)
-			c.Run(ctx, option.WithNodes(c.Node(nodes+1)), cmd)
+				"./cockroach workload run ycsb --init --insert-count=1000000 --workload=%s --concurrency=%d"+
+					" --splits=%d %s %s {pgurl%s}", wl, conc, len(c.CRDBNodes()),
+				roachtestutil.GetWorkloadHistogramArgs(t, c, labels), args, c.CRDBNodes())
+			c.Run(ctx, option.WithNodes(c.WorkloadNode()), cmd)
 			return nil
 		})
 		m.Wait()
@@ -122,7 +117,7 @@ func registerYCSB(r registry.Registry) {
 				Name:      name,
 				Owner:     registry.OwnerTestEng,
 				Benchmark: true,
-				Cluster:   r.MakeClusterSpec(4, spec.CPU(cpus)),
+				Cluster:   r.MakeClusterSpec(4, spec.CPU(cpus), spec.WorkloadNode(), spec.WorkloadNodeCPU(cpus)),
 				Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 					runYCSB(ctx, t, c, wl, cpus, ycsbOptions{})
 				},
@@ -135,7 +130,7 @@ func registerYCSB(r registry.Registry) {
 					Name:      fmt.Sprintf("zfs/ycsb/%s/nodes=3/cpu=%d", wl, cpus),
 					Owner:     registry.OwnerStorage,
 					Benchmark: true,
-					Cluster:   r.MakeClusterSpec(4, spec.CPU(cpus), spec.SetFileSystem(spec.Zfs)),
+					Cluster:   r.MakeClusterSpec(4, spec.CPU(cpus), spec.WorkloadNode(), spec.WorkloadNodeCPU(cpus), spec.SetFileSystem(spec.Zfs)),
 					Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 						runYCSB(ctx, t, c, wl, cpus, ycsbOptions{})
 					},
@@ -149,7 +144,7 @@ func registerYCSB(r registry.Registry) {
 					Name:      fmt.Sprintf("%s/isolation-level=read-committed", name),
 					Owner:     registry.OwnerTestEng,
 					Benchmark: true,
-					Cluster:   r.MakeClusterSpec(4, spec.CPU(cpus)),
+					Cluster:   r.MakeClusterSpec(4, spec.CPU(cpus), spec.WorkloadNode(), spec.WorkloadNodeCPU(cpus)),
 					Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 						runYCSB(ctx, t, c, wl, cpus, ycsbOptions{readCommitted: true})
 					},
@@ -163,7 +158,7 @@ func registerYCSB(r registry.Registry) {
 					Name:      fmt.Sprintf("%s/mvcc-range-keys=global", name),
 					Owner:     registry.OwnerTestEng,
 					Benchmark: true,
-					Cluster:   r.MakeClusterSpec(4, spec.CPU(cpus)),
+					Cluster:   r.MakeClusterSpec(4, spec.CPU(cpus), spec.WorkloadNode(), spec.WorkloadNodeCPU(cpus)),
 					Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 						runYCSB(ctx, t, c, wl, cpus, ycsbOptions{rangeTombstone: true})
 					},
@@ -182,7 +177,7 @@ func registerYCSB(r registry.Registry) {
 					Name:      fmt.Sprintf("%s/uniform", name),
 					Owner:     registry.OwnerTestEng,
 					Benchmark: true,
-					Cluster:   r.MakeClusterSpec(4, spec.CPU(cpus)),
+					Cluster:   r.MakeClusterSpec(4, spec.CPU(cpus), spec.WorkloadNode(), spec.WorkloadNodeCPU(cpus)),
 					Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 						runYCSB(ctx, t, c, wl, cpus, ycsbOptions{uniformDistribution: true})
 					},
@@ -200,6 +195,8 @@ func enableIsolationLevels(ctx context.Context, t test.Test, db *gosql.DB) error
 		// master, we should keep these to ensure that the settings are configured
 		// properly in mixed-version roachtests.
 		`SET CLUSTER SETTING sql.txn.read_committed_isolation.enabled = 'true';`,
+		// NOTE: for a similar reason, we use the deprecated name for this setting
+		// to ensure that it is properly configured in mixed-version roachtests.
 		`SET CLUSTER SETTING sql.txn.snapshot_isolation.enabled = 'true';`,
 	} {
 		if _, err := db.ExecContext(ctx, cmd); err != nil {

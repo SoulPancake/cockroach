@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package persistedsqlstats_test
 
@@ -23,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/appstatspb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/persistedsqlstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/ssmemstorage"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
@@ -102,7 +96,7 @@ func runBenchmarkPersistedSqlStatsFlush(
 			db.Exec(b, "SELECT id FROM bench.t1 LIMIT 5")
 		}
 		b.StartTimer()
-		tc.Server(0).SQLServer().(*sql.Server).GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats).MaybeFlush(ctx, tc.ApplicationLayer(0).AppStopper())
+		tc.Server(0).SQLServer().(*sql.Server).GetSQLStatsProvider().MaybeFlush(ctx, tc.ApplicationLayer(0).AppStopper())
 		b.StopTimer()
 	}
 }
@@ -389,7 +383,7 @@ func BenchmarkSqlStatsMaxFlushTime(b *testing.B) {
 	defer s.Stopper().Stop(ctx)
 	sqlConn := sqlutils.MakeSQLRunner(conn)
 
-	sqlStats := s.SQLServer().(*sql.Server).GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats)
+	sqlStats := s.SQLServer().(*sql.Server).GetSQLStatsProvider()
 	controller := s.SQLServer().(*sql.Server).GetSQLStatsController()
 	stmtFingerprintLimit := sqlstats.MaxMemSQLStatsStmtFingerprints.Get(&s.ClusterSettings().SV)
 	txnFingerprintLimit := sqlstats.MaxMemSQLStatsTxnFingerprints.Get(&s.ClusterSettings().SV)
@@ -411,7 +405,7 @@ func BenchmarkSqlStatsMaxFlushTime(b *testing.B) {
 				QuerySummary:             "",
 				TransactionFingerprintID: appstatspb.TransactionFingerprintID(i),
 			}
-			_, err := appContainer.RecordStatement(ctx, stmtKey, mockStmtValue)
+			err := appContainer.RecordStatement(ctx, stmtKey, mockStmtValue)
 			if errors.Is(err, ssmemstorage.ErrFingerprintLimitReached) {
 				break
 			}

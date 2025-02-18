@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlclustersettings
 
@@ -102,3 +97,15 @@ func RequireSystemTenantOrClusterSetting(
 		"Feature was disabled by the system operator."),
 		"Feature flag: %s", setting.Name())
 }
+
+// CachedSequencesCacheSizeSetting is the default cache size used when
+// SessionNormalizationMode is SerialUsesCachedSQLSequences or
+// SerialUsesCachedNodeSQLSequences.
+var CachedSequencesCacheSizeSetting = settings.RegisterIntSetting(
+	settings.ApplicationLevel,
+	"sql.defaults.serial_sequences_cache_size",
+	"the default cache size when the session's serial normalization mode is set to cached sequences"+
+		"A cache size of 1 means no caching. Any cache size less than 1 is invalid.",
+	256,
+	settings.PositiveInt,
+)

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package opgen
 
@@ -23,7 +18,7 @@ func init() {
 				emit(func(this *scpb.DatabaseZoneConfig) *scop.AddDatabaseZoneConfig {
 					return &scop.AddDatabaseZoneConfig{
 						DatabaseID: this.DatabaseID,
-						ZoneConfig: this.ZoneConfig,
+						ZoneConfig: *this.ZoneConfig,
 					}
 				}),
 			),
@@ -31,8 +26,15 @@ func init() {
 		toAbsent(
 			scpb.Status_PUBLIC,
 			to(scpb.Status_ABSENT,
-				emit(func(this *scpb.DatabaseZoneConfig) *scop.NotImplementedForPublicObjects {
-					return notImplementedForPublicObjects(this)
+				emit(func(this *scpb.DatabaseZoneConfig, md *opGenContext) *scop.DiscardZoneConfig {
+					// If this belongs to a drop instead of a CONFIGURE ZONE DISCARD, let
+					// the GC job take care of dropping the zone config.
+					if checkIfZoneConfigHasGCDependents(this, md) {
+						return nil
+					}
+					return &scop.DiscardZoneConfig{
+						DescID: this.DatabaseID,
+					}
 				}),
 			),
 		),

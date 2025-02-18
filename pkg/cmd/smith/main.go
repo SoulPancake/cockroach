@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -56,6 +51,7 @@ Options:
 var (
 	flags      = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 	expr       = flags.Bool("expr", false, "generate expressions instead of statements")
+	udfs       = flags.Bool("udfs", false, "generate only CREATE FUNCTION statements")
 	num        = flags.Int("num", 1, "number of statements / expressions to generate")
 	url        = flags.String("url", "", "database to fetch schema from")
 	execStmts  = flags.Bool("exec-stmts", false, "execute each generated statement against the db specified by url")
@@ -199,6 +195,10 @@ func main() {
 		fmt.Println("-- expr")
 		for i := 0; i < *num; i++ {
 			fmt.Print(sep, smither.GenerateExpr(), "\n")
+		}
+	} else if *udfs {
+		for i := 0; i < *num; i++ {
+			fmt.Print(sep, smither.GenerateUDF(), ";\n")
 		}
 	} else {
 		for i := 0; i < *num; i++ {

@@ -1,19 +1,15 @@
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 import { render, screen } from "@testing-library/react";
+import React from "react";
 
 import { makeTimestamp } from "src/util";
 
+import { Duration } from "./duration";
 import {
   JOB_STATUS_RUNNING,
   JOB_STATUS_SUCCEEDED,
@@ -26,7 +22,6 @@ import {
   JOB_STATUS_REVERTING,
   JOB_STATUS_REVERT_FAILED,
 } from "./jobOptions";
-import { Duration } from "./duration";
 
 // Job running for 10 minutes
 const START_SECONDS = 0;

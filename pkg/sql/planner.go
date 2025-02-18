@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -32,6 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/multiregion"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schematelemetry/schematelemetrycontroller"
 	"github.com/cockroachdb/cockroach/pkg/sql/clusterunique"
@@ -39,8 +35,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/exprutil"
 	"github.com/cockroachdb/cockroach/pkg/sql/idxusage"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/querycache"
 	"github.com/cockroachdb/cockroach/pkg/sql/regions"
@@ -51,6 +45,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/persistedsqlstats"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/sslocal"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/upgrade"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
@@ -105,6 +100,8 @@ type extendedEvalContext struct {
 	jobs *txnJobsCollection
 
 	statsProvider *persistedsqlstats.PersistedSQLStats
+
+	localStatsProvider *sslocal.SQLStats
 
 	indexUsageStats *idxusage.LocalIndexUsageStats
 
@@ -338,7 +335,7 @@ func WithDescCollection(collection *descs.Collection) InternalPlannerParamsOptio
 // NewInternalPlanner is an exported version of newInternalPlanner. It
 // returns an interface{} so it can be used outside of the sql package.
 func NewInternalPlanner(
-	opName string,
+	opName redact.SafeString,
 	txn *kv.Txn,
 	user username.SQLUsername,
 	memMetrics *MemoryMetrics,
@@ -358,8 +355,7 @@ func NewInternalPlanner(
 // Returns a cleanup function that must be called once the caller is done with
 // the planner.
 func newInternalPlanner(
-	// TODO(yuzefovich): make this redact.RedactableString.
-	opName string,
+	opName redact.SafeString,
 	txn *kv.Txn,
 	user username.SQLUsername,
 	memMetrics *MemoryMetrics,
@@ -381,7 +377,7 @@ func newInternalPlanner(
 	// asking the caller for one is hard to explain. What we need is better and
 	// separate interfaces for planning and running plans, which could take
 	// suitable contexts.
-	ctx := logtags.AddTag(context.Background(), opName, "")
+	ctx := logtags.AddTag(context.Background(), string(opName), "")
 
 	sd = sd.Clone()
 	if sd.SessionData.Database == "" {
@@ -408,7 +404,7 @@ func newInternalPlanner(
 	}
 
 	plannerMon := mon.NewMonitor(mon.Options{
-		Name:     redact.Sprintf("internal-planner.%s.%s", user, opName),
+		Name:     mon.MakeMonitorName("internal-planner." + opName),
 		CurCount: memMetrics.CurBytesCount,
 		MaxHist:  memMetrics.MaxBytesHist,
 		Settings: execCfg.Settings,
@@ -446,6 +442,7 @@ func newInternalPlanner(
 	p.extendedEvalCtx.NodeID = execCfg.NodeInfo.NodeID
 	p.extendedEvalCtx.Locality = execCfg.Locality
 	p.extendedEvalCtx.OriginalLocality = execCfg.Locality
+	p.extendedEvalCtx.DescIDGenerator = execCfg.DescIDGenerator
 
 	p.sessionDataMutatorIterator = smi
 
@@ -506,6 +503,7 @@ func internalExtendedEvalCtx(
 	var schemaTelemetryController eval.SchemaTelemetryController
 	var indexUsageStatsController eval.IndexUsageStatsController
 	var sqlStatsProvider *persistedsqlstats.PersistedSQLStats
+	var localSqlStatsProvider *sslocal.SQLStats
 	if ief := execCfg.InternalDB; ief != nil {
 		if ief.server != nil {
 			indexUsageStats = ief.server.indexUsageStats
@@ -513,6 +511,7 @@ func internalExtendedEvalCtx(
 			schemaTelemetryController = ief.server.schemaTelemetryController
 			indexUsageStatsController = ief.server.indexUsageStatsController
 			sqlStatsProvider = ief.server.sqlStats
+			localSqlStatsProvider = ief.server.localSqlStats
 		} else {
 			// If the indexUsageStats is nil from the sql.Server, we create a dummy
 			// index usage stats collector. The sql.Server in the ExecutorConfig
@@ -524,6 +523,7 @@ func internalExtendedEvalCtx(
 			schemaTelemetryController = &schematelemetrycontroller.Controller{}
 			indexUsageStatsController = &idxusage.Controller{}
 			sqlStatsProvider = &persistedsqlstats.PersistedSQLStats{}
+			localSqlStatsProvider = &sslocal.SQLStats{}
 		}
 	}
 	ret := extendedEvalContext{
@@ -543,11 +543,12 @@ func internalExtendedEvalCtx(
 			StmtDiagnosticsRequestInserter: execCfg.StmtDiagnosticsRecorder.InsertRequest,
 			RangeStatsFetcher:              execCfg.RangeStatsFetcher,
 		},
-		Tracing:         &SessionTracing{},
-		Descs:           tables,
-		indexUsageStats: indexUsageStats,
-		statsProvider:   sqlStatsProvider,
-		jobs:            newTxnJobsCollection(),
+		Tracing:            &SessionTracing{},
+		Descs:              tables,
+		indexUsageStats:    indexUsageStats,
+		statsProvider:      sqlStatsProvider,
+		localStatsProvider: localSqlStatsProvider,
+		jobs:               newTxnJobsCollection(),
 	}
 	ret.copyFromExecCfg(execCfg)
 	return ret
@@ -675,6 +676,17 @@ func (p *planner) GetRegions(ctx context.Context) (*serverpb.RegionsResponse, er
 		return nil, errors.AssertionFailedf("no regions provider available")
 	}
 	return provider.GetRegions(ctx)
+}
+
+// SynthesizeRegionConfig implements the scbuildstmt.SynthesizeRegionConfig interface.
+func (p *planner) SynthesizeRegionConfig(
+	ctx context.Context, dbID descpb.ID, opts ...multiregion.SynthesizeRegionConfigOption,
+) (multiregion.RegionConfig, error) {
+	provider := p.regionsProvider()
+	if provider == nil {
+		return multiregion.RegionConfig{}, errors.AssertionFailedf("no regions provider available")
+	}
+	return provider.SynthesizeRegionConfig(ctx, dbID, opts...)
 }
 
 // DistSQLPlanner returns the DistSQLPlanner
@@ -813,7 +825,7 @@ func (p *planner) IsActive(ctx context.Context, key clusterversion.Key) bool {
 // they have previously been set through SetSessionData().
 func (p *planner) QueryRowEx(
 	ctx context.Context,
-	opName string,
+	opName redact.RedactableString,
 	override sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
@@ -825,7 +837,7 @@ func (p *planner) QueryRowEx(
 // fields (e.g. the user).
 func (p *planner) ExecEx(
 	ctx context.Context,
-	opName string,
+	opName redact.RedactableString,
 	override sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
@@ -841,7 +853,7 @@ func (p *planner) ExecEx(
 // have previously been set through SetSessionData().
 func (p *planner) QueryIteratorEx(
 	ctx context.Context,
-	opName string,
+	opName redact.RedactableString,
 	override sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
@@ -855,7 +867,7 @@ func (p *planner) QueryIteratorEx(
 // have previously been set through SetSessionData().
 func (p *planner) QueryBufferedEx(
 	ctx context.Context,
-	opName string,
+	opName redact.RedactableString,
 	session sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
@@ -867,7 +879,7 @@ func (p *planner) QueryBufferedEx(
 // ResultColumns of the input query.
 func (p *planner) QueryRowExWithCols(
 	ctx context.Context,
-	opName string,
+	opName redact.RedactableString,
 	session sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
@@ -879,7 +891,7 @@ func (p *planner) QueryRowExWithCols(
 // computed ResultColumns of the input query.
 func (p *planner) QueryBufferedExWithCols(
 	ctx context.Context,
-	opName string,
+	opName redact.RedactableString,
 	session sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
@@ -992,6 +1004,20 @@ func (p *planner) AutoCommit() bool {
 	return p.autoCommit
 }
 
+// ClearQueryPlanCache is part of the eval.Planner interface.
+func (p *planner) ClearQueryPlanCache() {
+	if p.execCfg.QueryCache != nil {
+		p.execCfg.QueryCache.Clear()
+	}
+}
+
+// ClearTableStatsCache is part of the eval.Planner interface.
+func (p *planner) ClearTableStatsCache() {
+	if p.execCfg.TableStatsCache != nil {
+		p.execCfg.TableStatsCache.Clear()
+	}
+}
+
 // mustUseLeafTxn returns true if inner plans must use a leaf transaction.
 func (p *planner) mustUseLeafTxn() bool {
 	return atomic.LoadInt32(&p.atomic.innerPlansMustUseLeafTxn) >= 1
@@ -1000,10 +1026,6 @@ func (p *planner) mustUseLeafTxn() bool {
 func (p *planner) StartHistoryRetentionJob(
 	ctx context.Context, desc string, protectTS hlc.Timestamp, expiration time.Duration,
 ) (jobspb.JobID, error) {
-	if !p.ExecCfg().Settings.Version.IsActive(ctx, clusterversion.V24_1) {
-		return 0, pgerror.New(pgcode.FeatureNotSupported,
-			"history retention job not supported before V24.1")
-	}
 	return StartHistoryRetentionJob(ctx, p.EvalContext(), p.InternalSQLTxn(), desc, protectTS, expiration)
 }
 

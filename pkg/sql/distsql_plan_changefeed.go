@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -117,12 +112,14 @@ func PlanCDCExpression(
 		return cdcPlan, err
 	}
 	if log.V(2) {
-		log.Infof(ctx, "Optimized CDC expression: %s", memo.RootExpr().String())
+		log.Infof(ctx, "Optimized CDC expression: %s", memo)
 	}
 
 	const allowAutoCommit = false
+	const disableTelemetryAndPlanGists = false
 	if err := opc.runExecBuilder(
-		ctx, &p.curPlan, &p.stmt, newExecFactory(ctx, p), memo, p.SemaCtx(), p.EvalContext(), allowAutoCommit,
+		ctx, &p.curPlan, &p.stmt, newExecFactory(ctx, p), memo, p.SemaCtx(),
+		p.EvalContext(), allowAutoCommit, disableTelemetryAndPlanGists,
 	); err != nil {
 		return cdcPlan, err
 	}
@@ -170,7 +167,8 @@ func PlanCDCExpression(
 		return cdcPlan, errors.AssertionFailedf("unable to determine result columns")
 	}
 
-	if len(p.curPlan.subqueryPlans) > 0 || len(p.curPlan.cascades) > 0 || len(p.curPlan.checkPlans) > 0 {
+	if len(p.curPlan.subqueryPlans) > 0 || len(p.curPlan.cascades) > 0 ||
+		len(p.curPlan.checkPlans) > 0 || len(p.curPlan.triggers) > 0 {
 		return cdcPlan, errors.AssertionFailedf("unexpected query structure")
 	}
 
@@ -269,6 +267,7 @@ func (p CDCExpressionPlan) CollectPlanColumns(collector func(column colinfo.Resu
 // datums must match the number of inputs (and types) expected by this flow
 // (verified below).
 type cdcValuesNode struct {
+	zeroInputPlanNode
 	source        execinfra.RowSource
 	datumRow      []tree.Datum
 	colOrd        []int
@@ -456,8 +455,9 @@ func newFamilyTableDescriptor(
 	}
 
 	// Add system columns -- those are always available.
-	includeSet.Add(colinfo.MVCCTimestampColumnID)
-	includeSet.Add(colinfo.TableOIDColumnID)
+	for _, col := range colinfo.AllSystemColumnDescs {
+		includeSet.Add(col.ID)
+	}
 
 	return &familyTableDescriptor{
 		TableDescriptor: original,

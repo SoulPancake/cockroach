@@ -1,13 +1,9 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { InlineAlert } from "@cockroachlabs/ui-components";
 import {
   Checkbox,
   Divider,
@@ -19,17 +15,16 @@ import {
   Row,
   Col,
 } from "antd";
-import React, { useCallback, useImperativeHandle, useState } from "react";
 import classNames from "classnames/bind";
-import { InlineAlert } from "@cockroachlabs/ui-components";
+import React, { useCallback, useImperativeHandle, useState } from "react";
 
-import { Modal } from "src/modal";
 import { Anchor } from "src/anchor";
+import { Modal } from "src/modal";
 import { Text, TextTypes } from "src/text";
 import { statementDiagnostics, statementsSql } from "src/util";
 
-import { InsertStmtDiagnosticRequest } from "../api";
 import { crlTheme } from "../antdTheme";
+import { InsertStmtDiagnosticRequest } from "../api";
 
 import styles from "./activateStatementDiagnosticsModal.module.scss";
 
@@ -60,6 +55,7 @@ export const ActivateStatementDiagnosticsModal = React.forwardRef<
   const [minExecLatencyUnit, setMinExecLatencyUnit] = useState("milliseconds");
   const [expiresAfter, setExpiresAfter] = useState(15);
   const [traceSampleRate, setTraceSampleRate] = useState(0.01);
+  const [redacted, setRedacted] = useState(false);
 
   const handleSelectChange = (value: string) => {
     setMinExecLatencyUnit(value);
@@ -100,6 +96,7 @@ export const ActivateStatementDiagnosticsModal = React.forwardRef<
       ),
       expiresAfterSeconds: getExpiresAfter(expires, expiresAfter),
       samplingProbability: getTraceSampleRate(conditional, traceSampleRate),
+      redacted: redacted,
     });
     setVisible(false);
   }, [
@@ -113,6 +110,7 @@ export const ActivateStatementDiagnosticsModal = React.forwardRef<
     traceSampleRate,
     filterPerPlanGist,
     selectedPlanGist,
+    redacted,
   ]);
 
   const onCancelHandler = useCallback(() => setVisible(false), []);
@@ -318,6 +316,10 @@ export const ActivateStatementDiagnosticsModal = React.forwardRef<
               />
             </div>
           )}
+          <Divider type="horizontal" />
+          <Checkbox checked={redacted} onChange={() => setRedacted(!redacted)}>
+            <Text>Redact</Text>
+          </Checkbox>
         </Space>
       </ConfigProvider>
     </Modal>

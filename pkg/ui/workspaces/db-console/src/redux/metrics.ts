@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 /**
  * This module maintains the state of CockroachDB time series queries needed by
@@ -15,17 +10,17 @@
  * in the reducer by a unique ID.
  */
 
-import { Action } from "redux";
-import { delay, take, fork, call, all, put } from "redux-saga/effects";
+import { util } from "@cockroachlabs/cluster-ui";
 import clone from "lodash/clone";
+import flatMap from "lodash/flatMap";
 import groupBy from "lodash/groupBy";
 import map from "lodash/map";
-import flatMap from "lodash/flatMap";
-import { util } from "@cockroachlabs/cluster-ui";
+import { Action } from "redux";
+import { delay, take, fork, call, all, put } from "redux-saga/effects";
 
-import { queryTimeSeries } from "src/util/api";
 import { PayloadAction } from "src/interfaces/action";
 import * as protos from "src/js/protos";
+import { queryTimeSeries } from "src/util/api";
 
 type TSRequest = protos.cockroach.ts.tspb.TimeSeriesQueryRequest;
 type TSResponse = protos.cockroach.ts.tspb.TimeSeriesQueryResponse;

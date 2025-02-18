@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package concurrency
 
@@ -623,7 +618,17 @@ func TestLockTableBasic(t *testing.T) {
 			case "clear":
 				lt.Clear(d.HasArg("disable"))
 				return lt.String()
-
+			case "clear-ge":
+				var endKeyStr string
+				d.ScanArgs(t, "key", &endKeyStr)
+				locks := lt.ClearGE(roachpb.Key(endKeyStr))
+				var buf strings.Builder
+				fmt.Fprintf(&buf, "num returned for re-acquisition: %d", len(locks))
+				for _, l := range locks {
+					fmt.Fprintf(&buf, "\n span: %s, txn: %s epo: %d, dur: %s, str: %s",
+						l.Span, l.Txn.ID, l.Txn.Epoch, l.Durability, l.Strength)
+				}
+				return buf.String()
 			case "print":
 				return lt.String()
 

@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowenc_test
 
@@ -221,7 +216,7 @@ func TestEncDatumCompare(t *testing.T) {
 	for _, typ := range types.OidToType {
 		switch typ.Family() {
 		case types.AnyFamily, types.UnknownFamily, types.ArrayFamily, types.JsonFamily, types.TupleFamily, types.VoidFamily,
-			types.TSQueryFamily, types.TSVectorFamily, types.PGVectorFamily:
+			types.TSQueryFamily, types.TSVectorFamily, types.PGVectorFamily, types.TriggerFamily:
 			continue
 		case types.CollatedStringFamily:
 			typ = types.MakeCollatedString(types.String, *randgen.RandCollationLocale(rng))
@@ -548,7 +543,7 @@ func TestValueEncodeDecodeTuple(t *testing.T) {
 		switch typedTest := test.(type) {
 		case *tree.DTuple:
 
-			buf, err := valueside.Encode(nil, valueside.NoColumnID, typedTest, nil)
+			buf, err := valueside.Encode(nil, valueside.NoColumnID, typedTest)
 			if err != nil {
 				t.Fatalf("seed %d: encoding tuple %v with types %v failed with error: %v",
 					seed, test, colTypes[i], err)

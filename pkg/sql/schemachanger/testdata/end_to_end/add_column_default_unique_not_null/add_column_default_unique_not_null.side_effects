@@ -72,6 +72,7 @@ upsert descriptor #106
   +      sharded: {}
   +      storeColumnNames: []
   +      unique: true
+  +      vecConfig: {}
   +      version: 4
   +    mutationId: 1
   +    state: BACKFILLING
@@ -97,6 +98,7 @@ upsert descriptor #106
   +      storeColumnNames: []
   +      unique: true
   +      useDeletePreservingEncoding: true
+  +      vecConfig: {}
   +      version: 4
   +    mutationId: 1
   +    state: DELETE_ONLY
@@ -118,7 +120,7 @@ upsert descriptor #106
   +    storeColumnNames:
   +    - j
        unique: true
-       version: 4
+       vecConfig: {}
   ...
        time: {}
      unexposedParentSchemaId: 105
@@ -143,6 +145,8 @@ upsert descriptor #106
   +      columns:
   +        "1": i
   +        "2": j
+  +        "4294967292": crdb_internal_origin_timestamp
+  +        "4294967293": crdb_internal_origin_id
   +        "4294967294": tableoid
   +        "4294967295": crdb_internal_mvcc_timestamp
   +      families:
@@ -206,6 +210,7 @@ upsert descriptor #106
   +      sharded: {}
   +      storeColumnNames: []
   +      unique: true
+  +      vecConfig: {}
   +      version: 4
   +    mutationId: 1
   +    state: BACKFILLING
@@ -231,6 +236,7 @@ upsert descriptor #106
   +      storeColumnNames: []
   +      unique: true
   +      useDeletePreservingEncoding: true
+  +      vecConfig: {}
   +      version: 4
   +    mutationId: 1
   +    state: DELETE_ONLY
@@ -252,7 +258,7 @@ upsert descriptor #106
   +    storeColumnNames:
   +    - j
        unique: true
-       version: 4
+       vecConfig: {}
   ...
        time: {}
      unexposedParentSchemaId: 105
@@ -458,6 +464,8 @@ upsert descriptor #106
   -      columns:
   -        "1": i
   -        "2": j
+  -        "4294967292": crdb_internal_origin_timestamp
+  -        "4294967293": crdb_internal_origin_id
   -        "4294967294": tableoid
   -        "4294967295": crdb_internal_mvcc_timestamp
   -      families:
@@ -501,6 +509,7 @@ upsert descriptor #106
   +    sharded: {}
   +    storeColumnNames: []
   +    unique: true
+  +    vecConfig: {}
   +    version: 4
      modificationTime: {}
   -  mutations:
@@ -536,6 +545,7 @@ upsert descriptor #106
   -      sharded: {}
   -      storeColumnNames: []
   -      unique: true
+  -      vecConfig: {}
   -      version: 4
   -    mutationId: 1
   -    state: WRITE_ONLY
@@ -561,6 +571,7 @@ upsert descriptor #106
   -      storeColumnNames: []
   -      unique: true
   -      useDeletePreservingEncoding: true
+  -      vecConfig: {}
   -      version: 4
   -    mutationId: 1
   -    state: DELETE_ONLY

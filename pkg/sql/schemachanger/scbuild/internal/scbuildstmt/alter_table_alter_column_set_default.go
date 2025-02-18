@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scbuildstmt
 
@@ -26,12 +21,23 @@ import (
 )
 
 func alterTableSetDefault(
-	b BuildCtx, tn *tree.TableName, tbl *scpb.Table, t *tree.AlterTableSetDefault,
+	b BuildCtx,
+	tn *tree.TableName,
+	tbl *scpb.Table,
+	stmt tree.Statement,
+	t *tree.AlterTableSetDefault,
 ) {
 	alterColumnPreChecks(b, tn, tbl, t.Column)
 	colID := getColumnIDFromColumnName(b, tbl.TableID, t.Column, true /* required */)
 	col := mustRetrieveColumnElem(b, tbl.TableID, colID)
 	oldDefaultExpr := retrieveColumnDefaultExpressionElem(b, tbl.TableID, colID)
+	colType := mustRetrieveColumnTypeElem(b, tbl.TableID, colID)
+
+	// Block alters on system columns.
+	panicIfSystemColumn(col, t.Column.String())
+
+	// Block disallowed operations on computed columns.
+	panicIfComputedColumn(b, tn.ObjectName, colType, t.Column.String(), t.Default)
 
 	// For DROP DEFAULT.
 	if t.Default == nil {
@@ -40,9 +46,6 @@ func alterTableSetDefault(
 		}
 		return
 	}
-
-	// Block alters on system columns.
-	panicIfSystemColumn(col, t.Column.String())
 
 	// If our target column already has a default expression, we want to drop it first.
 	if oldDefaultExpr != nil {
@@ -141,4 +144,26 @@ func sanitizeColumnExpression(
 
 	s := tree.Serialize(typedExpr)
 	return typedExpr, s, nil
+}
+
+// panicIfComputedColumn blocks disallowed operations on computed columns.
+func panicIfComputedColumn(
+	b BuildCtx, tn tree.Name, col *scpb.ColumnType, colName string, def tree.Expr,
+) {
+	computeExpr := retrieveColumnComputeExpression(b, col.TableID, col.ColumnID)
+	// Block setting a column default if the column is computed.
+	if computeExpr != nil {
+		// Block dropping a computed col "default" as well.
+		if def == nil {
+			panic(pgerror.Newf(
+				pgcode.Syntax,
+				"column %q of relation %q is a computed column",
+				colName,
+				tn))
+		}
+		panic(pgerror.Newf(
+			pgcode.Syntax,
+			"computed column %q cannot also have a DEFAULT expression",
+			colName))
+	}
 }

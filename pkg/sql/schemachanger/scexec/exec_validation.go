@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scexec
 
@@ -14,9 +9,9 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/idxtype"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/errors"
 )
@@ -39,10 +34,16 @@ func executeValidateUniqueIndex(
 	}
 	// Execute the validation operation as a node user.
 	execOverride := sessiondata.NodeUserSessionDataOverride
-	if index.GetType() == descpb.IndexDescriptor_FORWARD {
+	switch index.GetType() {
+	case idxtype.FORWARD:
 		err = deps.Validator().ValidateForwardIndexes(ctx, deps.TransactionalJobRegistry().CurrentJob(), table, []catalog.Index{index}, execOverride)
-	} else {
+	case idxtype.INVERTED:
 		err = deps.Validator().ValidateInvertedIndexes(ctx, deps.TransactionalJobRegistry().CurrentJob(), table, []catalog.Index{index}, execOverride)
+	case idxtype.VECTOR:
+		// TODO(drewk): consider whether we can perform useful validation for
+		// vector indexes.
+	default:
+		return errors.AssertionFailedf("unexpected index type %v", index.GetType())
 	}
 	if err != nil {
 		return scerrors.SchemaChangerUserError(err)

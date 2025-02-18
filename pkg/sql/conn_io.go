@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -28,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/ring"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/crlib/crtime"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
 )
@@ -139,11 +135,11 @@ type ExecStmt struct {
 
 	// TimeReceived is the time at which the exec message was received
 	// from the client. Used to compute the service latency.
-	TimeReceived time.Time
+	TimeReceived crtime.Mono
 	// ParseStart/ParseEnd are the timing info for parsing of the query. Used for
 	// stats reporting.
-	ParseStart time.Time
-	ParseEnd   time.Time
+	ParseStart crtime.Mono
+	ParseEnd   crtime.Mono
 
 	// LastInBatch indicates if this command contains the last query in a
 	// simple protocol Query message that contains a batch of 1 or more queries.
@@ -186,7 +182,7 @@ type ExecPortal struct {
 	Limit int
 	// TimeReceived is the time at which the exec message was received
 	// from the client. Used to compute the service latency.
-	TimeReceived time.Time
+	TimeReceived crtime.Mono
 	// FollowedBySync is true if the next command after this is a Sync. This is
 	// used to enable the 1PC txn fast path in the extended protocol.
 	FollowedBySync bool
@@ -218,8 +214,8 @@ type PrepareStmt struct {
 	// RawTypeHints is the representation of type hints exactly as specified by
 	// the client.
 	RawTypeHints []oid.Oid
-	ParseStart   time.Time
-	ParseEnd     time.Time
+	ParseStart   crtime.Mono
+	ParseEnd     crtime.Mono
 }
 
 // command implements the Command interface.
@@ -382,11 +378,11 @@ type CopyIn struct {
 	}
 	// TimeReceived is the time at which the message was received
 	// from the client. Used to compute the service latency.
-	TimeReceived time.Time
+	TimeReceived crtime.Mono
 	// ParseStart/ParseEnd are the timing info for parsing of the query. Used for
 	// stats reporting.
-	ParseStart time.Time
-	ParseEnd   time.Time
+	ParseStart crtime.Mono
+	ParseEnd   crtime.Mono
 }
 
 // command implements the Command interface.
@@ -411,11 +407,11 @@ type CopyOut struct {
 	Stmt       *tree.CopyTo
 	// TimeReceived is the time at which the message was received
 	// from the client. Used to compute the service latency.
-	TimeReceived time.Time
+	TimeReceived crtime.Mono
 	// ParseStart/ParseEnd are the timing info for parsing of the query. Used for
 	// stats reporting.
-	ParseStart time.Time
-	ParseEnd   time.Time
+	ParseStart crtime.Mono
+	ParseEnd   crtime.Mono
 }
 
 // command implements the Command interface.
@@ -842,8 +838,9 @@ type RestrictedCommandResult interface {
 	// This gets flushed only when the CommandResult is closed.
 	BufferNotice(notice pgnotice.Notice)
 
-	// SendNotice immediately flushes a notice to the client.
-	SendNotice(ctx context.Context, notice pgnotice.Notice) error
+	// SendNotice sends a notice to the client, which can optionally be flushed
+	// immediately.
+	SendNotice(ctx context.Context, notice pgnotice.Notice, immediateFlush bool) error
 
 	// SetColumns informs the client about the schema of the result. The columns
 	// can be nil.
@@ -1118,7 +1115,9 @@ func (r *streamingCommandResult) BufferNotice(notice pgnotice.Notice) {
 }
 
 // SendNotice is part of the RestrictedCommandResult interface.
-func (r *streamingCommandResult) SendNotice(ctx context.Context, notice pgnotice.Notice) error {
+func (r *streamingCommandResult) SendNotice(
+	ctx context.Context, notice pgnotice.Notice, immediateFlush bool,
+) error {
 	// Unimplemented: the internal executor does not support notices.
 	return nil
 }

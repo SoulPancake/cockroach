@@ -1,12 +1,7 @@
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tree
 
@@ -17,10 +12,11 @@ import (
 )
 
 type CreateLogicalReplicationStream struct {
-	PGURL   Expr
-	From    LogicalReplicationResources
-	Into    LogicalReplicationResources
-	Options LogicalReplicationOptions
+	PGURL       Expr
+	From        LogicalReplicationResources
+	Into        LogicalReplicationResources
+	CreateTable bool
+	Options     LogicalReplicationOptions
 }
 
 type LogicalReplicationResources struct {
@@ -30,10 +26,16 @@ type LogicalReplicationResources struct {
 
 type LogicalReplicationOptions struct {
 	// Mapping of table name to UDF name
-	UserFunctions   map[*UnresolvedName]RoutineName
-	Cursor          Expr
-	Mode            Expr
-	DefaultFunction Expr
+	UserFunctions    map[UnresolvedName]RoutineName
+	Cursor           Expr
+	MetricsLabel     Expr
+	Mode             Expr
+	DefaultFunction  Expr
+	Discard          Expr
+	SkipSchemaCheck  *DBool
+	Unidirectional   *DBool
+	BidirectionalURI Expr
+	ParentID         Expr
 }
 
 var _ Statement = &CreateLogicalReplicationStream{}
@@ -41,12 +43,21 @@ var _ NodeFormatter = &LogicalReplicationOptions{}
 
 // Format implements the NodeFormatter interface.
 func (node *CreateLogicalReplicationStream) Format(ctx *FmtCtx) {
-	ctx.WriteString("CREATE LOGICAL REPLICATION STREAM FROM ")
-	ctx.FormatNode(&node.From)
-	ctx.WriteString(" ON ")
-	ctx.FormatNode(node.PGURL)
-	ctx.WriteString(" INTO ")
-	ctx.FormatNode(&node.Into)
+	if node.CreateTable {
+		ctx.WriteString("CREATE LOGICALLY REPLICATED ")
+		ctx.FormatNode(&node.Into)
+		ctx.WriteString(" FROM ")
+		ctx.FormatNode(&node.From)
+		ctx.WriteString(" ON ")
+		ctx.FormatNode(node.PGURL)
+	} else {
+		ctx.WriteString("CREATE LOGICAL REPLICATION STREAM FROM ")
+		ctx.FormatNode(&node.From)
+		ctx.WriteString(" ON ")
+		ctx.FormatNode(node.PGURL)
+		ctx.WriteString(" INTO ")
+		ctx.FormatNode(&node.Into)
+	}
 
 	if !node.Options.IsDefault() {
 		ctx.WriteString(" WITH OPTIONS (")
@@ -107,7 +118,7 @@ func (lro *LogicalReplicationOptions) Format(ctx *FmtCtx) {
 
 		// In order to make tests deterministic, the ordering of map keys
 		// needs to be the same each time.
-		keys := make([]*UnresolvedName, 0, len(lro.UserFunctions))
+		keys := make([]UnresolvedName, 0, len(lro.UserFunctions))
 		for k := range lro.UserFunctions {
 			keys = append(keys, k)
 		}
@@ -121,9 +132,41 @@ func (lro *LogicalReplicationOptions) Format(ctx *FmtCtx) {
 			r := lro.UserFunctions[k]
 			ctx.FormatNode(&r)
 			ctx.WriteString(" FOR TABLE ")
-			ctx.FormatNode(k)
+			ctx.FormatNode(&k)
 		}
 	}
+	if lro.Discard != nil {
+		maybeAddSep()
+		ctx.WriteString("DISCARD = ")
+		ctx.FormatNode(lro.Discard)
+	}
+
+	if lro.SkipSchemaCheck != nil && *lro.SkipSchemaCheck {
+		maybeAddSep()
+		ctx.WriteString("SKIP SCHEMA CHECK")
+	}
+
+	if lro.MetricsLabel != nil {
+		maybeAddSep()
+		ctx.WriteString("LABEL = ")
+		ctx.FormatNode(lro.MetricsLabel)
+	}
+
+	if lro.Unidirectional != nil {
+		maybeAddSep()
+		ctx.WriteString("UNIDIRECTIONAL")
+	}
+	if lro.BidirectionalURI != nil {
+		maybeAddSep()
+		ctx.WriteString("BIDIRECTIONAL ON ")
+		ctx.FormatNode(lro.BidirectionalURI)
+	}
+	if lro.ParentID != nil {
+		maybeAddSep()
+		ctx.WriteString("PARENT = ")
+		ctx.FormatNode(lro.ParentID)
+	}
+
 }
 
 func (o *LogicalReplicationOptions) CombineWith(other *LogicalReplicationOptions) error {
@@ -154,13 +197,58 @@ func (o *LogicalReplicationOptions) CombineWith(other *LogicalReplicationOptions
 	if other.UserFunctions != nil {
 		for tbl := range other.UserFunctions {
 			if _, ok := o.UserFunctions[tbl]; ok {
-				return errors.Newf("multiple user functions specified for table %q", tbl)
+				return errors.Newf("multiple user functions specified for table %s", tbl.String())
 			}
 			if o.UserFunctions == nil {
-				o.UserFunctions = make(map[*UnresolvedName]RoutineName)
+				o.UserFunctions = make(map[UnresolvedName]RoutineName)
 			}
 			o.UserFunctions[tbl] = other.UserFunctions[tbl]
 		}
+	}
+
+	if o.Discard != nil {
+		if other.Discard != nil {
+			return errors.New("DISCARD option specified multiple times")
+		}
+	} else {
+		o.Discard = other.Discard
+	}
+	if o.SkipSchemaCheck != nil {
+		if other.SkipSchemaCheck != nil {
+			return errors.New("SKIP SCHEMA CHECK option specified multiple times")
+		}
+	} else {
+		o.SkipSchemaCheck = other.SkipSchemaCheck
+	}
+
+	if o.MetricsLabel != nil {
+		if other.MetricsLabel != nil {
+			return errors.New("LABEL option specified multiple times")
+		}
+	} else {
+		o.MetricsLabel = other.MetricsLabel
+	}
+
+	if o.Unidirectional != nil {
+		if other.Unidirectional != nil {
+			return errors.New("UNIDIRECTIONAL option specified multiple times")
+		}
+	} else {
+		o.Unidirectional = other.Unidirectional
+	}
+	if o.BidirectionalURI != nil {
+		if other.BidirectionalURI != nil {
+			return errors.New("BIDIRECTIONAL option specified multiple times")
+		}
+	} else {
+		o.BidirectionalURI = other.BidirectionalURI
+	}
+	if o.ParentID != nil {
+		if other.ParentID != nil {
+			return errors.New("PARENT option specified multiple times")
+		}
+	} else {
+		o.ParentID = other.ParentID
 	}
 
 	return nil
@@ -172,5 +260,11 @@ func (o LogicalReplicationOptions) IsDefault() bool {
 	return o.Cursor == options.Cursor &&
 		o.Mode == options.Mode &&
 		o.DefaultFunction == options.DefaultFunction &&
-		o.UserFunctions == nil
+		o.UserFunctions == nil &&
+		o.Discard == options.Discard &&
+		o.SkipSchemaCheck == options.SkipSchemaCheck &&
+		o.MetricsLabel == options.MetricsLabel &&
+		o.Unidirectional == options.Unidirectional &&
+		o.BidirectionalURI == options.BidirectionalURI &&
+		o.ParentID == options.ParentID
 }

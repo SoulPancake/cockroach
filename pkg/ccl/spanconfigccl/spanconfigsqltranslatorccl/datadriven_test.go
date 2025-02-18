@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package spanconfigsqltranslatorccl
 
@@ -157,6 +154,7 @@ func TestDataDriven(t *testing.T) {
 			tenant = spanConfigTestCluster.InitializeTenant(ctx, roachpb.SystemTenantID)
 		}
 		execCfg := tenant.ExecCfg()
+		tenant.Exec("SET autocommit_before_ddl = false")
 
 		var f func(t *testing.T, d *datadriven.TestData) string
 		f = func(t *testing.T, d *datadriven.TestData) string {

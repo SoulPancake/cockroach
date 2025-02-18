@@ -1,79 +1,77 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
+import { Caution, Search as IndexIcon } from "@cockroachlabs/icons";
+import { Heading, Icon } from "@cockroachlabs/ui-components";
+import { Col, Row, Tooltip } from "antd";
 import classNames from "classnames/bind";
 import flatMap from "lodash/flatMap";
-import { Caution, Search as IndexIcon } from "@cockroachlabs/icons";
 import moment, { Moment } from "moment-timezone";
-import { Heading } from "@cockroachlabs/ui-components";
-import { Col, Row, Tooltip } from "antd";
+import React from "react";
 
 import { Loading } from "src/loading";
-import { Timestamp } from "src/timestamp";
+import { PageConfig, PageConfigItem } from "src/pageConfig";
 import {
   ISortedTablePagination,
   SortedTable,
   SortSetting,
 } from "src/sortedtable";
-import { baseHeadingClasses } from "src/transactionsPage/transactionsPageClasses";
 import { SqlBox, SqlBoxSize } from "src/sql";
-import { PageConfig, PageConfigItem } from "src/pageConfig";
+import { Timestamp } from "src/timestamp";
+import { baseHeadingClasses } from "src/transactionsPage/transactionsPageClasses";
 import { INTERNAL_APP_NAME_PREFIX } from "src/util/constants";
 
-import { CaretRight } from "../icon/caretRight";
-import { BreadcrumbItem, Breadcrumbs } from "../breadcrumbs";
-import { SummaryCard } from "../summaryCard";
 import { Anchor } from "../anchor";
-import {
-  calculateTotalWorkload,
-  Count,
-  DATE_FORMAT_24_TZ,
-  EncodeDatabaseTableIndexUri,
-  EncodeDatabaseTableUri,
-  EncodeDatabaseUri,
-  performanceTuningRecipes,
-  unique,
-  unset,
-} from "../util";
 import {
   getStatementsUsingIndex,
   StatementsListRequestFromDetails,
   StatementsUsingIndexRequest,
 } from "../api/indexDetailsApi";
-import {
-  AggregateStatistics,
-  makeStatementsColumns,
-  populateRegionNodeForStatements,
-} from "../statementsTable";
-import { UIConfigState } from "../store";
-import statementsStyles from "../statementsPage/statementsPage.module.scss";
+import { commonStyles } from "../common";
+import { CockroachCloudContext } from "../contexts";
 import { Pagination } from "../pagination";
-import { TableStatistics } from "../tableStatistics";
-import LoadingError from "../sqlActivity/errorComponent";
-import { filterStatementsData } from "../sqlActivity/util";
-import {
-  TimeScale,
-  timeScale1hMinOptions,
-  TimeScaleDropdown,
-} from "../timeScaleDropdown";
-import { Search } from "../search";
 import {
   calculateActiveFilters,
   defaultFilters,
   Filter,
   Filters,
 } from "../queryFilter";
-import { commonStyles } from "../common";
+import { Search } from "../search";
+import Breadcrumbs from "../sharedFromCloud/breadcrumbs";
+import LoadingError from "../sqlActivity/errorComponent";
+import { filterStatementsData } from "../sqlActivity/util";
 import { EmptyStatementsPlaceholder } from "../statementsPage/emptyStatementsPlaceholder";
 import { StatementViewType } from "../statementsPage/statementPageTypes";
+import statementsStyles from "../statementsPage/statementsPage.module.scss";
+import {
+  AggregateStatistics,
+  makeStatementsColumns,
+  populateRegionNodeForStatements,
+} from "../statementsTable";
+import { UIConfigState } from "../store";
+import { SummaryCard } from "../summaryCard";
+import { TableStatistics } from "../tableStatistics";
+import {
+  TimeScale,
+  timeScale1hMinOptions,
+  TimeScaleDropdown,
+} from "../timeScaleDropdown";
+import {
+  calculateTotalWorkload,
+  Count,
+  DATE_FORMAT_24_TZ,
+  EncodeDatabaseTableIndexUri,
+  performanceTuningRecipes,
+  unique,
+  unset,
+} from "../util";
+import {
+  databaseDetailsPagePath,
+  DB_PAGE_PATH,
+  tableDetailsPagePath,
+} from "../util/routes";
 
 import styles from "./indexDetailsPage.module.scss";
 
@@ -109,7 +107,6 @@ export interface IndexDetailsPageData {
   tableName: string;
   indexName: string;
   details: IndexDetails;
-  breadcrumbItems: BreadcrumbItem[];
   isTenant: UIConfigState["isTenant"];
   hasViewActivityRedactedRole?: UIConfigState["hasViewActivityRedactedRole"];
   hasAdminRole?: UIConfigState["hasAdminRole"];
@@ -127,6 +124,7 @@ interface IndexDetails {
   lastRead: Moment;
   lastReset: Moment;
   indexRecommendations: IndexRecommendation[];
+  databaseID: number;
 }
 
 export type RecommendationType = "DROP_UNUSED" | "Unknown";
@@ -162,6 +160,8 @@ export class IndexDetailsPage extends React.Component<
   IndexDetailsPageProps,
   IndexDetailsPageState
 > {
+  static contextType = CockroachCloudContext;
+
   refreshDataInterval: NodeJS.Timeout;
   constructor(props: IndexDetailsPageProps) {
     super(props);
@@ -377,27 +377,18 @@ export class IndexDetailsPage extends React.Component<
   }
 
   private renderBreadcrumbs() {
-    if (this.props.breadcrumbItems) {
-      return (
-        <Breadcrumbs
-          items={this.props.breadcrumbItems}
-          divider={<CaretRight className={cx("icon--xxs", "icon--primary")} />}
-        />
-      );
-    }
     // If no props are passed, render db-console breadcrumb links by default.
     return (
       <Breadcrumbs
         items={[
-          { link: "/databases", name: "Databases" },
+          { link: DB_PAGE_PATH, name: "Databases" },
           {
-            link: EncodeDatabaseUri(this.props.databaseName),
-            name: "Tables",
+            link: databaseDetailsPagePath(this.props.details.databaseID),
+            name: this.props.databaseName,
           },
           {
-            link: EncodeDatabaseTableUri(
-              this.props.databaseName,
-              this.props.tableName,
+            link: tableDetailsPagePath(
+              parseInt(this.props.details.tableID, 10),
             ),
             name: `Table: ${this.props.tableName}`,
           },
@@ -410,7 +401,8 @@ export class IndexDetailsPage extends React.Component<
             name: `Index: ${this.props.indexName}`,
           },
         ]}
-        divider={<CaretRight className={cx("icon--xxs", "icon--primary")} />}
+        divider={<Icon iconName="CaretRight" size="tiny" />}
+        className={cx("header-breadcrumbs")}
       />
     );
   }

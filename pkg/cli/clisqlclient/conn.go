@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package clisqlclient
 
@@ -28,8 +23,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/util/version"
 	"github.com/cockroachdb/errors"
-	"github.com/jackc/pgconn"
-	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/otan/gopgkrb5"
 )
 
@@ -664,7 +659,7 @@ func (c *sqlConn) Query(ctx context.Context, query string, args ...interface{}) 
 		if err != nil {
 			return nil, err
 		}
-		return &sqlRows{rows: rows, connInfo: c.conn.ConnInfo(), conn: c}, nil
+		return &sqlRows{rows: rows, typeMap: c.conn.TypeMap(), conn: c}, nil
 	}
 
 	// Otherwise, we use pgconn. This allows us to add support for multiple
@@ -676,9 +671,9 @@ func (c *sqlConn) Query(ctx context.Context, query string, args ...interface{}) 
 		return nil, MarkWithConnectionClosed(multiResultReader.Close())
 	}
 	rs := &sqlRowsMultiResultSet{
-		rows:     multiResultReader,
-		connInfo: c.conn.ConnInfo(),
-		conn:     c,
+		rows:    multiResultReader,
+		typeMap: c.conn.TypeMap(),
+		conn:    c,
 	}
 	if _, err := rs.NextResultSet(); err != nil {
 		return nil, err

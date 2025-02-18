@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 // This file provides generic interfaces that allow tests to set up test tenants
 // without importing the server package (avoiding circular dependencies). This
@@ -79,10 +74,10 @@ type TestServerInterface interface {
 	// the .TenantController() method.
 	TenantControlInterface
 
-	// ApplicationLayer returns the interface to the application layer that is
-	// exercised by the test. Depending on how the test server is started
-	// and (optionally) randomization, this can be either the SQL layer
-	// of a virtual cluster or that of the system interface.
+	// ApplicationLayer returns the interface to the application layer used
+	// in testing. If the server starts with tenancy enabled under the default
+	// tenant option, this refers to the SQL layer of the virtual cluster.
+	// Otherwise, in single-tenant mode, it refers to the system layer.
 	ApplicationLayer() ApplicationLayerInterface
 
 	// SystemLayer returns the interface to the application layer
@@ -134,6 +129,17 @@ type TestServerController interface {
 	// or config profile.
 	RunInitialSQL(ctx context.Context, startSingleNode bool, adminUser, adminPassword string) error
 }
+
+// DeploymentMode defines the mode of the underlying test server or tenant,
+// which can be single-tenant (system-only), shared-process, or
+// external-process.
+type DeploymentMode uint8
+
+const (
+	SingleTenant DeploymentMode = iota
+	SharedProcess
+	ExternalProcess
+)
 
 // ApplicationLayerInterface defines accessors to the application
 // layer of a test server. Tests written against this interface are
@@ -326,6 +332,9 @@ type ApplicationLayerInterface interface {
 	// TestingKnobs returns the TestingKnobs in use by the test server.
 	TestingKnobs() *base.TestingKnobs
 
+	// ExternalIODir returns ExternalIODir form the server config.
+	ExternalIODir() string
+
 	// SQLServerInternal returns the *server.SQLServer as an interface{}
 	// Note: most tests should use SQLServer() and InternalExecutor() instead.
 	SQLServerInternal() interface{}
@@ -445,7 +454,7 @@ type ApplicationLayerInterface interface {
 	PrivilegeChecker() interface{}
 
 	// NodeDescStoreI returns the node descriptor lookup interface.
-	// The concrete return type is compatible with interface kvcoord.NodeDescStore.
+	// The concrete return type is compatible with interface kvclient.NodeDescStore.
 	NodeDescStoreI() interface{}
 
 	// Locality returns the locality used by the server.
@@ -453,6 +462,11 @@ type ApplicationLayerInterface interface {
 
 	// DistSQLPlanningNodeID returns the NodeID to use by the DistSQL span resolver.
 	DistSQLPlanningNodeID() roachpb.NodeID
+
+	// DeploymentMode returns the deployment mode of the underlying server or
+	// tenant, which can be single-tenant (system-only), shared-process, or
+	// external-process.
+	DeploymentMode() DeploymentMode
 }
 
 // TenantControlInterface defines the API of a test server that can
@@ -641,6 +655,10 @@ type StorageLayerInterface interface {
 	// RaftTransport returns access to the raft transport.
 	// The return value is of type *kvserver.RaftTransport.
 	RaftTransport() interface{}
+
+	// StoreLivenessTransport provides access to the store liveness transport.
+	// The return value is of type *storeliveness.Transport.
+	StoreLivenessTransport() interface{}
 
 	// GetRangeLease returns information on the lease for the range
 	// containing key, and a timestamp taken from the node. The lease is

@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scexec
 
@@ -72,21 +67,43 @@ type Catalog interface {
 	// DeleteDescriptor deletes a descriptor entry.
 	DeleteDescriptor(ctx context.Context, id descpb.ID) error
 
-	// UpdateZoneConfig upserts a zone config for a descriptor.
-	UpdateZoneConfig(ctx context.Context, id descpb.ID, zc zonepb.ZoneConfig) error
+	// WriteZoneConfigToBatch adds the new zoneconfig to uncommitted layer and
+	// writes to the kv batch.
+	WriteZoneConfigToBatch(ctx context.Context, id descpb.ID, zc catalog.ZoneConfig) error
+
+	// GetZoneConfig gets the zone config for a descriptor ID.
+	GetZoneConfig(ctx context.Context, id descpb.ID) (catalog.ZoneConfig, error)
+
+	// UpdateZoneConfig upserts a zone config for a descriptor ID.
+	UpdateZoneConfig(ctx context.Context, id descpb.ID, zc *zonepb.ZoneConfig) error
+
+	// UpdateSubzoneConfig upserts a subzone config into the given zone config
+	// for a descriptor ID.
+	UpdateSubzoneConfig(
+		ctx context.Context,
+		parentZone catalog.ZoneConfig,
+		subzone zonepb.Subzone,
+		subzoneSpans []zonepb.SubzoneSpan,
+		idxRefToDelete int32,
+	) (catalog.ZoneConfig, error)
 
 	// DeleteZoneConfig deletes the zone config for a descriptor.
 	DeleteZoneConfig(ctx context.Context, id descpb.ID) error
 
-	// UpdateComment upserts a comment for the (objID, subID, cmtType) key.
-	UpdateComment(
-		ctx context.Context, key catalogkeys.CommentKey, cmt string,
+	// DeleteSubzoneConfig deletes a subzone config from the zone config for a
+	// table.
+	DeleteSubzoneConfig(
+		ctx context.Context,
+		tableID descpb.ID,
+		subzone zonepb.Subzone,
+		subzoneSpans []zonepb.SubzoneSpan,
 	) error
 
+	// UpdateComment upserts a comment for the (objID, subID, cmtType) key.
+	UpdateComment(ctx context.Context, key catalogkeys.CommentKey, cmt string) error
+
 	// DeleteComment deletes a comment with (objID, subID, cmtType) key.
-	DeleteComment(
-		ctx context.Context, key catalogkeys.CommentKey,
-	) error
+	DeleteComment(ctx context.Context, key catalogkeys.CommentKey) error
 
 	// Validate validates all the uncommitted catalog changes performed
 	// in this transaction so far.

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord
 
@@ -15,7 +10,6 @@ import (
 	"io"
 	"net"
 	"sync/atomic"
-	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangecache"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
@@ -57,8 +51,7 @@ type rangefeedMuxer struct {
 	// Accessed atomically.
 	seqID int64
 
-	// muxClient is a nodeID -> *muxStreamOrError
-	muxClients syncutil.IntMap
+	muxClients syncutil.Map[roachpb.NodeID, future.Future[muxStreamOrError]]
 }
 
 // muxRangeFeed is an entry point to establish MuxRangeFeed
@@ -116,7 +109,7 @@ func muxRangeFeed(
 type muxStream struct {
 	nodeID roachpb.NodeID
 
-	streams syncutil.IntMap // streamID -> *activeMuxRangeFeed
+	streams syncutil.Map[int64, activeMuxRangeFeed]
 
 	// mu must be held when starting rangefeed.
 	mu struct {
@@ -221,7 +214,7 @@ func (m *rangefeedMuxer) startSingleRangeFeed(
 	stream := &activeMuxRangeFeed{
 		// TODO(msbutler): It's sad that there's a bunch of repeat metadata.
 		// Deduplicate once old style rangefeed code is banished from the codebase.
-		activeRangeFeed:         newActiveRangeFeed(span, startAfter, m.registry, m.metrics, parentRangefeedMetadata),
+		activeRangeFeed:         newActiveRangeFeed(span, startAfter, m.registry, m.metrics, parentRangefeedMetadata, token.Desc().RangeID),
 		rSpan:                   rs,
 		startAfter:              startAfter,
 		token:                   token,
@@ -290,10 +283,15 @@ func (s *activeMuxRangeFeed) start(ctx context.Context, m *rangefeedMuxer) error
 
 		for !s.transport.IsExhausted() {
 			args := makeRangeFeedRequest(
-				s.Span, s.token.Desc().RangeID, m.cfg.overSystemTable, s.startAfter, m.cfg.withDiff, m.cfg.withFiltering, m.cfg.withMatchingOriginIDs)
+				s.Span, s.token.Desc().RangeID, m.cfg.overSystemTable, s.startAfter, m.cfg.withDiff, m.cfg.withFiltering, m.cfg.withMatchingOriginIDs, m.cfg.consumerID)
 			args.Replica = s.transport.NextReplica()
 			args.StreamID = streamID
 			s.ReplicaDescriptor = args.Replica
+
+			s.activeRangeFeed.Lock()
+			s.activeRangeFeed.NodeID = args.Replica.NodeID
+			s.activeRangeFeed.Unlock()
+
 			rpcClient, err := s.transport.NextInternalClient(ctx)
 			if err != nil {
 				log.VErrEventf(ctx, 1, "RPC error connecting to replica %s: %s", args.Replica, err)
@@ -344,8 +342,7 @@ func (s *activeMuxRangeFeed) start(ctx context.Context, m *rangefeedMuxer) error
 func (m *rangefeedMuxer) establishMuxConnection(
 	ctx context.Context, client rpc.RestrictedInternalClient, nodeID roachpb.NodeID,
 ) (*muxStream, error) {
-	ptr, exists := m.muxClients.LoadOrStore(int64(nodeID), unsafe.Pointer(future.Make[muxStreamOrError]()))
-	muxClient := (*future.Future[muxStreamOrError])(ptr)
+	muxClient, exists := m.muxClients.LoadOrStore(nodeID, future.Make[muxStreamOrError]())
 	if !exists {
 		// Start mux rangefeed goroutine responsible for receiving MuxRangeFeedEvents.
 		m.g.GoCtx(func(ctx context.Context) error {
@@ -371,11 +368,15 @@ func (m *rangefeedMuxer) startNodeMuxRangeFeed(
 	nodeID roachpb.NodeID,
 	stream *future.Future[muxStreamOrError],
 ) (retErr error) {
-	ctx = logtags.AddTag(ctx, "mux_n", nodeID)
+
+	tags := &logtags.Buffer{}
+	tags = tags.Add("mux_n", nodeID)
 	// Add "generation" number to the context so that log messages and stacks can
 	// differentiate between multiple instances of mux rangefeed goroutine
 	// (this can happen when one was shutdown, then re-established).
-	ctx = logtags.AddTag(ctx, "gen", atomic.AddInt64(&m.seqID, 1))
+	tags = tags.Add("gen", atomic.AddInt64(&m.seqID, 1))
+
+	ctx = logtags.AddTags(ctx, tags)
 	ctx, restore := pprofutil.SetProfilerLabelsFromCtxTags(ctx)
 	defer restore()
 
@@ -393,12 +394,24 @@ func (m *rangefeedMuxer) startNodeMuxRangeFeed(
 
 	mux, err := client.MuxRangeFeed(ctx)
 	if err != nil {
+		// Remove the mux client from the cache if it hit an
+		// error.
+		m.muxClients.Delete(nodeID)
 		return future.MustSet(stream, muxStreamOrError{err: err})
+	}
+
+	maybeCloseClient := func() {
+		if closer, ok := mux.(io.Closer); ok {
+			if err := closer.Close(); err != nil {
+				log.Warningf(ctx, "error closing mux rangefeed client: %v", err)
+			}
+		}
 	}
 
 	ms := muxStream{nodeID: nodeID}
 	ms.mu.sender = mux
 	if err := future.MustSet(stream, muxStreamOrError{stream: &ms}); err != nil {
+		maybeCloseClient()
 		return err
 	}
 
@@ -408,7 +421,8 @@ func (m *rangefeedMuxer) startNodeMuxRangeFeed(
 		// another goroutine loaded it.  That's fine, since we would not
 		// be able to send new request on this stream anymore, and we'll retry
 		// against another node.
-		m.muxClients.Delete(int64(nodeID))
+		maybeCloseClient()
+		m.muxClients.Delete(nodeID)
 
 		if recvErr == io.EOF {
 			recvErr = nil
@@ -596,7 +610,7 @@ func (c *muxStream) startRangeFeed(
 	// may be seen by the event consumer (receiveEventsFromNode).
 	// Therefore, we update streams map immediately, but undo this insert in case of an error,
 	// which is returned to the caller for retry.
-	c.streams.Store(streamID, unsafe.Pointer(stream))
+	c.streams.Store(streamID, stream)
 
 	defer func() {
 		if retErr != nil {
@@ -617,11 +631,8 @@ func (c *muxStream) startRangeFeed(
 }
 
 func (c *muxStream) lookupStream(streamID int64) *activeMuxRangeFeed {
-	v, ok := c.streams.Load(streamID)
-	if ok {
-		return (*activeMuxRangeFeed)(v)
-	}
-	return nil
+	v, _ := c.streams.Load(streamID)
+	return v
 }
 
 // close closes mux stream returning the list of active range feeds.
@@ -632,8 +643,8 @@ func (c *muxStream) close() (toRestart []*activeMuxRangeFeed) {
 
 	c.mu.closed = true
 
-	c.streams.Range(func(_ int64, v unsafe.Pointer) bool {
-		toRestart = append(toRestart, (*activeMuxRangeFeed)(v))
+	c.streams.Range(func(_ int64, v *activeMuxRangeFeed) bool {
+		toRestart = append(toRestart, v)
 		return true
 	})
 

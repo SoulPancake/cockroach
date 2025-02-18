@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -97,7 +92,7 @@ func newTimeSeriesMaintenanceQueue(
 		replicaCountFn: store.ReplicaCount,
 		db:             db,
 		mem: mon.NewUnlimitedMonitor(context.Background(), mon.Options{
-			Name:     "timeseries-maintenance-queue",
+			Name:     mon.MakeMonitorName("timeseries-maintenance-queue"),
 			Settings: store.cfg.Settings,
 		}),
 	}
@@ -110,7 +105,6 @@ func newTimeSeriesMaintenanceQueue(
 			acceptsUnsplitRanges: true,
 			successes:            store.metrics.TimeSeriesMaintenanceQueueSuccesses,
 			failures:             store.metrics.TimeSeriesMaintenanceQueueFailures,
-			storeFailures:        store.metrics.StoreFailures,
 			pending:              store.metrics.TimeSeriesMaintenanceQueuePending,
 			processingNanos:      store.metrics.TimeSeriesMaintenanceQueueProcessingNanos,
 			disabledConfig:       kvserverbase.TimeSeriesMaintenanceQueueEnabled,

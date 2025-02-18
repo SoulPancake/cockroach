@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package base
 
@@ -17,6 +12,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/listenerutil"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
@@ -47,7 +43,8 @@ type TestServerArgs struct {
 	// If not set (and hence the server is the only one in the cluster), the
 	// default zone config will be overridden to disable all replication - so that
 	// tests don't get log spam about ranges not being replicated enough. This
-	// is always set to true when the server is started via a TestCluster.
+	// is always set to true when the server is started via a TestCluster, unless
+	// the StartSingleNode TestClusterArgs is set.
 	PartOfCluster bool
 
 	// Listener (if nonempty) is the listener to use for all incoming RPCs.
@@ -93,12 +90,13 @@ type TestServerArgs struct {
 	// If not initialized, will default to DefaultTestTempStorageConfig.
 	TempStorageConfig TempStorageConfig
 
-	// ExternalIODir is used to initialize field in cluster.Settings.
-	ExternalIODir string
-
 	// ExternalIODirConfig is used to initialize the same-named
 	// field on the server.Config struct.
 	ExternalIODirConfig ExternalIODirConfig
+
+	// ExternalIODir is used to initialize the same-named field on
+	// the server.Config struct.
+	ExternalIODir string
 
 	// Fields copied to the server.Config.
 	Insecure                    bool
@@ -161,15 +159,16 @@ type TestServerArgs struct {
 	// below for alternative options that suits your test case.
 	DefaultTestTenant DefaultTestTenantOptions
 
+	// DefaultTenantName is the name of the tenant created implicitly according
+	// to DefaultTestTenant. It is typically `test-tenant` for unit tests and
+	// always `demoapp` for the cockroach demo.
+	DefaultTenantName roachpb.TenantName
+
 	// StartDiagnosticsReporting checks cluster.TelemetryOptOut(), and
 	// if not disabled starts the asynchronous goroutine that checks for
 	// CockroachDB upgrades and periodically reports diagnostics to
 	// Cockroach Labs. Should remain disabled during unit testing.
 	StartDiagnosticsReporting bool
-
-	// ObsServiceAddr is the address to which events will be exported over OTLP.
-	// If empty, exporting events is inhibited.
-	ObsServiceAddr string
 }
 
 // TestClusterArgs contains the parameters one can set when creating a test
@@ -189,6 +188,10 @@ type TestClusterArgs struct {
 	// IDs unpredictable. Even in ParallelStart mode, StartTestCluster
 	// waits for all nodes to start before returning.
 	ParallelStart bool
+	// StartSingleNode will initialize the cluster like 'cockroach
+	// start-single-node'. Attempts to add more than one node to the cluster will
+	// fail.
+	StartSingleNode bool
 
 	// ServerArgsPerNode override the default ServerArgs with the value in this
 	// map. The map's key is an index within TestCluster.Servers. If there is
@@ -488,8 +491,8 @@ var (
 	// with no special attributes.
 	DefaultTestStoreSpec = StoreSpec{
 		InMemory: true,
-		Size: SizeSpec{
-			InBytes: 512 << 20,
+		Size: storagepb.SizeSpec{
+			Capacity: 512 << 20,
 		},
 	}
 )
@@ -507,7 +510,7 @@ func DefaultTestTempStorageConfigWithSize(
 	st *cluster.Settings, maxSizeBytes int64,
 ) TempStorageConfig {
 	monitor := mon.NewMonitor(mon.Options{
-		Name:      "in-mem temp storage",
+		Name:      mon.MakeMonitorName("in-mem temp storage"),
 		Res:       mon.DiskResource,
 		Increment: 1024 * 1024,
 		Settings:  st,
@@ -582,7 +585,7 @@ type TestTenantArgs struct {
 	ExternalIODirConfig ExternalIODirConfig
 
 	// ExternalIODir is used to initialize the same-named field on
-	// the params.Settings struct.
+	// the server.Config struct.
 	ExternalIODir string
 
 	// If set, this will be appended to the Postgres URL by functions that
@@ -621,7 +624,11 @@ type TestTenantArgs struct {
 	// determine the tenant's HTTP port.
 	StartingHTTPPort int
 
-	// TracingDefault controls whether the tracing will be on or off by default.
+	// Tracer, if set, will be used by the Server for creating Spans.
+	Tracer *tracing.Tracer
+
+	// TracingDefault controls whether the tracing will be on or off by default,
+	// if Tracer is not set.
 	TracingDefault tracing.TracingMode
 
 	// GoroutineDumpDirName is used to initialize the same named field on the

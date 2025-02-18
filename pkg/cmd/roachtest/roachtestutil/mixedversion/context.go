@@ -1,17 +1,13 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package mixedversion
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/clusterupgrade"
@@ -124,6 +120,10 @@ func (sc *ServiceContext) changeVersion(node int, v *clusterupgrade.Version) err
 	return nil
 }
 
+func (sc *ServiceContext) IsSystem() bool {
+	return sc.Descriptor.Name == install.SystemInterfaceName
+}
+
 // NodeVersion returns the release version the given `node` is
 // currently running. Returns an error if the node is not valid (i.e.,
 // the underlying service is not deployed on the node passed).
@@ -171,10 +171,11 @@ func newContext(
 	tenant *ServiceDescriptor,
 ) *Context {
 	makeContext := func(name string, nodes option.NodeListOption) *ServiceContext {
+		sort.Ints(nodes)
 		return &ServiceContext{
 			Descriptor: &ServiceDescriptor{
-				Name:  install.SystemInterfaceName,
-				Nodes: systemNodes,
+				Name:  name,
+				Nodes: nodes,
 			},
 			Stage:       stage,
 			FromVersion: from,
@@ -206,7 +207,7 @@ func newInitialContext(
 	tenant *ServiceDescriptor,
 ) *Context {
 	return newContext(
-		initialRelease, initialRelease, ClusterSetupStage, systemNodes, tenant,
+		initialRelease, initialRelease, SystemSetupStage, systemNodes, tenant,
 	)
 }
 
@@ -263,15 +264,6 @@ func (c *Context) DefaultService() *ServiceContext {
 	}
 
 	return c.Tenant
-}
-
-// SetStage is a helper function to set the upgrade stage on all
-// services available.
-func (c *Context) SetStage(stage UpgradeStage) {
-	c.System.Stage = stage
-	if c.Tenant != nil {
-		c.Tenant.Stage = stage
-	}
 }
 
 // clone copies the caller Context and returns the copy.

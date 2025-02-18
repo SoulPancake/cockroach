@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tabledesc
 
@@ -18,6 +13,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -151,6 +147,39 @@ func TestStripDanglingBackReferencesAndRoles(t *testing.T) {
 			strippedNonExistentRoles:       true,
 		},
 		{
+			name: "LDR job IDs",
+			input: descpb.TableDescriptor{
+				Name: "foo",
+				ID:   104,
+				MutationJobs: []descpb.TableDescriptor_MutationJob{
+					{JobID: 111222333444, MutationID: 1},
+				},
+				Mutations: []descpb.DescriptorMutation{
+					{MutationID: 1},
+					{MutationID: 2},
+				},
+				LDRJobIDs:  []catpb.JobID{1, 2, 3},
+				Privileges: goodPrivilege,
+			},
+			expectedOutput: descpb.TableDescriptor{
+				Name: "foo",
+				ID:   104,
+				MutationJobs: []descpb.TableDescriptor_MutationJob{
+					{JobID: 111222333444, MutationID: 1},
+				},
+				Mutations: []descpb.DescriptorMutation{
+					{MutationID: 1},
+					{MutationID: 2},
+				},
+				LDRJobIDs:  []catpb.JobID{},
+				Privileges: goodPrivilege,
+			},
+			validDescIDs:                   catalog.MakeDescriptorIDSet(100, 101, 104, 105),
+			validJobIDs:                    map[jobspb.JobID]struct{}{111222333444: {}},
+			strippedDanglingBackReferences: true,
+			strippedNonExistentRoles:       false,
+		},
+		{
 			name: "missing owner",
 			input: descpb.TableDescriptor{
 				Name: "foo",
@@ -247,6 +276,60 @@ func TestFixIncorrectFKOriginTableID(t *testing.T) {
 			desc := b.BuildCreatedMutableTable()
 			require.True(t, desc.GetPostDeserializationChanges().Contains(catalog.FixedIncorrectForeignKeyOrigins))
 			require.False(t, out.BuildCreatedMutableTable().GetPostDeserializationChanges().Contains(catalog.FixedIncorrectForeignKeyOrigins))
+			require.Equal(t, out.BuildCreatedMutableTable().TableDesc(), desc.TableDesc())
+		})
+	}
+}
+
+func TestFixMissingSequenceIdentityRefs(t *testing.T) {
+	type testCase struct {
+		name                  string
+		input, expectedOutput descpb.TableDescriptor
+	}
+	defaultExpr := "nextval('sq1')"
+	testData := []testCase{
+		{
+			name: "missing sequence references for identity",
+			input: descpb.TableDescriptor{
+				Name: "foo",
+				ID:   104,
+				Columns: []descpb.ColumnDescriptor{{
+					Name:                    "blah",
+					ID:                      1,
+					Type:                    types.Int,
+					GeneratedAsIdentityType: catpb.GeneratedAsIdentityType_GENERATED_ALWAYS,
+					DefaultExpr:             &defaultExpr,
+					OwnsSequenceIds:         []descpb.ID{23},
+					UsesSequenceIds:         nil,
+				},
+				},
+			},
+			expectedOutput: descpb.TableDescriptor{
+				Name: "foo",
+				ID:   104,
+				Columns: []descpb.ColumnDescriptor{{
+					Name:                    "blah",
+					ID:                      1,
+					Type:                    types.Int,
+					GeneratedAsIdentityType: catpb.GeneratedAsIdentityType_GENERATED_ALWAYS,
+					DefaultExpr:             &defaultExpr,
+					OwnsSequenceIds:         []descpb.ID{23},
+					UsesSequenceIds:         []descpb.ID{23},
+				},
+				},
+			},
+		},
+	}
+
+	for _, test := range testData {
+		t.Run(test.name, func(t *testing.T) {
+			b := NewBuilder(&test.input)
+			require.NoError(t, b.RunPostDeserializationChanges())
+			out := NewBuilder(&test.expectedOutput)
+			require.NoError(t, out.RunPostDeserializationChanges())
+			desc := b.BuildCreatedMutableTable()
+			require.True(t, desc.GetPostDeserializationChanges().Contains(catalog.FixedUsesSequencesIDForIdentityColumns))
+			require.False(t, out.BuildCreatedMutableTable().GetPostDeserializationChanges().Contains(catalog.FixedUsesSequencesIDForIdentityColumns))
 			require.Equal(t, out.BuildCreatedMutableTable().TableDesc(), desc.TableDesc())
 		})
 	}

@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlccl
 
@@ -203,8 +200,8 @@ func TestGCTenantJobWaitsForProtectedTimestamps(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if job.Status() != jobs.StatusRunning {
-				return errors.Newf("expected job to have StatusRunning but found %+v", job.Status())
+			if job.State() != jobs.StateRunning {
+				return errors.Newf("expected job to have StatusRunning but found %+v", job.State())
 			}
 			return nil
 		})
@@ -216,7 +213,7 @@ func TestGCTenantJobWaitsForProtectedTimestamps(t *testing.T) {
 		require.NoError(t, sj.AwaitCompletion(ctx))
 		job, err := jobRegistry.LoadJob(ctx, sj.ID())
 		require.NoError(t, err)
-		require.Equal(t, jobs.StatusSucceeded, job.Status())
+		require.Equal(t, jobs.StateSucceeded, job.State())
 		err = insqlDB.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 			_, err = sql.GetTenantRecordByID(ctx, txn, tenID, srv.ClusterSettings())
 			return err

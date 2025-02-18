@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package eval
 
@@ -38,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/cidr"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -308,6 +304,9 @@ type Context struct {
 	// ULIDEntropyFactory on the code paths that don't need to preserve usage of
 	// the same RNG within a session.
 	internalULIDEntropyFactory ULIDEntropyFactory
+
+	// CidrLookup is used to look up the tag name for a given IP address.
+	CidrLookup *cidr.Lookup
 }
 
 // RNGFactory is a simple wrapper to preserve the RNG throughout the session.
@@ -428,7 +427,7 @@ func (ec *Context) MustGetPlaceholderValue(ctx context.Context, p *tree.Placehol
 // MakeTestingEvalContext returns an EvalContext that includes a MemoryMonitor.
 func MakeTestingEvalContext(st *cluster.Settings) Context {
 	monitor := mon.NewMonitor(mon.Options{
-		Name:     "test-monitor",
+		Name:     mon.MakeMonitorName("test-monitor"),
 		Settings: st,
 	})
 	return MakeTestingEvalContextWithMon(st, monitor)
@@ -604,8 +603,8 @@ func (ec *Context) GetClusterTimestamp() (*tree.DDecimal, error) {
 	// multiple timestamps. Prevent this with a gate at the SQL level and return
 	// a pgerror until we decide how this will officially behave. See #103245.
 	if ec.TxnIsoLevel.ToleratesWriteSkew() {
-		treeIso := tree.IsolationLevelFromKVTxnIsolationLevel(ec.TxnIsoLevel)
-		return nil, pgerror.Newf(pgcode.FeatureNotSupported, "unsupported in %s isolation", treeIso.String())
+		return nil, pgerror.Newf(pgcode.FeatureNotSupported,
+			"unsupported in %s isolation", tree.FromKVIsoLevel(ec.TxnIsoLevel).String())
 	}
 
 	ts, err := ec.Txn.CommitTimestamp()
@@ -668,18 +667,19 @@ func DecimalToInexactDTimestampTZ(d *tree.DDecimal) (*tree.DTimestampTZ, error) 
 }
 
 func decimalToHLC(d *tree.DDecimal) (hlc.Timestamp, error) {
-	var coef apd.BigInt
-	coef.Set(&d.Decimal.Coeff)
-	// The physical portion of the HLC is stored shifted up by 10^10, so shift
-	// it down and clear out the logical component.
-	coef.Div(&coef, big10E10)
-	if !coef.IsInt64() {
+	var floorD apd.Decimal
+	if _, err := tree.DecimalCtx.Floor(&floorD, &d.Decimal); err != nil {
+		return hlc.Timestamp{}, err
+	}
+
+	i, err := floorD.Int64()
+	if err != nil {
 		return hlc.Timestamp{}, pgerror.Newf(
 			pgcode.DatetimeFieldOverflow,
 			"timestamp value out of range: %s", d.String(),
 		)
 	}
-	return hlc.Timestamp{WallTime: coef.Int64()}, nil
+	return hlc.Timestamp{WallTime: i}, nil
 }
 
 // DecimalToInexactDTimestamp is the inverse of TimestampToDecimal. It converts
@@ -711,6 +711,9 @@ func TimestampToInexactDTimestamp(ts hlc.Timestamp) *tree.DTimestamp {
 
 // GetRelativeParseTime implements ParseContext.
 func (ec *Context) GetRelativeParseTime() time.Time {
+	if ec == nil {
+		return timeutil.Now()
+	}
 	ret := ec.TxnTimestamp
 	if ret.IsZero() {
 		ret = timeutil.Now()
@@ -816,7 +819,7 @@ func (ec *Context) BoundedStaleness() bool {
 }
 
 // ensureExpectedType will return an error if a datum does not match the
-// provided type. If the expected type is Any or if the datum is a Null
+// provided type. If the expected type is AnyElement or if the datum is a Null
 // type, then no error will be returned.
 func ensureExpectedType(exp *types.T, d tree.Datum) error {
 	if !(exp.Family() == types.AnyFamily || d.ResolvedType().Family() == types.UnknownFamily ||
@@ -892,6 +895,7 @@ type ReplicationStreamManager interface {
 	// by opaqueSpec which contains serialized streampb.StreamPartitionSpec protocol message and
 	// returns a value generator which yields events for the specified partition.
 	StreamPartition(
+		ctx context.Context,
 		streamID streampb.StreamID,
 		opaqueSpec []byte,
 	) (ValueGenerator, error)
@@ -911,7 +915,7 @@ type ReplicationStreamManager interface {
 		successfulIngestion bool,
 	) error
 
-	DebugGetProducerStatuses(ctx context.Context) []*streampb.DebugProducerStatus
+	DebugGetProducerStatuses(ctx context.Context) []streampb.DebugProducerStatus
 	DebugGetLogicalConsumerStatuses(ctx context.Context) []*streampb.DebugLogicalConsumerStatus
 
 	PlanLogicalReplication(

@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord
 
@@ -236,6 +231,35 @@ func TestTxnCommitterStripsInFlightWrites(t *testing.T) {
 		br = ba.CreateReply()
 		br.Txn = ba.Txn
 		br.Txn.Status = roachpb.COMMITTED
+		return br, nil
+	})
+
+	br, pErr = tc.SendLocked(ctx, ba)
+	require.Nil(t, pErr)
+	require.NotNil(t, br)
+
+	// Send the same batch but with an EndTxn with the Prepare flag set. In-flight
+	// writes should not be attached because the XA two-phase commit protocol
+	// disables parallel commits.
+	ba.Requests = nil
+	etArgsPrepare := etArgs
+	etArgsPrepare.Prepare = true
+	ba.Add(&putArgs, &qiArgs, &etArgsPrepare)
+
+	mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
+		require.Len(t, ba.Requests, 3)
+		require.IsType(t, &kvpb.EndTxnRequest{}, ba.Requests[2].GetInner())
+
+		et := ba.Requests[2].GetInner().(*kvpb.EndTxnRequest)
+		require.True(t, et.Commit)
+		require.True(t, et.Prepare)
+		require.Len(t, et.LockSpans, 2)
+		require.Equal(t, []roachpb.Span{{Key: keyA}, {Key: keyB}}, et.LockSpans)
+		require.Len(t, et.InFlightWrites, 0)
+
+		br = ba.CreateReply()
+		br.Txn = ba.Txn
+		br.Txn.Status = roachpb.PREPARED
 		return br, nil
 	})
 

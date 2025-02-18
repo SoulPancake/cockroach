@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobs
 
@@ -111,7 +106,7 @@ func lookupNumRunningJobs(
 ) (int64, error) {
 	lookupStmt := fmt.Sprintf(
 		"SELECT count(*) FROM %s WHERE created_by_type = '%s' AND created_by_id = %d AND status IN %s",
-		env.SystemJobsTableName(), CreatedByScheduledJobs, scheduleID, NonTerminalStatusTupleString)
+		env.SystemJobsTableName(), CreatedByScheduledJobs, scheduleID, NonTerminalStateTupleString)
 	row, err := txn.QueryRowEx(
 		ctx, "lookup-num-running",
 		txn.KV(),
@@ -136,14 +131,14 @@ func (s *jobScheduler) processSchedule(
 			// In particular, it'd be nice to add more time when repeatedly rescheduling
 			// a job.  It would also be nice not to log each event.
 			schedule.SetNextRun(s.env.Now().Add(recheckRunningAfter))
-			schedule.SetScheduleStatus("delayed due to %d already running", numRunning)
+			schedule.SetScheduleStatusf("delayed due to %d already running", numRunning)
 			s.metrics.RescheduleWait.Inc(1)
 			return scheduleStorage.Update(ctx, schedule)
 		case jobspb.ScheduleDetails_SKIP:
 			if err := schedule.ScheduleNextRun(); err != nil {
 				return err
 			}
-			schedule.SetScheduleStatus("rescheduled due to %d already running", numRunning)
+			schedule.SetScheduleStatusf("rescheduled due to %d already running", numRunning)
 			s.metrics.RescheduleSkip.Inc(1)
 			return scheduleStorage.Update(ctx, schedule)
 		}
@@ -432,7 +427,7 @@ func (s *jobScheduler) runDaemon(ctx context.Context, stopper *stop.Stopper) {
 				if err := whenDisabled.withCancelOnDisabled(ctx, &s.Settings.SV, func(ctx context.Context) error {
 					return s.executeSchedules(ctx, maxSchedules)
 				}); err != nil {
-					log.Errorf(ctx, "error executing schedules: %+v", err)
+					log.Errorf(ctx, "error executing schedules: %v", err)
 				}
 			}
 		}

@@ -2,8 +2,14 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "raftstoreliveness",
-    srcs = ["store_liveness.go"],
+    srcs = [
+        "mock_store_liveness.go",
+        "store_liveness.go",
+    ],
     importpath = "github.com/cockroachdb/cockroach/pkg/raft/raftstoreliveness",
     visibility = ["//visibility:public"],
-    deps = ["//pkg/util/hlc"],
+    deps = [
+        "//pkg/raft/raftpb",
+        "//pkg/util/hlc",
+    ],
 )

@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord
 
@@ -16,11 +11,14 @@ import (
 	"slices"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/shuffle"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 )
 
 // ReplicaInfo extends the Replica structure with the associated node
@@ -39,6 +37,25 @@ type ReplicaInfo struct {
 
 // A ReplicaSlice is a slice of ReplicaInfo.
 type ReplicaSlice []ReplicaInfo
+
+func (rs ReplicaSlice) String() string {
+	return redact.StringWithoutMarkers(rs)
+}
+
+// SafeFormat implements the redact.SafeFormatter interface.
+func (rs ReplicaSlice) SafeFormat(w redact.SafePrinter, _ rune) {
+	var buf redact.StringBuilder
+	buf.Print("[")
+	for i, r := range rs {
+		if i > 0 {
+			buf.Print(",")
+		}
+		buf.Printf("%v(health=%v match=%d latency=%v)",
+			r, r.healthy, r.tierMatchLength, humanizeutil.Duration(r.latency))
+	}
+	buf.Print("]")
+	w.Print(buf)
+}
 
 // ReplicaSliceFilter controls which kinds of replicas are to be included in
 // the slice for routing BatchRequests to.
@@ -71,7 +88,7 @@ const (
 // sendError is returned.
 func NewReplicaSlice(
 	ctx context.Context,
-	nodeDescs NodeDescStore,
+	nodeDescs kvclient.NodeDescStore,
 	desc *roachpb.RangeDescriptor,
 	leaseholder *roachpb.ReplicaDescriptor,
 	filter ReplicaSliceFilter,
@@ -198,6 +215,7 @@ type HealthFunc func(roachpb.NodeID) bool
 // leaseholder is known by the caller, the caller will move it to the
 // front if appropriate.
 func (rs ReplicaSlice) OptimizeReplicaOrder(
+	ctx context.Context,
 	st *cluster.Settings,
 	nodeID roachpb.NodeID,
 	healthFn HealthFunc,
@@ -207,6 +225,7 @@ func (rs ReplicaSlice) OptimizeReplicaOrder(
 	// If we don't know which node we're on or its locality, and we don't have
 	// latency information to other nodes, send the RPCs randomly.
 	if nodeID == 0 && latencyFn == nil && len(locality.Tiers) == 0 {
+		log.VEvent(ctx, 2, "randomly shuffling replicas to route to")
 		shuffle.Shuffle(rs)
 		return
 	}

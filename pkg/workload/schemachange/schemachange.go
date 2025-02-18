@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package schemachange implements the schemachange workload.
 package schemachange
@@ -221,6 +216,9 @@ func (s *schemaChange) Ops(
 	cfg.MaxConnLifetime = time.Hour
 	cfg.MaxConnIdleTime = time.Hour
 	cfg.QueryTracer = &PGXTracer{tracer: tracer}
+	if err := s.setClusterSettings(ctx, urls[0]); err != nil {
+		return workload.QueryLoad{}, err
+	}
 	pool, err := workload.NewMultiConnPool(ctx, cfg, urls...)
 	if err != nil {
 		return workload.QueryLoad{}, err
@@ -229,9 +227,7 @@ func (s *schemaChange) Ops(
 	if err != nil {
 		return workload.QueryLoad{}, err
 	}
-	if err := s.setClusterSettings(ctx, pool); err != nil {
-		return workload.QueryLoad{}, err
-	}
+
 	stdoutLog := makeAtomicLog(os.Stdout)
 	// Use NewPseudoRand here because we want to print out the global seed used by
 	// the workload. Using NewTestRand() here would only let us see the per-test
@@ -342,9 +338,28 @@ func (s *schemaChange) Ops(
 
 // setClusterSettings configures any settings required for the workload ahead
 // of starting workers.
-func (s *schemaChange) setClusterSettings(ctx context.Context, pool *workload.MultiConnPool) error {
-	_, err := pool.Get().Exec(ctx, `SET CLUSTER SETTING sql.defaults.super_regions.enabled = 'on'`)
-	return errors.WithStack(err)
+func (s *schemaChange) setClusterSettings(ctx context.Context, url string) (err error) {
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		closeErr := conn.Close(ctx)
+		err = errors.WithSecondaryError(err, closeErr)
+	}()
+	for _, stmt := range []string{
+		`SET CLUSTER SETTING sql.defaults.super_regions.enabled = 'on'`,
+		`SET CLUSTER SETTING sql.log.all_statements.enabled = 'on'`,
+
+		// This workload is designed to test multiple statements in a transaction.
+		`SET CLUSTER SETTING sql.defaults.autocommit_before_ddl.enabled = 'false'`,
+	} {
+		_, err := conn.Exec(ctx, stmt)
+		if err != nil {
+			return errors.WithStack(err)
+		}
+	}
+	return nil
 }
 
 // initSeqName returns the smallest available sequence number to be
@@ -405,15 +420,23 @@ var (
 	errRunInTxnRbkSentinel   = errors.New("txn needs to rollback")
 )
 
-// LogEntry and its fields must be public so that the json package can encode this struct.
+// LogEntry is used to log information about the operations performed, expected errors,
+// the worker ID, the corresponding timestamp, and any additional messages or error states.
+// Note: LogEntry and its fields must be public so that the json package can encode this struct.
 type LogEntry struct {
-	WorkerID             int           `json:"workerId"`
-	ClientTimestamp      string        `json:"clientTimestamp"`
-	Ops                  []interface{} `json:"ops"`
-	ExpectedExecErrors   string        `json:"expectedExecErrors"`
-	ExpectedCommitErrors string        `json:"expectedCommitErrors"`
+	// WorkerID identifies the worker executing the operations.
+	WorkerID int `json:"workerId"`
+	// ClientTimestamp tracks when the operation was executed.
+	ClientTimestamp string `json:"clientTimestamp"`
+	// Ops a collection of the various types of operations performed.
+	Ops []interface{} `json:"ops"`
+	// ExpectedExecErrors errors which occur as soon as you run the statement.
+	ExpectedExecErrors string `json:"expectedExecErrors"`
+	// ExpectedCommitErrors errors which occur only during commit.
+	ExpectedCommitErrors string `json:"expectedCommitErrors"`
 	// Optional message for errors or if a hook was called.
-	Message    string      `json:"message"`
+	Message string `json:"message"`
+	// ErrorState holds information on the error's state when an error occurs.
 	ErrorState *ErrorState `json:"errorState,omitempty"`
 }
 
@@ -456,12 +479,12 @@ func (w *schemaChangeWorker) runInTxn(
 ) error {
 	w.logger.startLog(w.id)
 	w.logger.writeLog("BEGIN")
-	opsNum := 1 + w.opGen.randIntn(w.maxOpsPerWorker)
-	if useDeclarativeSchemaChanger && opsNum > w.workload.declarativeSchemaMaxStmtsPerTxn {
-		opsNum = w.workload.declarativeSchemaMaxStmtsPerTxn
+	numOps := 1 + w.opGen.randIntn(w.maxOpsPerWorker)
+	if useDeclarativeSchemaChanger && numOps > w.workload.declarativeSchemaMaxStmtsPerTxn {
+		numOps = w.workload.declarativeSchemaMaxStmtsPerTxn
 	}
 
-	for i := 0; i < opsNum; i++ {
+	for i := 0; i < numOps; i++ {
 		// Terminating this loop early if there are expected commit errors prevents unexpected commit behavior from being
 		// hidden by subsequent operations. Consider the case where there are expected commit errors.
 		// It is possible that committing the transaction now will fail the workload because the error does not occur
@@ -474,7 +497,7 @@ func (w *schemaChangeWorker) runInTxn(
 			break
 		}
 
-		op, err := w.opGen.randOp(ctx, tx, useDeclarativeSchemaChanger)
+		op, err := w.opGen.randOp(ctx, tx, useDeclarativeSchemaChanger, numOps)
 		if pgErr := new(pgconn.PgError); errors.As(err, &pgErr) &&
 			pgcode.MakeCode(pgErr.Code) == pgcode.SerializationFailure {
 			return errors.Mark(err, errRunInTxnRbkSentinel)

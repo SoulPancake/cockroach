@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -49,6 +44,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/ui"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc/logger"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -488,7 +484,7 @@ func TestEnsureInitialWallTimeMonotonicity(t *testing.T) {
 
 			const maxOffset = 500 * time.Millisecond
 			m := timeutil.NewManualTime(timeutil.Unix(0, test.clockStartTime))
-			c := hlc.NewClock(m, maxOffset, maxOffset)
+			c := hlc.NewClock(m, maxOffset, maxOffset, hlc.PanicLogger)
 
 			sleepUntilFn := func(ctx context.Context, t hlc.Timestamp) error {
 				delta := t.GoTime().Sub(c.Now().GoTime())
@@ -564,7 +560,7 @@ func TestPersistHLCUpperBound(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			a := assert.New(t)
 			m := timeutil.NewManualTime(timeutil.Unix(0, 1))
-			c := hlc.NewClockForTesting(m)
+			c := hlc.NewClock(m, 0 /* maxOffset */, 0 /* toleratedOffset */, logger.CRDBLogger)
 
 			var persistErr error
 			var persistedUpperBound int64
@@ -581,7 +577,7 @@ func TestPersistHLCUpperBound(t *testing.T) {
 			tickProcessedCh := make(chan struct{})
 			persistHLCUpperBoundIntervalCh := make(chan time.Duration, 1)
 			stopCh := make(chan struct{}, 1)
-			defer close(persistHLCUpperBoundIntervalCh)
+			defer close(stopCh)
 
 			go periodicallyPersistHLCUpperBound(
 				c,
@@ -728,7 +724,7 @@ func TestServeIndexHTML(t *testing.T) {
 			// in `server` and not in `server_test`). However, serverutils
 			// doesn't link ccl, so it says it uses OSS distribution. Reconcile
 			// this mismatch.
-			buildInfo := strings.Replace(build.GetInfo().Short(), "CockroachDB CCL", "CockroachDB OSS", 1)
+			buildInfo := strings.Replace(build.GetInfo().Short().StripMarkers(), "CockroachDB CCL", "CockroachDB OSS", 1)
 			expected := fmt.Sprintf(`<!DOCTYPE html>
 <title>CockroachDB</title>
 Binary built without web UI.

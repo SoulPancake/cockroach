@@ -1,15 +1,9 @@
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 //go:build bazel
-// +build bazel
 
 // bazel-github-helper is a binary to parse test results from a "build event
 // protocol" binary file, as constructed by
@@ -29,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/build/engflow"
@@ -186,6 +181,18 @@ func dumpSummary(f *os.File, invocation *engflow.InvocationInfo) error {
 			}
 		}
 	}
+
+	sort.Slice(failedTests, func(i, j int) bool {
+		t1 := failedTests[i]
+		t2 := failedTests[j]
+		if t1.label < t2.label {
+			return true
+		} else if t1.label == t2.label {
+			return t1.name < t2.name
+		} else {
+			return false
+		}
+	})
 
 	if len(failedTests) != 0 {
 		_, err := f.WriteString(`| Label | TestName | Status | Link |

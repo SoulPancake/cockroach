@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -33,22 +28,27 @@ import (
 )
 
 type alterFunctionOptionsNode struct {
+	zeroInputPlanNode
 	n *tree.AlterFunctionOptions
 }
 
 type alterFunctionRenameNode struct {
+	zeroInputPlanNode
 	n *tree.AlterRoutineRename
 }
 
 type alterFunctionSetOwnerNode struct {
+	zeroInputPlanNode
 	n *tree.AlterRoutineSetOwner
 }
 
 type alterFunctionSetSchemaNode struct {
+	zeroInputPlanNode
 	n *tree.AlterRoutineSetSchema
 }
 
 type alterFunctionDepExtensionNode struct {
+	zeroInputPlanNode
 	n *tree.AlterFunctionDepExtension
 }
 
@@ -214,7 +214,7 @@ func (n *alterFunctionRenameNode) startExec(params runParams) error {
 	// this one.
 	var dependentFuncs []string
 	for _, dep := range fnDesc.GetDependedOnBy() {
-		desc, err := params.p.Descriptors().ByID(params.p.Txn()).Get().Desc(params.ctx, dep.ID)
+		desc, err := params.p.Descriptors().ByIDWithoutLeased(params.p.Txn()).Get().Desc(params.ctx, dep.ID)
 		if err != nil {
 			return err
 		}
@@ -387,7 +387,7 @@ func (n *alterFunctionSetSchemaNode) startExec(params runParams) error {
 	// this one.
 	var dependentFuncs []string
 	for _, dep := range fnDesc.GetDependedOnBy() {
-		desc, err := params.p.Descriptors().ByID(params.p.Txn()).Get().Desc(params.ctx, dep.ID)
+		desc, err := params.p.Descriptors().ByIDWithoutLeased(params.p.Txn()).Get().Desc(params.ctx, dep.ID)
 		if err != nil {
 			return err
 		}

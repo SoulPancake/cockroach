@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package upgrademanager provides an implementation of upgrade.Manager
 // for use on kv nodes.
@@ -16,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
@@ -25,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
+	"github.com/cockroachdb/cockroach/pkg/server/license"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/settingswatcher"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -41,6 +38,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/upgrade/upgrades"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/randutil"
+	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/startup"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
@@ -58,6 +57,7 @@ type Manager struct {
 	settings  *cluster.Settings
 	knobs     upgradebase.TestingKnobs
 	clusterID *base.ClusterIDContainer
+	le        *license.Enforcer
 }
 
 // GetUpgrade returns the upgrade associated with this key.
@@ -89,6 +89,7 @@ func NewManager(
 	settings *cluster.Settings,
 	clusterID *base.ClusterIDContainer,
 	testingKnobs *upgradebase.TestingKnobs,
+	le *license.Enforcer,
 ) *Manager {
 	var knobs upgradebase.TestingKnobs
 	if testingKnobs != nil {
@@ -102,6 +103,7 @@ func NewManager(
 		codec:     codec,
 		settings:  settings,
 		clusterID: clusterID,
+		le:        le,
 		knobs:     knobs,
 	}
 }
@@ -315,6 +317,8 @@ func (m *Manager) Migrate(
 		return nil
 	}
 
+	rng, _ := randutil.NewPseudoRand()
+
 	// Validation functions for updating the settings table. We use this in the
 	// tenant upgrade case to ensure that no new SQL servers were started
 	// mid-upgrade, with versions that are incompatible with the attempted
@@ -461,7 +465,7 @@ func (m *Manager) Migrate(
 
 		cv := clusterversion.ClusterVersion{Version: clusterVersion}
 
-		fenceVersion := upgrade.FenceVersionFor(ctx, cv)
+		fenceVersion := cv.FenceVersion()
 		if err := bumpClusterVersion(ctx, m.deps.Cluster, fenceVersion); err != nil {
 			return err
 		}
@@ -517,8 +521,15 @@ func (m *Manager) Migrate(
 		// Run the actual upgrade, if any.
 		mig, exists := m.GetUpgrade(clusterVersion)
 		if exists {
-			if err := m.runMigration(ctx, mig, user, clusterVersion, !m.knobs.DontUseJobs); err != nil {
-				return err
+			for {
+				if err := m.runMigration(ctx, mig, user, clusterVersion, !m.knobs.DontUseJobs); err != nil {
+					return err
+				}
+				if !buildutil.CrdbTestBuild || rng.Float64() < 0.5 {
+					// To ensure that migrations are idempotent we'll run each
+					// migration random number of times in test builds.
+					break
+				}
 			}
 		}
 
@@ -609,7 +620,12 @@ func forEveryNodeUntilClusterStable(
 	f func(ctx context.Context, client serverpb.MigrationClient) error,
 ) error {
 	log.Infof(ctx, "executing operation %s", redact.Safe(op))
-	return c.UntilClusterStable(ctx, func() error {
+	return c.UntilClusterStable(ctx, retry.Options{
+		InitialBackoff: 1 * time.Second,
+		MaxBackoff:     1 * time.Second,
+		Multiplier:     1.0,
+		MaxRetries:     60, // retry for 60 seconds
+	}, func() error {
 		return c.ForEveryNodeOrServer(ctx, op, f)
 	})
 }
@@ -649,15 +665,17 @@ func (m *Manager) runMigration(
 			// The TenantDeps used here are incomplete, but enough for the "permanent
 			// upgrades" that run under this testing knob.
 			if err := upg.Run(ctx, v, upgrade.TenantDeps{
-				KVDB:             m.deps.DB.KV(),
-				DB:               m.deps.DB,
-				Codec:            m.codec,
-				Settings:         m.settings,
-				LeaseManager:     m.lm,
-				InternalExecutor: m.ie,
-				JobRegistry:      m.jr,
-				TestingKnobs:     &m.knobs,
-				ClusterID:        m.clusterID.Get(),
+				KVDB:               m.deps.DB.KV(),
+				DB:                 m.deps.DB,
+				Codec:              m.codec,
+				Settings:           m.settings,
+				LeaseManager:       m.lm,
+				InternalExecutor:   m.ie,
+				JobRegistry:        m.jr,
+				TestingKnobs:       &m.knobs,
+				ClusterID:          m.clusterID.Get(),
+				LicenseEnforcer:    m.le,
+				TenantInfoAccessor: m.deps.TenantInfoAccessor,
 			}); err != nil {
 				return err
 			}
@@ -750,7 +768,7 @@ WITH
 running_migration_jobs AS (
     SELECT id, status
     FROM system.jobs
-    WHERE status IN ` + jobs.NonTerminalStatusTupleString + `
+    WHERE status IN ` + jobs.NonTerminalStateTupleString + `
     AND job_type = 'MIGRATION'
 ),
 payloads AS (
@@ -782,8 +800,8 @@ func (m *Manager) getRunningMigrationJob(
 	if err != nil {
 		return false, 0, err
 	}
-	parseRow := func(row tree.Datums) (id jobspb.JobID, status jobs.Status) {
-		return jobspb.JobID(*row[0].(*tree.DInt)), jobs.Status(*row[1].(*tree.DString))
+	parseRow := func(row tree.Datums) (id jobspb.JobID, status jobs.State) {
+		return jobspb.JobID(*row[0].(*tree.DInt)), jobs.State(*row[1].(*tree.DString))
 	}
 	switch len(rows) {
 	case 0:
@@ -810,7 +828,14 @@ func (m *Manager) getRunningMigrationJob(
 
 func (m *Manager) listBetween(from roachpb.Version, to roachpb.Version) []roachpb.Version {
 	if m.knobs.ListBetweenOverride != nil {
-		return m.knobs.ListBetweenOverride(from, to)
+		result := m.knobs.ListBetweenOverride(from, to)
+		// Sanity check result to catch invalid overrides.
+		for _, v := range result {
+			if v.LessEq(from) || to.Less(v) {
+				panic(fmt.Sprintf("ListBetweenOverride(%s, %s) returned invalid version %s", from, to, v))
+			}
+		}
+		return result
 	}
 	return clusterversion.ListBetween(from, to)
 }
@@ -828,13 +853,16 @@ func (m *Manager) checkPreconditions(ctx context.Context, versions []roachpb.Ver
 			continue
 		}
 		if err := tm.Precondition(ctx, clusterversion.ClusterVersion{Version: v}, upgrade.TenantDeps{
-			DB:               m.deps.DB,
-			Codec:            m.codec,
-			Settings:         m.settings,
-			LeaseManager:     m.lm,
-			InternalExecutor: m.ie,
-			JobRegistry:      m.jr,
-			ClusterID:        m.clusterID.Get(),
+			DB:                 m.deps.DB,
+			Codec:              m.codec,
+			Settings:           m.settings,
+			LeaseManager:       m.lm,
+			InternalExecutor:   m.ie,
+			JobRegistry:        m.jr,
+			TestingKnobs:       &m.knobs,
+			ClusterID:          m.clusterID.Get(),
+			LicenseEnforcer:    m.le,
+			TenantInfoAccessor: m.deps.TenantInfoAccessor,
 		}); err != nil {
 			return errors.Wrapf(
 				err,

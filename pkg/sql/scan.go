@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -43,6 +38,8 @@ type scanNode struct {
 	// Enforce this using NoCopy.
 	_ util.NoCopy
 
+	zeroInputPlanNode
+
 	desc  catalog.TableDescriptor
 	index catalog.Index
 
@@ -77,10 +74,6 @@ type scanNode struct {
 
 	// Is this a full scan of an index?
 	isFull bool
-
-	// Indicates if this scanNode will do a physical data check. This is
-	// only true when running SCRUB commands.
-	isCheck bool
 
 	// estimatedRowCount is the estimated number of rows that this scanNode will
 	// output. When there are no statistics to make the estimation, it will be
@@ -233,7 +226,7 @@ func (n *scanNode) initDescSpecificCol(colCfg scanColumnsConfig, prefixCol catal
 	// table where prefixCol is the key column.
 	foundIndex := false
 	for _, idx := range indexes {
-		if idx.GetType() != descpb.IndexDescriptor_FORWARD || idx.IsPartial() {
+		if idx.GetType().AllowsPrefixColumns() || idx.IsPartial() {
 			continue
 		}
 		columns := n.desc.IndexKeyColumns(idx)

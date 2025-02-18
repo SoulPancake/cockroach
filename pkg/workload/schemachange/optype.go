@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package schemachange
 
@@ -117,14 +112,15 @@ const (
 
 	// CREATE ...
 
-	createTypeEnum // CREATE TYPE <type> ENUM AS <def>
-	createIndex    // CREATE INDEX <index> ON <table> <def>
-	createSchema   // CREATE SCHEMA <schema>
-	createSequence // CREATE SEQUENCE <sequence> <def>
-	createTable    // CREATE TABLE <table> <def>
-	createTableAs  // CREATE TABLE <table> AS <def>
-	createView     // CREATE VIEW <view> AS <def>
-	createFunction // CREATE FUNCTION <function> ...
+	createTypeEnum      // CREATE TYPE <type> ENUM AS <def>
+	createTypeComposite // CREATE TYPE <type> AS <def>
+	createIndex         // CREATE INDEX <index> ON <table> <def>
+	createSchema        // CREATE SCHEMA <schema>
+	createSequence      // CREATE SEQUENCE <sequence> <def>
+	createTable         // CREATE TABLE <table> <def>
+	createTableAs       // CREATE TABLE <table> AS <def>
+	createView          // CREATE VIEW <view> AS <def>
+	createFunction      // CREATE FUNCTION <function> ...
 
 	// COMMENT ON ...
 
@@ -199,6 +195,10 @@ const (
 	numOpTypes int = iota
 )
 
+func isDMLOpType(t opType) bool {
+	return t == insertRow || t == selectStmt || t == validate
+}
+
 var opFuncs = []func(*operationGenerator, context.Context, pgx.Tx) (*opStmt, error){
 	// Non-DDL
 	insertRow:  (*operationGenerator).insertRow,
@@ -237,6 +237,7 @@ var opFuncs = []func(*operationGenerator, context.Context, pgx.Tx) (*opStmt, err
 	createTable:                       (*operationGenerator).createTable,
 	createTableAs:                     (*operationGenerator).createTableAs,
 	createTypeEnum:                    (*operationGenerator).createEnum,
+	createTypeComposite:               (*operationGenerator).createCompositeType,
 	createView:                        (*operationGenerator).createView,
 	dropFunction:                      (*operationGenerator).dropFunction,
 	dropIndex:                         (*operationGenerator).dropIndex,
@@ -266,10 +267,10 @@ var opWeights = []int{
 	alterFunctionSetSchema:            1,
 	alterTableAddColumn:               1,
 	alterTableAddConstraintForeignKey: 1,
-	alterTableAddConstraintUnique:     0,
-	alterTableAlterColumnType:         0, // Disabled and tracked with #66662.
+	alterTableAddConstraintUnique:     1,
+	alterTableAlterColumnType:         1,
 	alterTableAlterPrimaryKey:         1,
-	alterTableDropColumn:              0,
+	alterTableDropColumn:              1,
 	alterTableDropColumnDefault:       1,
 	alterTableDropConstraint:          1,
 	alterTableDropNotNull:             1,
@@ -284,9 +285,10 @@ var opWeights = []int{
 	createIndex:                       1,
 	createSchema:                      1,
 	createSequence:                    1,
-	createTable:                       1,
+	createTable:                       10,
 	createTableAs:                     1,
 	createTypeEnum:                    1,
+	createTypeComposite:               1,
 	createView:                        1,
 	dropFunction:                      1,
 	dropIndex:                         1,
@@ -305,18 +307,25 @@ var opWeights = []int{
 // be downlevel. The declarative schema changer builder does have a supported
 // list, but it's not sufficient for that reason.
 var opDeclarativeVersion = map[opType]clusterversion.Key{
+	insertRow:  clusterversion.MinSupported,
+	selectStmt: clusterversion.MinSupported,
+	validate:   clusterversion.MinSupported,
+
 	alterTableAddColumn:               clusterversion.MinSupported,
 	alterTableAddConstraintForeignKey: clusterversion.MinSupported,
 	alterTableAddConstraintUnique:     clusterversion.MinSupported,
+	alterTableAlterPrimaryKey:         clusterversion.MinSupported,
 	alterTableDropColumn:              clusterversion.MinSupported,
 	alterTableDropConstraint:          clusterversion.MinSupported,
 	alterTableDropNotNull:             clusterversion.MinSupported,
 	alterTypeDropValue:                clusterversion.MinSupported,
 	commentOn:                         clusterversion.MinSupported,
 	createIndex:                       clusterversion.MinSupported,
+	createFunction:                    clusterversion.MinSupported,
 	createSchema:                      clusterversion.MinSupported,
 	createSequence:                    clusterversion.MinSupported,
 	dropIndex:                         clusterversion.MinSupported,
+	dropFunction:                      clusterversion.MinSupported,
 	dropSchema:                        clusterversion.MinSupported,
 	dropSequence:                      clusterversion.MinSupported,
 	dropTable:                         clusterversion.MinSupported,

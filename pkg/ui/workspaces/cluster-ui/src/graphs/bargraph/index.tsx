@@ -1,24 +1,19 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React, { useContext, useEffect, useRef } from "react";
 import classNames from "classnames/bind";
+import React, { useContext, useEffect, useRef } from "react";
 import uPlot, { AlignedData, Options } from "uplot";
 
-import { Visualization } from "../visualization";
+import { TimezoneContext } from "../../contexts";
 import {
   AxisUnits,
   calculateXAxisDomainBarChart,
   calculateYAxisDomain,
 } from "../utils/domain";
-import { TimezoneContext } from "../../contexts";
+import { Visualization } from "../visualization";
 
 import styles from "./bargraph.module.scss";
 import { getStackedBarOpts, stack } from "./bars";

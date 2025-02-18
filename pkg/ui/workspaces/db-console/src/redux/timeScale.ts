@@ -1,31 +1,26 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 /**
  * This module maintains a globally-available time window, currently used by all
  * metrics graphs in the ui.
  */
 
+import { defaultTimeScaleOptions, TimeScale } from "@cockroachlabs/cluster-ui";
+import cloneDeep from "lodash/cloneDeep";
+import moment from "moment-timezone";
 import { Action } from "redux";
 import { put, takeEvery, all } from "redux-saga/effects";
-import cloneDeep from "lodash/cloneDeep";
-import { defaultTimeScaleOptions, TimeScale } from "@cockroachlabs/cluster-ui";
-import moment from "moment-timezone";
 import { createSelector } from "reselect";
 
 import { PayloadAction } from "src/interfaces/action";
-import { AdminUIState } from "src/redux/state";
 import {
   getValueFromSessionStorage,
   setLocalSetting,
 } from "src/redux/localsettings";
+import { AdminUIState } from "src/redux/state";
 
 import {
   invalidateExecutionInsights,

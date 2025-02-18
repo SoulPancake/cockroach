@@ -1,12 +1,7 @@
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -83,7 +78,7 @@ func runJobsStress(ctx context.Context, t test.Test, c cluster.Cluster) {
 	// and adopts 10 jobs at a time.
 	sqlDB.Exec(t, "SET CLUSTER SETTING jobs.registry.interval.adopt='5s'")
 
-	rng, seed := randutil.NewPseudoRand()
+	rng, seed := randutil.NewLockedPseudoRand()
 	t.L().Printf("Rand seed: %d", seed)
 
 	done := make(chan struct{})

@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package bootstrap contains the metadata required to bootstrap the sql
 // schema for a fresh cockroach cluster.
@@ -326,7 +321,7 @@ func InitialValuesFromString(
 	}
 	// Add back the filtered out tenant end key.
 	if !codec.ForSystemTenant() {
-		splits = append(splits, roachpb.RKey(p.PrefixEnd()))
+		splits = append(splits, roachpb.RKey(codec.TenantEndKey()))
 	}
 	return kvs, splits, nil
 }
@@ -455,6 +450,16 @@ func addSystemDescriptorsToSchema(target *MetadataSchema) {
 	target.AddDescriptor(systemschema.TransactionExecInsightsTable)
 	target.AddDescriptor(systemschema.StatementExecInsightsTable)
 
+	// Tables introduced in 24.3
+	target.AddDescriptor(systemschema.TableMetadata)
+
+	// Tables introduced in 25.1
+	target.AddDescriptor(systemschema.SystemJobProgressTable)
+	target.AddDescriptor(systemschema.SystemJobProgressHistoryTable)
+	target.AddDescriptor(systemschema.SystemJobStatusTable)
+	target.AddDescriptor(systemschema.SystemJobMessageTable)
+	target.AddDescriptor(systemschema.PreparedTransactionsTable)
+
 	// Adding a new system table? It should be added here to the metadata schema,
 	// and also created as a migration for older clusters.
 	// If adding a call to AddDescriptor or AddDescriptorForSystemTenant, please
@@ -467,7 +472,7 @@ func addSystemDescriptorsToSchema(target *MetadataSchema) {
 // NumSystemTablesForSystemTenant is the number of system tables defined on
 // the system tenant. This constant is only defined to avoid having to manually
 // update auto stats tests every time a new system table is added.
-const NumSystemTablesForSystemTenant = 56
+const NumSystemTablesForSystemTenant = 62
 
 // addSplitIDs adds a split point for each of the PseudoTableIDs to the supplied
 // MetadataSchema.
@@ -511,6 +516,12 @@ func InitialZoneConfigKVs(
 	metaRangeZoneConf := protoutil.Clone(defaultSystemZoneConfig).(*zonepb.ZoneConfig)
 	livenessZoneConf := protoutil.Clone(defaultSystemZoneConfig).(*zonepb.ZoneConfig)
 
+	// The timeseries zone should inherit everything except for gc.ttlseconds from
+	// the default zone. We create it explicitly here so it's clearly visible
+	// when using SHOW ALL ZONE CONFIGURATIONS.
+	timeseriesZoneConf := zonepb.NewZoneConfig()
+	timeseriesZoneConf.GC = &zonepb.GCPolicy{TTLSeconds: defaultZoneConfig.GC.TTLSeconds}
+
 	// .meta zone config entry with a shorter GC time.
 	metaRangeZoneConf.GC.TTLSeconds = 60 * 60 // 1h
 
@@ -534,6 +545,7 @@ func InitialZoneConfigKVs(
 	add(keys.MetaRangesID, metaRangeZoneConf)
 	add(keys.LivenessRangesID, livenessZoneConf)
 	add(keys.SystemRangesID, systemZoneConf)
+	add(keys.TimeseriesRangesID, timeseriesZoneConf)
 	add(keys.SystemDatabaseID, systemZoneConf)
 	add(keys.ReplicationConstraintStatsTableID, replicationConstraintStatsZoneConf)
 	add(keys.ReplicationStatsTableID, replicationStatsZoneConf)

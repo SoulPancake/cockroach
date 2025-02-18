@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -19,15 +14,16 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
-	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
@@ -93,7 +89,7 @@ func executeNodeShutdown(
 		// is in a healthy state before we start bringing any
 		// nodes down.
 		t.Status("waiting for cluster to be 3x replicated")
-		err := WaitFor3XReplication(ctx, t, t.L(), watcherDB)
+		err := roachtestutil.WaitFor3XReplication(ctx, t.L(), watcherDB)
 		if err != nil {
 			return err
 		}
@@ -122,12 +118,12 @@ func executeNodeShutdown(
 				if err != nil {
 					return errors.Wrap(err, "getting the job status")
 				}
-				jobStatus := jobs.Status(status)
+				jobStatus := jobs.State(status)
 				switch jobStatus {
-				case jobs.StatusSucceeded:
+				case jobs.StateSucceeded:
 					t.Status("job completed")
 					return nil
-				case jobs.StatusRunning:
+				case jobs.StateRunning:
 					t.L().Printf("job %d still running, waiting to succeed", jobID)
 				default:
 					// Waiting for job to complete.
@@ -151,7 +147,9 @@ func executeNodeShutdown(
 		}
 	} else {
 		t.L().Printf(`stopping node gracefully %s`, target)
-		if err := c.StopCockroachGracefullyOnNode(ctx, t.L(), cfg.shutdownNode); err != nil {
+		if err := c.StopE(
+			ctx, t.L(), option.NewStopOpts(option.Graceful(shutdownGracePeriod)), c.Node(cfg.shutdownNode),
+		); err != nil {
 			return errors.Wrapf(err, "could not stop node %s", target)
 		}
 	}
@@ -172,23 +170,73 @@ func executeNodeShutdown(
 	return nil
 }
 
+type checkStatusFunc func(status jobs.State) (success bool, unexpected bool)
+
+func WaitForState(
+	ctx context.Context,
+	db *gosql.DB,
+	jobID jobspb.JobID,
+	check checkStatusFunc,
+	maxWait time.Duration,
+) error {
+	startTime := timeutil.Now()
+	ticker := time.NewTicker(time.Microsecond)
+	defer ticker.Stop()
+	var state string
+	for {
+		select {
+		case <-ticker.C:
+			err := db.QueryRowContext(ctx, `SELECT status FROM [SHOW JOB $1]`, jobID).Scan(&state)
+			if err != nil {
+				return errors.Wrapf(err, "getting the job state %s", state)
+			}
+			success, unexpected := check(jobs.State(state))
+			if unexpected {
+				return errors.Newf("unexpectedly found job %d in state %s", jobID, state)
+			}
+			if success {
+				return nil
+			}
+			if timeutil.Since(startTime) > maxWait {
+				return errors.Newf("job %d did not reach state %s after %s", jobID, state, maxWait)
+			}
+			ticker.Reset(5 * time.Second)
+		case <-ctx.Done():
+			return errors.Wrapf(ctx.Err(), "context canceled while waiting for job to reach state %s", state)
+		}
+	}
+}
+
 func WaitForRunning(
 	ctx context.Context, db *gosql.DB, jobID jobspb.JobID, maxWait time.Duration,
 ) error {
-	return testutils.SucceedsWithinError(func() error {
-		var status jobs.Status
-		if err := db.QueryRowContext(ctx, "SELECT status FROM [SHOW JOB $1]", jobID).Scan(&status); err != nil {
-			return err
-		}
-		switch status {
-		case jobs.StatusPending:
-		case jobs.StatusRunning:
-		default:
-			return errors.Newf("job too fast! job got to state %s before the target node could be shutdown",
-				status)
-		}
-		return nil
-	}, maxWait)
+	return WaitForState(ctx, db, jobID,
+		func(status jobs.State) (success bool, unexpected bool) {
+			switch status {
+			case jobs.StateRunning:
+				return true, false
+			case jobs.StatePending:
+				return false, false
+			default:
+				return false, true
+			}
+		}, maxWait)
+}
+
+func WaitForSucceeded(
+	ctx context.Context, db *gosql.DB, jobID jobspb.JobID, maxWait time.Duration,
+) error {
+	return WaitForState(ctx, db, jobID,
+		func(status jobs.State) (success bool, unexpected bool) {
+			switch status {
+			case jobs.StateSucceeded:
+				return true, false
+			case jobs.StateRunning:
+				return false, false
+			default:
+				return false, true
+			}
+		}, maxWait)
 }
 
 type jobRecord struct {
@@ -280,14 +328,14 @@ func getFractionProgressed(
 	if err != nil {
 		return 0, errors.Wrap(err, "getting the job status and fraction completed")
 	}
-	jobStatus := jobs.Status(status)
+	jobStatus := jobs.State(status)
 	switch jobStatus {
-	case jobs.StatusSucceeded:
+	case jobs.StateSucceeded:
 		if fractionCompleted != 1 {
 			return 0, errors.Newf("job completed but fraction completed is %.2f", fractionCompleted)
 		}
 		return fractionCompleted, nil
-	case jobs.StatusRunning:
+	case jobs.StateRunning:
 		l.Printf("job %d still running, %.2f completed, waiting to succeed", jobID, fractionCompleted)
 		return fractionCompleted, nil
 	default:

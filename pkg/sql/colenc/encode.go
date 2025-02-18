@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colenc
 
@@ -28,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc/valueside"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/idxtype"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -87,7 +83,7 @@ func MakeEncoder(
 	partialIndexes map[descpb.IndexID][]bool,
 	memoryUsageCheck func() error,
 ) BatchEncoder {
-	rh := row.NewRowHelper(codec, desc, desc.WritableNonPrimaryIndexes(), sv, false /*internal*/, metrics)
+	rh := row.NewRowHelper(codec, desc, desc.WritableNonPrimaryIndexes(), nil /* uniqueWithTombstoneIndexes */, sv, false /*internal*/, metrics)
 	rh.Init()
 	colMap := row.ColIDtoRowIndexFromCols(insCols)
 	return BatchEncoder{rh: &rh, b: b, colMap: colMap,
@@ -432,7 +428,7 @@ func (b *BatchEncoder) encodeSecondaryIndex(ctx context.Context, ind catalog.Ind
 
 	// Store nulls we encounter so we can properly make the key unique below.
 	var nulls coldata.Nulls
-	if ind.GetType() == descpb.IndexDescriptor_INVERTED {
+	if ind.GetType() == idxtype.INVERTED {
 		// Since the inverted indexes generate multiple keys per row just handle them
 		// separately.
 		return b.encodeInvertedSecondaryIndex(ctx, ind, kys, b.extraKeys)
@@ -499,7 +495,7 @@ func (b *BatchEncoder) encodeSecondaryIndexNoFamilies(ind catalog.Index, kys []r
 	if err := b.writeColumnValues(kys, values, ind, cols); err != nil {
 		return err
 	}
-	b.p.InitPutBytes(kys, values)
+	b.p.CPutBytesEmpty(kys, values)
 	return nil
 }
 
@@ -561,9 +557,9 @@ func (b *BatchEncoder) encodeSecondaryIndexWithFamilies(
 		// include encoded primary key columns. For other families,
 		// use the tuple encoding for the value.
 		if familyID == 0 {
-			b.p.InitPutBytes(kys, values)
+			b.p.CPutBytesEmpty(kys, values)
 		} else {
-			b.p.InitPutTuples(kys, values)
+			b.p.CPutTuplesEmpty(kys, values)
 		}
 		if err := b.checkMemory(); err != nil {
 			return err
@@ -706,7 +702,7 @@ func (b *BatchEncoder) skipColumnNotInPrimaryIndexValue(
 	colID catid.ColumnID, vec *coldata.Vec, row int,
 ) bool {
 	// Reuse this function but fake out the value and handle composites here.
-	if skip := b.rh.SkipColumnNotInPrimaryIndexValue(colID, tree.DNull); skip {
+	if skip, _ := b.rh.SkipColumnNotInPrimaryIndexValue(colID, tree.DNull); skip {
 		if !b.compositeColumnIDs.Contains(int(colID)) {
 			return true
 		}

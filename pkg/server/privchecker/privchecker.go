@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package privchecker
 
@@ -22,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/syntheticprivilege"
+	"github.com/cockroachdb/redact"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 )
@@ -38,7 +34,7 @@ type adminPrivilegeChecker struct {
 	// comment in pkg/scheduledjobs/env.go on planHookMaker. It should
 	// be cast to AuthorizationAccessor in order to use privilege
 	// checking functions.
-	makeAuthzAccessor func(opName string) (sql.AuthorizationAccessor, func())
+	makeAuthzAccessor func(opName redact.SafeString) (sql.AuthorizationAccessor, func())
 }
 
 // RequireViewActivityPermission is part of the CheckerForRPCHandlers interface.
@@ -291,9 +287,8 @@ func (c *adminPrivilegeChecker) HasGlobalPrivilege(
 	return aa.HasPrivilege(ctx, syntheticprivilege.GlobalPrivilegeObject, privilege, user)
 }
 
-// TestingSetPlannerFn is used in tests only.
 func (c *adminPrivilegeChecker) SetAuthzAccessorFactory(
-	fn func(opName string) (sql.AuthorizationAccessor, func()),
+	fn func(opName redact.SafeString) (sql.AuthorizationAccessor, func()),
 ) {
 	c.makeAuthzAccessor = fn
 }

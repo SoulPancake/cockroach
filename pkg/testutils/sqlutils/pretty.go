@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlutils
 
@@ -28,14 +23,23 @@ func VerifyStatementPrettyRoundtrip(t *testing.T, sql string) {
 	}
 	for i := range stmts {
 		origStmt := stmts[i].AST
-		verifyStatementPrettyRoundTrip(t, sql, origStmt, false /* plpgsql */)
+		verifyStatementPrettyRoundTrip(t, sql, origStmt, SQL)
+
+		// Verify that the AST can be walked.
+		if _, err := tree.SimpleStmtVisit(
+			origStmt,
+			func(expr tree.Expr) (recurse bool, newExpr tree.Expr, err error) { return },
+		); err != nil {
+			t.Fatalf("cannot walk stmt %s %v", stmts[i].SQL, err)
+		}
+
 	}
 }
 
 // verifyStatementPrettyRoundTrip verifies that a SQL or PL/pgSQL statement
 // correctly round trips through the pretty printer.
 func verifyStatementPrettyRoundTrip(
-	t *testing.T, sql string, origStmt tree.NodeFormatter, plpgsql bool,
+	t *testing.T, sql string, origStmt tree.NodeFormatter, p Parser,
 ) {
 	t.Helper()
 	// Dataflow of the statement through these checks:
@@ -79,7 +83,7 @@ func verifyStatementPrettyRoundTrip(
 	if err != nil {
 		t.Fatalf("%s: %s", err, prettyStmt)
 	}
-	parsedPretty, err := parseOne(t, prettyStmt, plpgsql)
+	parsedPretty, err := parseOne(t, prettyStmt, p)
 	if err != nil {
 		t.Fatalf("%s: %s", err, prettyStmt)
 	}
@@ -89,7 +93,7 @@ func verifyStatementPrettyRoundTrip(
 		// Type annotations and unicode strings don't round trip well. Sometimes we
 		// need to reparse the original formatted output and format that for these
 		// to match.
-		reparsedStmt, err := parseOne(t, origFormatted, plpgsql)
+		reparsedStmt, err := parseOne(t, origFormatted, p)
 		if err != nil {
 			t.Fatal(err)
 		}

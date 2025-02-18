@@ -31,20 +31,8 @@ open flag=disabled envs=(foo) open=foo
 ----
 OK
 
-# Open foo with WAL failover set to 'among-stores' in the context
-# of a two-store node that has not yet finalized 24.1. The
-# UnhealthyOperationLatencyThreshold func should return false,
-# indicating that Pebble is not allowed to failover to the secondary yet.
-
-open flag=among-stores envs=(foo,bar) open=foo min-version=(23,2)
-----
-OK
-secondary = bar/auxiliary/wals-among-stores
-UnhealthyOperationLatencyThreshold() = (100ms,false)
-
-# Open foo with WAL failover set to 'among-stores' in the context
-# of a two-store node that HAS finalized 24.1. The
-# UnhealthyOperationLatencyThreshold func should return true,
+# Open foo with WAL failover set to 'among-stores' in the context of a two-store
+# node. The UnhealthyOperationLatencyThreshold func should return true,
 # indicating that Pebble IS allowed to failover to the secondary.
 
 open flag=among-stores envs=(foo,bar) open=foo
@@ -101,14 +89,6 @@ open flag=disabled envs=(foo,bar) open=bar
 ----
 OK
 WALRecoveryDir: foo/auxiliary/wals-among-stores
-
-# Ensure that WAL failover refuses to failover if there's no enterprise
-# license configured.
-open flag=among-stores envs=(foo,bar) open=foo disable-enterprise
-----
-OK
-secondary = bar/auxiliary/wals-among-stores
-UnhealthyOperationLatencyThreshold() = (100ms,false)
 
 open flag=disabled envs=(foo,bar) open=foo
 ----

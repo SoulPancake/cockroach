@@ -1,12 +1,7 @@
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -15,12 +10,23 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/isolation"
+	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scrun"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/fsm"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/errors"
+)
+
+var defaultAutocommitBeforeDDL = settings.RegisterBoolSetting(
+	settings.ApplicationLevel,
+	"sql.defaults.autocommit_before_ddl.enabled",
+	"default value for autocommit_before_ddl session setting; "+
+		"forces transactions to autocommit before running any DDL statement",
+	true,
 )
 
 // maybeAutoCommitBeforeDDL checks if the current transaction needs to be
@@ -38,6 +44,7 @@ func (ex *connExecutor) maybeAutoCommitBeforeDDL(
 		if err := ex.planner.SendClientNotice(
 			ctx,
 			pgnotice.Newf("auto-committing transaction before processing DDL due to autocommit_before_ddl setting"),
+			false, /* immediateFlush */
 		); err != nil {
 			return ex.makeErrEvent(err, ast)
 		}
@@ -52,11 +59,14 @@ func (ex *connExecutor) maybeAutoCommitBeforeDDL(
 	return nil, nil
 }
 
-// maybeUpgradeToSerializable checks if the statement is a schema change, and
-// upgrades the transaction to serializable isolation if it is. If the
-// transaction contains multiple statements, and an upgrade was attempted, an
-// error is returned.
-func (ex *connExecutor) maybeUpgradeToSerializable(ctx context.Context, stmt Statement) error {
+// maybeAdjustTxnForDDL checks if the statement is a schema change and adjusts
+// the txn if it is. The following adjustments will be performed:
+// - upgrading to serializable isolation. If the txn contains multiple
+// statements, and an upgrade was attempted, an error is returned.
+// - disabling buffered writes.
+// TODO(#140695): we disable buffered writes out of caution. We should consider
+// allowing this in the future.
+func (ex *connExecutor) maybeAdjustTxnForDDL(ctx context.Context, stmt Statement) error {
 	p := &ex.planner
 	if tree.CanModifySchema(stmt.AST) {
 		if ex.state.mu.txn.IsoLevel().ToleratesWriteSkew() {
@@ -69,6 +79,10 @@ func (ex *connExecutor) maybeUpgradeToSerializable(ctx context.Context, stmt Sta
 			} else {
 				return txnSchemaChangeErr
 			}
+		}
+		if ex.state.mu.txn.BufferedWritesEnabled() {
+			ex.state.mu.txn.SetBufferedWritesEnabled(false /* enabled */)
+			p.BufferClientNotice(ctx, pgnotice.Newf("disabling buffered writes on the current txn due to schema change"))
 		}
 	}
 	return nil
@@ -112,9 +126,15 @@ func (ex *connExecutor) runPreCommitStages(ctx context.Context) error {
 func (ex *connExecutor) handleWaitingForConcurrentSchemaChanges(
 	ctx context.Context, descID descpb.ID,
 ) error {
+	// If we encountered a missing or dropped / offline descriptor waiting for the schema
+	// change then lets ignore the error, and let the FSM retry, since concurrentSchemaChangeError
+	// errors are retryable. Otherwise, allow the error to bubble back up and kill
+	// the connection.
 	if err := ex.planner.waitForDescriptorSchemaChanges(
 		ctx, descID, *ex.extraTxnState.schemaChangerState,
-	); err != nil {
+	); err != nil &&
+		!catalog.HasInactiveDescriptorError(err) &&
+		!errors.Is(err, catalog.ErrDescriptorNotFound) {
 		return err
 	}
 	return ex.resetTransactionOnSchemaChangeRetry(ctx)

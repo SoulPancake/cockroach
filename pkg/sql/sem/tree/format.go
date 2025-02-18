@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tree
 
@@ -34,7 +29,7 @@ func (f FmtFlags) HasFlags(subset FmtFlags) bool {
 	return f&subset == subset
 }
 
-// HasAnyFlags tests whether any of the given flags are all set.
+// HasAnyFlags tests whether any of the given flags are set.
 func (f FmtFlags) HasAnyFlags(subset FmtFlags) bool {
 	return f&subset != 0
 }
@@ -62,6 +57,10 @@ const (
 	// FmtBareIdentifiers instructs the pretty-printer to print
 	// identifiers without wrapping quotes in any case.
 	FmtBareIdentifiers = FmtFlags(lexbase.EncBareIdentifiers)
+
+	// FmtBareReservedKeywords instructs the pretty-printer to print
+	// reserved keywords without wrapping quotes.
+	FmtBareReservedKeywords = FmtFlags(lexbase.EncBareReservedKeywords)
 
 	// FmtShowPasswords instructs the pretty-printer to not suppress passwords.
 	// If not set, passwords are replaced by *****.
@@ -168,10 +167,6 @@ const (
 	// This flag *overrides* `FmtMarkRedactionNode` above.
 	FmtOmitNameRedaction
 
-	// FmtTagDollarQuotes instructs tags to be kept intact in tagged dollar
-	// quotes. It also applies tags when formatting UDFs.
-	FmtTagDollarQuotes
-
 	// FmtShortenConstants shortens long lists in tuples, VALUES and array
 	// expressions. FmtHideConstants takes precedence over it.
 	FmtShortenConstants
@@ -192,6 +187,10 @@ const (
 	// FmtAlwaysQualifyUserDefinedTypeNames instructs the pretty-printer to include
 	// the name of user-defined types as a three-part name.
 	FmtAlwaysQualifyUserDefinedTypeNames
+
+	// FmtShowFullURIs instructs the pretty-printer to not sanitize URIs. If not
+	// set, URIs are sanitized to prevent leaking secrets.
+	FmtShowFullURIs
 )
 
 const genericArityIndicator = "__more__"
@@ -277,8 +276,8 @@ const (
 	// other things (eg. fixing #33429).
 	FmtExport = FmtBareStrings | fmtRawStrings
 
-	// fmtAlwaysQualifyNames will fully qualify various types of names.
-	fmtAlwaysQualifyNames = FmtAlwaysQualifyTableNames | FmtAlwaysQualifyUserDefinedTypeNames
+	// FmtAlwaysQualifyNames will fully qualify various types of names.
+	FmtAlwaysQualifyNames = FmtAlwaysQualifyTableNames | FmtAlwaysQualifyUserDefinedTypeNames
 )
 
 const flagsRequiringAnnotations = FmtAlwaysQualifyTableNames
@@ -297,7 +296,8 @@ type FmtCtx struct {
 	location             *time.Location
 
 	// NOTE: if you add more flags to this structure, make sure to add
-	// corresponding cleanup code in FmtCtx.Close().
+	// corresponding cleanup code in FmtCtx.Close(), as well as handling in
+	// FmtCtx.Clone().
 
 	// The flags to use for pretty-printing.
 	flags FmtFlags
@@ -392,6 +392,21 @@ func NewFmtCtx(f FmtFlags, opts ...FmtCtxOption) *FmtCtx {
 	return ctx
 }
 
+// Clone returns a new FmtCtx with all the same flags and options as the
+// original.
+func (ctx *FmtCtx) Clone() *FmtCtx {
+	newCtx := fmtCtxPool.Get().(*FmtCtx)
+	newCtx.flags = ctx.flags
+	newCtx.ann = ctx.ann
+	newCtx.indexedVarFormat = ctx.indexedVarFormat
+	newCtx.placeholderFormat = ctx.placeholderFormat
+	newCtx.tableNameFormatter = ctx.tableNameFormatter
+	newCtx.indexedTypeFormatter = ctx.indexedTypeFormatter
+	newCtx.dataConversionConfig = ctx.dataConversionConfig
+	newCtx.location = ctx.location
+	return newCtx
+}
+
 // SetDataConversionConfig sets the DataConversionConfig on ctx and returns the
 // old one.
 func (ctx *FmtCtx) SetDataConversionConfig(
@@ -433,9 +448,28 @@ func (ctx *FmtCtx) WithFlags(flags FmtFlags, fn func()) {
 	fn()
 }
 
-// HasFlags returns true iff the given flags are set in the formatter context.
+// WithoutConstantRedaction modifies FmtCtx to ensure that constants are
+// displayed rather than being replaced by '_', calls fn, then restores the
+// original flags.
+func (ctx *FmtCtx) WithoutConstantRedaction(fn func()) {
+	oldFlags := ctx.flags
+	ctx.flags &= ^FmtHideConstants
+	ctx.flags &= ^FmtAnonymize
+	defer func() { ctx.flags = oldFlags }()
+
+	fn()
+}
+
+// HasFlags returns true iff all of the given flags are set in the formatter
+// context.
 func (ctx *FmtCtx) HasFlags(f FmtFlags) bool {
 	return ctx.flags.HasFlags(f)
+}
+
+// HasAnyFlags returns true iff any of the given flags are set in the formatter
+// context.
+func (ctx *FmtCtx) HasAnyFlags(f FmtFlags) bool {
+	return ctx.flags.HasAnyFlags(f)
 }
 
 // Printf calls fmt.Fprintf on the linked bytes.Buffer. It is provided
@@ -467,6 +501,95 @@ func (ctx *FmtCtx) FormatName(s string) {
 // FormatNameP formats a string reference as a name.
 func (ctx *FmtCtx) FormatNameP(s *string) {
 	ctx.FormatNode((*Name)(s))
+}
+
+// FormatStringConstant formats a constant string value, redacting it if
+// FmtHideConstants is set.
+func (ctx *FmtCtx) FormatStringConstant(s string) {
+	ctx.WriteString("'")
+	if ctx.HasFlags(FmtHideConstants) {
+		ctx.WriteString("_")
+	} else {
+		ctx.WriteString(s)
+	}
+	ctx.WriteString("'")
+}
+
+// FormatStringDollarQuotes formats a string constant with dollar quotes.
+func (ctx *FmtCtx) FormatStringDollarQuotes(s string) {
+	// Find a delimiter that will not collide with any part of the string. This is
+	// very similar to what Postgres does.
+	delimiter := ""
+	if strings.Contains(s, "$$") {
+		delimiter = "funcbody"
+		for strings.Contains(s, "$"+delimiter+"$") {
+			delimiter = delimiter + "x"
+		}
+	}
+	ctx.WriteByte('$')
+	ctx.WriteString(delimiter)
+	ctx.WriteByte('$')
+	if ctx.flags.HasFlags(FmtAnonymize) || ctx.flags.HasFlags(FmtHideConstants) {
+		ctx.WriteString("_")
+	} else {
+		ctx.WriteString(s)
+	}
+	ctx.WriteByte('$')
+	ctx.WriteString(delimiter)
+	ctx.WriteByte('$')
+}
+
+// FormatURIs formats a list of string literals or placeholders containing URIs.
+func (ctx *FmtCtx) FormatURIs(uris []Expr) {
+	if len(uris) > 1 {
+		ctx.WriteString("(")
+	}
+	for i, uri := range uris {
+		if i > 0 {
+			ctx.WriteString(", ")
+		}
+		ctx.FormatURI(uri)
+	}
+	if len(uris) > 1 {
+		ctx.WriteString(")")
+	}
+}
+
+// FormatURI formats a string literal or placeholder containing a URI. If the
+// node is a string literal, we redact the contents to avoid leaking secrets.
+func (ctx *FmtCtx) FormatURI(uri Expr) {
+	switch n := uri.(type) {
+	case *StrVal, *DString:
+		if ctx.HasAnyFlags(
+			FmtShowPasswords | FmtShowFullURIs | FmtHideConstants | FmtConstantsAsUnderscores,
+		) {
+			ctx.FormatNode(n)
+			return
+		}
+		var raw, elided string
+		if str, ok := n.(*StrVal); ok {
+			raw = str.RawString()
+		} else {
+			raw = string(MustBeDString(uri))
+		}
+		if raw == "" || raw == "_" {
+			// Some commands treat empty URIs as special. And if we've re-parsed a URI
+			// formatted with FmtHideConstants, we should not try to interpret it as a
+			// URL but should leave it as-is.
+			ctx.FormatNode(n)
+			return
+		}
+		// TODO(michae2): Call SanitizeExternalStorageURI for fine-grained
+		// sanitization.
+		elided = strings.Trim(PasswordSubstitution, "'")
+		ctx.FormatNode(NewStrVal(elided))
+	case *Placeholder:
+		ctx.FormatNode(n)
+	default:
+		// We don't want to fail to sanitize other literals, so disallow other types
+		// of expressions (which should already be disallowed by the parser anyway).
+		panic(errors.AssertionFailedf("expected *StrVal, *DString, or *Placeholder, found %T", n))
+	}
 }
 
 // FormatNode recurses into a node for pretty-printing.
@@ -658,7 +781,7 @@ func AsStringWithFlags(n NodeFormatter, fl FmtFlags, opts ...FmtCtxOption) strin
 // AsStringWithFQNames pretty prints a node to a string with the
 // FmtAlwaysQualifyTableNames flag (which requires annotations).
 func AsStringWithFQNames(n NodeFormatter, ann *Annotations) string {
-	ctx := NewFmtCtx(fmtAlwaysQualifyNames, FmtAnnotations(ann))
+	ctx := NewFmtCtx(FmtAlwaysQualifyNames, FmtAnnotations(ann))
 	ctx.FormatNode(n)
 	return ctx.CloseAndGetString()
 }

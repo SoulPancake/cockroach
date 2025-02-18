@@ -1,42 +1,37 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-import React, { useContext, useMemo, useState } from "react";
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+import { Heading } from "@cockroachlabs/ui-components";
 import { Col, Row } from "antd";
 import classNames from "classnames/bind";
-import { Heading } from "@cockroachlabs/ui-components";
+import React, { useContext, useMemo, useState } from "react";
 
+import insightsDetailsStyles from "src/insights/workloadInsightDetails/insightsDetails.module.scss";
 import {
   InsightsSortedTable,
   makeInsightsColumns,
 } from "src/insightsTable/insightsTable";
+import insightTableStyles from "src/insightsTable/insightsTable.module.scss";
 import { SummaryCard, SummaryCardItem } from "src/summaryCard";
+import summaryCardStyles from "src/summaryCard/summaryCard.module.scss";
 import { capitalize, Duration } from "src/util";
 import {
   Count,
   DATE_WITH_SECONDS_AND_MILLISECONDS_FORMAT_24_TZ,
 } from "src/util/format";
 // Styles
-import insightsDetailsStyles from "src/insights/workloadInsightDetails/insightsDetails.module.scss";
-import summaryCardStyles from "src/summaryCard/summaryCard.module.scss";
-import insightTableStyles from "src/insightsTable/insightsTable.module.scss";
 
+import { CockroachCloudContext } from "../../contexts";
 import { WaitTimeInsightsLabels } from "../../detailsPanels/waitTimeInsightsPanel";
+import { SortSetting } from "../../sortedtable";
+import { Timestamp } from "../../timestamp";
+import { StmtInsightEvent } from "../types";
 import { getStmtInsightRecommendations } from "../utils";
 import {
   StatementDetailsLink,
   TransactionDetailsLink,
 } from "../workloadInsights/util";
-import { CockroachCloudContext } from "../../contexts";
-import { StmtInsightEvent } from "../types";
-import { SortSetting } from "../../sortedtable";
-import { Timestamp } from "../../timestamp";
 
 import { ContentionStatementDetailsTable } from "./insightDetailsTables";
 

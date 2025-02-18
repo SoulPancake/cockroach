@@ -1,5 +1,5 @@
-// This code has been modified from its original form by Cockroach Labs, Inc.
-// All modifications are Copyright 2024 Cockroach Labs, Inc.
+// This code has been modified from its original form by The Cockroach Authors.
+// All modifications are Copyright 2024 The Cockroach Authors.
 //
 // Copyright 2015 The etcd Authors
 //
@@ -79,7 +79,6 @@ func TestIsLocalMsg(t *testing.T) {
 		{pb.MsgBeat, true},
 		{pb.MsgUnreachable, true},
 		{pb.MsgSnapStatus, true},
-		{pb.MsgCheckQuorum, true},
 		{pb.MsgTransferLeader, false},
 		{pb.MsgProp, false},
 		{pb.MsgApp, false},
@@ -96,6 +95,10 @@ func TestIsLocalMsg(t *testing.T) {
 		{pb.MsgStorageAppendResp, true},
 		{pb.MsgStorageApply, true},
 		{pb.MsgStorageApplyResp, true},
+		{pb.MsgForgetLeader, false},
+		{pb.MsgFortifyLeader, false},
+		{pb.MsgFortifyLeaderResp, false},
+		{pb.MsgDeFortifyLeader, false},
 	}
 
 	for _, tt := range tests {
@@ -114,7 +117,6 @@ func TestIsResponseMsg(t *testing.T) {
 		{pb.MsgBeat, false},
 		{pb.MsgUnreachable, true},
 		{pb.MsgSnapStatus, false},
-		{pb.MsgCheckQuorum, false},
 		{pb.MsgTransferLeader, false},
 		{pb.MsgProp, false},
 		{pb.MsgApp, false},
@@ -131,12 +133,98 @@ func TestIsResponseMsg(t *testing.T) {
 		{pb.MsgStorageAppendResp, true},
 		{pb.MsgStorageApply, false},
 		{pb.MsgStorageApplyResp, true},
+		{pb.MsgForgetLeader, false},
+		{pb.MsgFortifyLeader, false},
+		{pb.MsgFortifyLeaderResp, true},
+		{pb.MsgDeFortifyLeader, false},
 	}
 
 	for i, tt := range tests {
 		got := IsResponseMsg(tt.msgt)
 		if got != tt.isResponse {
 			t.Errorf("#%d: got %v, want %v", i, got, tt.isResponse)
+		}
+	}
+}
+
+func TestMsgFromLeader(t *testing.T) {
+	tests := []struct {
+		msgt            pb.MessageType
+		isMsgFromLeader bool
+	}{
+		{pb.MsgHup, false},
+		{pb.MsgBeat, false},
+		{pb.MsgUnreachable, false},
+		{pb.MsgSnapStatus, false},
+		{pb.MsgTransferLeader, false},
+		{pb.MsgProp, false},
+		{pb.MsgApp, true},
+		{pb.MsgAppResp, false},
+		{pb.MsgVote, false},
+		{pb.MsgVoteResp, false},
+		{pb.MsgSnap, false},
+		{pb.MsgHeartbeat, true},
+		{pb.MsgHeartbeatResp, false},
+		{pb.MsgTimeoutNow, true},
+		{pb.MsgPreVote, false},
+		{pb.MsgPreVoteResp, false},
+		{pb.MsgStorageAppend, false},
+		{pb.MsgStorageAppendResp, false},
+		{pb.MsgStorageApply, false},
+		{pb.MsgStorageApplyResp, false},
+		{pb.MsgForgetLeader, false},
+		{pb.MsgFortifyLeader, true},
+		{pb.MsgFortifyLeaderResp, false},
+		{pb.MsgDeFortifyLeader, true},
+	}
+
+	for i, tt := range tests {
+		got := IsMsgFromLeader(tt.msgt)
+		if got != tt.isMsgFromLeader {
+			t.Errorf("#%d: got %v, want %v", i, got, tt.isMsgFromLeader)
+		}
+		if got {
+			require.True(t, IsMsgIndicatingLeader(tt.msgt),
+				"IsMsgFromLeader should imply IsMsgIndicatingLeader")
+		}
+	}
+}
+
+func TestMsgIndicatingLeader(t *testing.T) {
+	tests := []struct {
+		msgt                  pb.MessageType
+		isMsgIndicatingLeader bool
+	}{
+		{pb.MsgHup, false},
+		{pb.MsgBeat, false},
+		{pb.MsgUnreachable, false},
+		{pb.MsgSnapStatus, false},
+		{pb.MsgTransferLeader, false},
+		{pb.MsgProp, false},
+		{pb.MsgApp, true},
+		{pb.MsgAppResp, false},
+		{pb.MsgVote, false},
+		{pb.MsgVoteResp, false},
+		{pb.MsgSnap, true},
+		{pb.MsgHeartbeat, true},
+		{pb.MsgHeartbeatResp, false},
+		{pb.MsgTimeoutNow, true},
+		{pb.MsgPreVote, false},
+		{pb.MsgPreVoteResp, false},
+		{pb.MsgStorageAppend, false},
+		{pb.MsgStorageAppendResp, false},
+		{pb.MsgStorageApply, false},
+		{pb.MsgStorageApplyResp, false},
+		{pb.MsgForgetLeader, false},
+		{pb.MsgFortifyLeader, true},
+		{pb.MsgFortifyLeaderResp, false},
+		{pb.MsgDeFortifyLeader, true},
+	}
+
+	for i, tt := range tests {
+		got := IsMsgIndicatingLeader(tt.msgt)
+		if got != tt.isMsgIndicatingLeader {
+			t.Errorf("#%d: got %v, want %v", i, got, tt.isMsgIndicatingLeader)
 		}
 	}
 }

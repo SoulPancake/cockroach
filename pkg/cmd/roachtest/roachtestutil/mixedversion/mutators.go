@@ -1,12 +1,7 @@
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package mixedversion
 
@@ -55,7 +50,8 @@ func (m preserveDowngradeOptionRandomizerMutator) Probability() float64 {
 // `preserve_downgrade_option` cluster setting, and reinserts it back
 // in some other point in the test, before all nodes are upgraded. Not
 // every upgrade in the test plan is affected, but the upgrade to the
-// current version is always mutated.
+// current version is always mutated. The length of the returned
+// mutations is always even.
 func (m preserveDowngradeOptionRandomizerMutator) Generate(
 	rng *rand.Rand, plan *TestPlan,
 ) []mutation {
@@ -63,8 +59,8 @@ func (m preserveDowngradeOptionRandomizerMutator) Generate(
 	for _, upgradeSelector := range randomUpgrades(rng, plan) {
 		removeExistingStep := upgradeSelector.
 			Filter(func(s *singleStep) bool {
-				_, ok := s.impl.(allowUpgradeStep)
-				return ok
+				step, ok := s.impl.(allowUpgradeStep)
+				return ok && step.virtualClusterName == install.SystemInterfaceName
 			}).
 			Remove()
 
@@ -83,10 +79,10 @@ func (m preserveDowngradeOptionRandomizerMutator) Generate(
 			// Note that we don't attempt a concurrent insert because the
 			// selected step could be one that restarts a cockroach node,
 			// and `allowUpgradeStep` could fail in that situation.
-			InsertBefore(allowUpgradeStep{})
+			InsertBefore(allowUpgradeStep{virtualClusterName: install.SystemInterfaceName})
 
 		// Finally, we update the context associated with every step where
-		// all nodes are running the next verison to indicate they are in
+		// all nodes are running the next version to indicate they are in
 		// fact in `Finalizing` state. Previously, this would only be set
 		// after `allowUpgradeStep` but, when this mutator is enabled,
 		// `Finalizing` should be `true` as soon as all nodes are on the
@@ -252,8 +248,10 @@ func (m clusterSettingMutator) Generate(rng *rand.Rand, plan *TestPlan) []mutati
 
 			// We skip restart steps as we might insert the cluster setting
 			// change step concurrently with the selected step.
-			_, isRestartNode := s.impl.(restartWithNewBinaryStep)
-			return s.context.System.Stage >= OnStartupStage && !isRestartNode
+			_, isRestartSystem := s.impl.(restartWithNewBinaryStep)
+			_, isRestartTenant := s.impl.(restartVirtualClusterStep)
+			isRestart := isRestartSystem || isRestartTenant
+			return s.context.System.Stage >= OnStartupStage && !isRestart
 		})
 
 	for _, changeStep := range m.changeSteps(rng, len(possiblePointsInTime)) {

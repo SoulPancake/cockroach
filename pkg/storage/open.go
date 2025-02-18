@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
@@ -18,12 +13,11 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/cloud"
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/disk"
 	"github.com/cockroachdb/cockroach/pkg/storage/fs"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
@@ -167,20 +161,21 @@ func MaxOpenFiles(count int) ConfigOption {
 
 }
 
-// CacheSize configures the size of the block cache.
+// CacheSize configures the size of the block cache. Note that this option is
+// ignored if Caches() is also used.
 func CacheSize(size int64) ConfigOption {
 	return func(cfg *engineConfig) error {
-		cfg.cacheSize = &size
+		cfg.opts.CacheSize = size
 		return nil
 	}
 }
 
-// Caches sets the block and table caches. Useful when multiple stores share
+// Caches sets the block and file caches. Useful when multiple stores share
 // the same caches.
-func Caches(cache *pebble.Cache, tableCache *pebble.TableCache) ConfigOption {
+func Caches(cache *pebble.Cache, fileCache *pebble.FileCache) ConfigOption {
 	return func(cfg *engineConfig) error {
 		cfg.opts.Cache = cache
-		cfg.opts.TableCache = tableCache
+		cfg.opts.FileCache = fileCache
 		return nil
 	}
 }
@@ -257,25 +252,25 @@ func errConfigOption(err error) func(*engineConfig) error {
 
 func makeExternalWALDir(
 	engineCfg *engineConfig,
-	externalDir base.ExternalPath,
+	externalDir storagepb.ExternalPath,
 	defaultFS vfs.FS,
-	statsCollector *vfs.DiskWriteStatsCollector,
+	diskWriteStats disk.WriteStatsManager,
 ) (wal.Dir, error) {
 	// If the store is encrypted, we require that all the WAL failover dirs also
 	// be encrypted so that the user doesn't accidentally leak data unencrypted
 	// onto the filesystem.
-	if engineCfg.env.Encryption != nil && len(externalDir.EncryptionOptions) == 0 {
+	if engineCfg.env.Encryption != nil && externalDir.Encryption == nil {
 		return wal.Dir{}, errors.Newf("must provide --enterprise-encryption flag for %q, used as WAL failover path for encrypted store %q",
 			externalDir.Path, engineCfg.env.Dir)
 	}
-	if engineCfg.env.Encryption == nil && len(externalDir.EncryptionOptions) != 0 {
+	if engineCfg.env.Encryption == nil && externalDir.Encryption != nil {
 		return wal.Dir{}, errors.Newf("must provide --enterprise-encryption flag for store %q, specified WAL failover path %q is encrypted",
 			engineCfg.env.Dir, externalDir.Path)
 	}
 	env, err := fs.InitEnv(context.Background(), defaultFS, externalDir.Path, fs.EnvConfig{
 		RW:                engineCfg.env.RWMode(),
-		EncryptionOptions: externalDir.EncryptionOptions,
-	}, statsCollector)
+		EncryptionOptions: externalDir.Encryption,
+	}, diskWriteStats)
 	if err != nil {
 		return wal.Dir{}, err
 	}
@@ -290,10 +285,10 @@ func makeExternalWALDir(
 // another volume in the event the WAL becomes blocked on a write that does not
 // complete within a reasonable duration.
 func WALFailover(
-	walCfg base.WALFailoverConfig,
+	walCfg storagepb.WALFailover,
 	storeEnvs fs.Envs,
 	defaultFS vfs.FS,
-	statsCollector *vfs.DiskWriteStatsCollector,
+	diskWriteStats disk.WriteStatsManager,
 ) ConfigOption {
 	// The set of options available in single-store versus multi-store
 	// configurations vary. This is in part due to the need to store the multiple
@@ -302,15 +297,15 @@ func WALFailover(
 	// stores. Note that the store ID is not known when a store is first opened.
 	if len(storeEnvs) == 1 {
 		switch walCfg.Mode {
-		case base.WALFailoverDefault, base.WALFailoverAmongStores:
+		case storagepb.WALFailoverMode_DEFAULT, storagepb.WALFailoverMode_AMONG_STORES:
 			return noopConfigOption
-		case base.WALFailoverDisabled:
+		case storagepb.WALFailoverMode_DISABLED:
 			// Check if the user provided an explicit previous path. If they did, they
 			// were previously using WALFailoverExplicitPath and are now disabling it.
 			// We need to add the explicilt path to WALRecoveryDirs.
 			if walCfg.PrevPath.IsSet() {
 				return func(cfg *engineConfig) error {
-					walDir, err := makeExternalWALDir(cfg, walCfg.PrevPath, defaultFS, statsCollector)
+					walDir, err := makeExternalWALDir(cfg, walCfg.PrevPath, defaultFS, diskWriteStats)
 					if err != nil {
 						return err
 					}
@@ -324,16 +319,16 @@ func WALFailover(
 			// notices the OPTIONS file encodes a WAL failover secondary that was not
 			// provided to Options.WALRecoveryDirs.
 			return noopConfigOption
-		case base.WALFailoverExplicitPath:
+		case storagepb.WALFailoverMode_EXPLICIT_PATH:
 			// The user has provided an explicit path to which we should fail over WALs.
 			return func(cfg *engineConfig) error {
-				walDir, err := makeExternalWALDir(cfg, walCfg.Path, defaultFS, statsCollector)
+				walDir, err := makeExternalWALDir(cfg, walCfg.Path, defaultFS, diskWriteStats)
 				if err != nil {
 					return err
 				}
 				cfg.opts.WALFailover = makePebbleWALFailoverOptsForDir(cfg.settings, walDir)
 				if walCfg.PrevPath.IsSet() {
-					walDir, err := makeExternalWALDir(cfg, walCfg.PrevPath, defaultFS, statsCollector)
+					walDir, err := makeExternalWALDir(cfg, walCfg.PrevPath, defaultFS, diskWriteStats)
 					if err != nil {
 						return err
 					}
@@ -347,14 +342,14 @@ func WALFailover(
 	}
 
 	switch walCfg.Mode {
-	case base.WALFailoverDefault:
+	case storagepb.WALFailoverMode_DEFAULT:
 		// If the user specified no WAL failover setting, we default to disabling WAL
 		// failover and assume that the previous process did not have WAL failover
 		// enabled (so there's no need to populate Options.WALRecoveryDirs). If an
 		// operator had WAL failover enabled and now wants to disable it, they must
 		// explicitly set --wal-failover=disabled for the next process.
 		return noopConfigOption
-	case base.WALFailoverDisabled:
+	case storagepb.WALFailoverMode_DISABLED:
 		// Check if the user provided an explicit previous path; that's unsupported
 		// in multi-store configurations.
 		if walCfg.PrevPath.IsSet() {
@@ -364,10 +359,10 @@ func WALFailover(
 		// WALFailoverAmongStores.
 
 		// Fallthrough
-	case base.WALFailoverExplicitPath:
+	case storagepb.WALFailoverMode_EXPLICIT_PATH:
 		// Not supported for multi-store configurations.
 		return errConfigOption(errors.Newf("storage: cannot use explicit path --wal-failover option with multiple stores"))
-	case base.WALFailoverAmongStores:
+	case storagepb.WALFailoverMode_AMONG_STORES:
 		// Fallthrough
 	default:
 		panic("unreachable")
@@ -435,7 +430,7 @@ func WALFailover(
 			// Use auxiliary/wals-among-stores within the other stores directory.
 			Dirname: secondaryEnv.PathJoin(secondaryEnv.Dir, base.AuxiliaryDir, "wals-among-stores"),
 		}
-		if walCfg.Mode == base.WALFailoverAmongStores {
+		if walCfg.Mode == storagepb.WALFailoverMode_AMONG_STORES {
 			cfg.opts.WALFailover = makePebbleWALFailoverOptsForDir(cfg.settings, secondary)
 			return nil
 		}
@@ -448,7 +443,6 @@ func WALFailover(
 func makePebbleWALFailoverOptsForDir(
 	settings *cluster.Settings, dir wal.Dir,
 ) *pebble.WALFailoverOptions {
-	cclWALFailoverLogEvery := log.Every(10 * time.Minute)
 	return &pebble.WALFailoverOptions{
 		Secondary: dir,
 		FailoverOptions: wal.FailoverOptions{
@@ -456,20 +450,7 @@ func makePebbleWALFailoverOptsForDir(
 			// UnhealthyOperationLatencyThreshold should be pulled from the
 			// cluster setting.
 			UnhealthyOperationLatencyThreshold: func() (time.Duration, bool) {
-				// WAL failover requires 24.1 to be finalized first. Otherwise, we might
-				// write WALs to a secondary, downgrade to a previous version's binary and
-				// blindly miss WALs. The second return value indicates whether the
-				// WAL manager is allowed to failover to the secondary.
-				//
-				// NB: We do not use settings.Version.IsActive because we do not have a
-				// guarantee that the cluster version has been initialized.
-				versionOK := settings.Version.ActiveVersionOrEmpty(context.TODO()).IsActive(clusterversion.V24_1Start)
-				// WAL failover is a licensed feature.
-				licenseOK := base.CCLDistributionAndEnterpriseEnabled(settings)
-				if !licenseOK && cclWALFailoverLogEvery.ShouldLog() {
-					log.Warningf(context.Background(), "Ignoring WAL failover configuration because it requires an enterprise license.")
-				}
-				return walFailoverUnhealthyOpThreshold.Get(&settings.SV), versionOK && licenseOK
+				return walFailoverUnhealthyOpThreshold.Get(&settings.SV), true
 			},
 		},
 	}
@@ -556,10 +537,6 @@ func Open(
 			}
 			return nil, err
 		}
-	}
-	if cfg.cacheSize != nil && cfg.opts.Cache == nil {
-		cfg.opts.Cache = pebble.NewCache(*cfg.cacheSize)
-		defer cfg.opts.Cache.Unref()
 	}
 	p, err := newPebble(ctx, cfg)
 	if err != nil {

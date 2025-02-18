@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvstreamer
 
@@ -48,8 +43,16 @@ func TestInOrderResultsBuffer(t *testing.T) {
 	)
 	require.NoError(t, err)
 	defer tempEngine.Close()
+	memMonitor := mon.NewMonitor(mon.Options{
+		Name:     mon.MakeMonitorName("test-mem"),
+		Res:      mon.MemoryResource,
+		Settings: st,
+	})
+	memMonitor.Start(ctx, nil, mon.NewStandaloneBudget(math.MaxInt64))
+	defer memMonitor.Stop(ctx)
+	memAcc := memMonitor.MakeBoundAccount()
 	diskMonitor := mon.NewMonitor(mon.Options{
-		Name:     "test-disk",
+		Name:     mon.MakeMonitorName("test-disk"),
 		Res:      mon.DiskResource,
 		Settings: st,
 	})
@@ -57,7 +60,7 @@ func TestInOrderResultsBuffer(t *testing.T) {
 	defer diskMonitor.Stop(ctx)
 
 	budget := newBudget(mon.NewStandaloneUnlimitedAccount(), math.MaxInt /* limitBytes */)
-	diskBuffer := TestResultDiskBufferConstructor(tempEngine, diskMonitor)
+	diskBuffer := TestResultDiskBufferConstructor(tempEngine, memAcc, diskMonitor)
 	b := newInOrderResultsBuffer(budget, diskBuffer)
 	defer b.close(ctx)
 

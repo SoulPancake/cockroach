@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cluster
 
@@ -35,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/security/certnames"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
+	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logflags"
@@ -58,7 +54,7 @@ import (
 const (
 	// We use a docker image mirror to avoid pulling from 3rd party repos, which sometimes have reliability issues.
 	// See https://cockroachlabs.atlassian.net/wiki/spaces/devinf/pages/3462594561/Docker+image+sync for the details.
-	defaultImage  = "us-east1-docker.pkg.dev/crl-docker-sync/docker-mirror/docker.io/library/ubuntu:focal-20210119"
+	defaultImage  = "us-east1-docker.pkg.dev/crl-docker-sync/docker-io/library/ubuntu:focal-20210119"
 	networkPrefix = "cockroachdb_acceptance"
 )
 
@@ -171,7 +167,7 @@ func CreateDocker(
 	cli.NegotiateAPIVersion(ctx)
 
 	clusterID := uuid.MakeV4()
-	clusterIDS := clusterID.Short()
+	clusterIDS := clusterID.Short().String()
 
 	if volumesDir == "" {
 		volumesDir, err = os.MkdirTemp(datapathutils.DebuggableTempDir(), fmt.Sprintf("cockroach-acceptance-%s", clusterIDS))
@@ -489,7 +485,7 @@ func (l *DockerCluster) startNode(ctx context.Context, node *testNode, singleNod
 	for _, store := range node.stores {
 		storeSpec := base.StoreSpec{
 			Path: store.dir,
-			Size: base.SizeSpec{InBytes: int64(store.config.MaxRanges) * maxRangeBytes},
+			Size: storagepb.SizeSpec{Capacity: int64(store.config.MaxRanges) * maxRangeBytes},
 		}
 		cmd = append(cmd, fmt.Sprintf("--store=%s", storeSpec))
 	}

@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -12,8 +9,8 @@ import (
 	"context"
 	"net/url"
 
+	"github.com/cockroachdb/cockroach/pkg/backup/backupresolver"
 	"github.com/cockroachdb/cockroach/pkg/build"
-	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backupresolver"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/cdceval"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedvalidators"
@@ -79,13 +76,13 @@ var alterChangefeedHeader = colinfo.ResultColumns{
 // alterChangefeedPlanHook implements sql.PlanHookFn.
 func alterChangefeedPlanHook(
 	ctx context.Context, stmt tree.Statement, p sql.PlanHookState,
-) (sql.PlanHookRowFn, colinfo.ResultColumns, []sql.PlanNode, bool, error) {
+) (sql.PlanHookRowFn, colinfo.ResultColumns, bool, error) {
 	alterChangefeedStmt, ok := stmt.(*tree.AlterChangefeed)
 	if !ok {
-		return nil, nil, nil, false, nil
+		return nil, nil, false, nil
 	}
 
-	fn := func(ctx context.Context, _ []sql.PlanNode, resultsCh chan<- tree.Datums) error {
+	fn := func(ctx context.Context, resultsCh chan<- tree.Datums) error {
 		jobID, err := func() (jobspb.JobID, error) {
 			origProps := p.SemaCtx().Properties
 			p.SemaCtx().Properties.Require("cdc", tree.RejectSubqueries)
@@ -113,8 +110,11 @@ func alterChangefeedPlanHook(
 		if err != nil {
 			return err
 		}
+		getLegacyPayload := func(ctx context.Context) (*jobspb.Payload, error) {
+			return &jobPayload, nil
+		}
 		err = jobsauth.Authorize(
-			ctx, p, jobID, &jobPayload, jobsauth.ControlAccess, globalPrivileges,
+			ctx, p, jobID, getLegacyPayload, jobPayload.UsernameProto.Decode(), jobPayload.Type(), jobsauth.ControlAccess, globalPrivileges,
 		)
 		if err != nil {
 			return err
@@ -125,7 +125,7 @@ func alterChangefeedPlanHook(
 			return errors.Errorf(`job %d is not changefeed job`, jobID)
 		}
 
-		if job.Status() != jobs.StatusPaused {
+		if job.State() != jobs.StatePaused {
 			return errors.Errorf(`job %d is not paused`, jobID)
 		}
 
@@ -199,10 +199,16 @@ func alterChangefeedPlanHook(
 			alterChangefeedAsOf: resolveTime,
 		}
 
+		newDescription, err := makeChangefeedDescription(ctx, annotatedStmt.CreateChangefeed, newSinkURI, newOptions)
+		if err != nil {
+			return err
+		}
+
 		jobRecord, err := createChangefeedJobRecord(
 			ctx,
 			p,
 			annotatedStmt,
+			newDescription,
 			newSinkURI,
 			newOptions,
 			jobID,
@@ -258,7 +264,7 @@ func alterChangefeedPlanHook(
 		}
 	}
 
-	return fn, alterChangefeedHeader, nil, false, nil
+	return fn, alterChangefeedHeader, false, nil
 }
 
 func getTargetDesc(
@@ -796,8 +802,11 @@ func generateNewProgress(
 			Progress: &jobspb.Progress_HighWater{},
 			Details: &jobspb.Progress_Changefeed{
 				Changefeed: &jobspb.ChangefeedProgress{
+					//lint:ignore SA1019 deprecated usage
 					Checkpoint: &jobspb.ChangefeedProgress_Checkpoint{
 						Spans: existingTargetSpans,
+						// TODO(#140509): ALTER CHANGEFED should handle fine grained
+						// progress and checkpointed timestamp properly.
 					},
 					ProtectedTimestampRecord: ptsRecord,
 				},
@@ -826,6 +835,7 @@ func generateNewProgress(
 		Progress: &jobspb.Progress_HighWater{},
 		Details: &jobspb.Progress_Changefeed{
 			Changefeed: &jobspb.ChangefeedProgress{
+				//lint:ignore SA1019 deprecated usage
 				Checkpoint: &jobspb.ChangefeedProgress_Checkpoint{
 					Spans: mergedSpanGroup.Slice(),
 				},

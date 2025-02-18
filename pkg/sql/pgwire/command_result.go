@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package pgwire
 
@@ -333,11 +328,18 @@ func (r *commandResult) BufferNotice(notice pgnotice.Notice) {
 }
 
 // SendNotice is part of the sql.RestrictedCommandResult interface.
-func (r *commandResult) SendNotice(ctx context.Context, notice pgnotice.Notice) error {
+func (r *commandResult) SendNotice(
+	ctx context.Context, notice pgnotice.Notice, immediateFlush bool,
+) error {
 	if err := r.conn.bufferNotice(ctx, notice); err != nil {
 		return err
 	}
-	return r.conn.Flush(r.pos)
+	if immediateFlush {
+		if err := r.conn.Flush(r.pos); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // SetColumns is part of the sql.RestrictedCommandResult interface.

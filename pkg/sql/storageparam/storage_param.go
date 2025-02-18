@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package storageparam defines interfaces and functions for setting and
 // resetting storage parameters.
@@ -70,7 +65,7 @@ func Set(
 		semaCtx.Properties.Require("table storage parameters", tree.RejectSubqueries)
 
 		// Convert the expressions to a datum.
-		typedExpr, err := tree.TypeCheck(ctx, expr, semaCtx, types.Any)
+		typedExpr, err := tree.TypeCheck(ctx, expr, semaCtx, types.AnyElement)
 		if err != nil {
 			return err
 		}
@@ -134,8 +129,13 @@ func storageParamPreChecks(
 		return errors.AssertionFailedf("only one of setParams and resetParams should be non-nil.")
 	}
 
-	var keys []string
+	keys := make([]string, 0, len(setParams)+len(resetParams))
+	params := make(map[string]struct{}, len(setParams))
 	for _, param := range setParams {
+		if _, exists := params[param.Key]; exists {
+			return pgerror.Newf(pgcode.InvalidParameterValue, "parameter %q specified more than once", param.Key)
+		}
+		params[param.Key] = struct{}{}
 		keys = append(keys, param.Key)
 	}
 	keys = append(keys, resetParams...)

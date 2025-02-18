@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -14,7 +9,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/multitenant/mtinfopb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -265,11 +259,7 @@ func stepTenantServiceState(
 		case mtinfopb.ServiceModeShared, mtinfopb.ServiceModeExternal:
 			switch targetMode {
 			case mtinfopb.ServiceModeNone:
-				if settings.Version.IsActive(ctx, clusterversion.V24_1) {
-					return mtinfopb.ServiceModeStopping, nil
-				} else {
-					return mtinfopb.ServiceModeNone, nil
-				}
+				return mtinfopb.ServiceModeStopping, nil
 			case mtinfopb.ServiceModeExternal, mtinfopb.ServiceModeShared:
 				return 0, errors.WithHint(pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
 					"cannot change service mode %v to %v directly", currentMode, targetMode),

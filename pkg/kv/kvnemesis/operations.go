@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvnemesis
 
@@ -50,6 +45,8 @@ func (op Operation) Result() *Result {
 	case *ChangeReplicasOperation:
 		return &o.Result
 	case *TransferLeaseOperation:
+		return &o.Result
+	case *ChangeSettingOperation:
 		return &o.Result
 	case *ChangeZoneOperation:
 		return &o.Result
@@ -148,6 +145,8 @@ func (op Operation) format(w *strings.Builder, fctx formatCtx) {
 	case *ChangeReplicasOperation:
 		o.format(w, fctx)
 	case *TransferLeaseOperation:
+		o.format(w, fctx)
+	case *ChangeSettingOperation:
 		o.format(w, fctx)
 	case *ChangeZoneOperation:
 		o.format(w, fctx)
@@ -301,8 +300,8 @@ func (op DeleteRangeUsingTombstoneOperation) format(w *strings.Builder, fctx for
 }
 
 func (op AddSSTableOperation) format(w *strings.Builder, fctx formatCtx) {
-	fmt.Fprintf(w, `%s.AddSSTable(%s%s, %s, ... /* @%s */) // %d bytes`,
-		fctx.receiver, fctx.maybeCtx(), fmtKey(op.Span.Key), fmtKey(op.Span.EndKey), op.Seq, len(op.Data))
+	fmt.Fprintf(w, `%s.AddSSTable(%s%s, %s, ... /* @%s */)`,
+		fctx.receiver, fctx.maybeCtx(), fmtKey(op.Span.Key), fmtKey(op.Span.EndKey), op.Seq)
 	if op.AsWrites {
 		fmt.Fprintf(w, ` (as writes)`)
 	}
@@ -395,6 +394,16 @@ func (op ChangeReplicasOperation) format(w *strings.Builder, fctx formatCtx) {
 
 func (op TransferLeaseOperation) format(w *strings.Builder, fctx formatCtx) {
 	fmt.Fprintf(w, `%s.AdminTransferLease(ctx, %s, %d)`, fctx.receiver, fmtKey(op.Key), op.Target)
+	op.Result.format(w)
+}
+
+func (op ChangeSettingOperation) format(w *strings.Builder, fctx formatCtx) {
+	switch op.Type {
+	case ChangeSettingType_SetLeaseType:
+		fmt.Fprintf(w, `env.SetClusterSetting(ctx, %s, %s)`, op.Type, op.LeaseType)
+	default:
+		panic(errors.AssertionFailedf(`unknown ChangeSettingType: %v`, op.Type))
+	}
 	op.Result.format(w)
 }
 

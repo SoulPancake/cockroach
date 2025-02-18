@@ -1,21 +1,17 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { TimeScale } from "@cockroachlabs/cluster-ui";
 import isString from "lodash/isString";
 import map from "lodash/map";
 import React from "react";
 import { connect } from "react-redux";
-import { createSelector } from "reselect";
 import { RouteComponentProps, withRouter } from "react-router-dom";
-import { TimeScale } from "@cockroachlabs/cluster-ui";
+import { createSelector } from "reselect";
 
+import { PayloadAction } from "src/interfaces/action";
 import { refreshLiveness, refreshNodes } from "src/redux/apiReducers";
 import {
   hoverOff as hoverOffAction,
@@ -31,7 +27,9 @@ import {
 } from "src/redux/nodes";
 import { AdminUIState } from "src/redux/state";
 import { setGlobalTimeScaleAction } from "src/redux/statements";
+import { TimeWindow, setMetricsFixedWindow } from "src/redux/timeScale";
 import { nodeIDAttr } from "src/util/constants";
+import { getMatchParamByName } from "src/util/query";
 import {
   GraphDashboardProps,
   storeIDsForNode,
@@ -43,9 +41,6 @@ import {
   PageConfigItem,
 } from "src/views/shared/components/pageconfig";
 import { MetricsDataProvider } from "src/views/shared/containers/metricDataProvider";
-import { getMatchParamByName } from "src/util/query";
-import { PayloadAction } from "src/interfaces/action";
-import { TimeWindow, setMetricsFixedWindow } from "src/redux/timeScale";
 
 import messagesDashboard from "./messages";
 

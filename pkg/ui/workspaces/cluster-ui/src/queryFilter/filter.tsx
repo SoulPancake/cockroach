@@ -1,24 +1,19 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
-import Select from "react-select";
-import { History } from "history";
 import { CaretDown, Cancel } from "@cockroachlabs/icons";
 import { Input } from "antd";
+import { History } from "history";
 import isEqual from "lodash/isEqual";
+import React from "react";
+import Select from "react-select";
 
+import { Button } from "../button";
+import { selectCustomStyles } from "../common";
 import { MultiSelectCheckbox } from "../multiSelectCheckbox/multiSelectCheckbox";
 import { syncHistory } from "../util";
-import { selectCustomStyles } from "../common";
-import { Button } from "../button";
 
 import {
   dropdownButton,

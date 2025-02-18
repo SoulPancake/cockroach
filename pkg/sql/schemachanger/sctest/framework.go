@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sctest
 
@@ -448,6 +443,7 @@ func (e *stageExecStmt) Exec(
 		if len(stmt) == 0 {
 			continue
 		}
+		t.Logf("Starting execution of statment: %+v", stmt)
 		// Bind any variables for the statement.
 		boundSQL := os.Expand(stmt, func(s string) string {
 			switch s {
@@ -876,11 +872,18 @@ func executeSchemaChangeTxn(
 			_, err = conn.ExecContext(
 				ctx, "SET experimental_enable_temp_tables=true",
 			)
+			_, err = conn.ExecContext(
+				ctx, "SET enable_row_level_security=true",
+			)
 			if err != nil {
 				return err
 			}
 			var tx *gosql.Tx
 			tx, err = conn.BeginTx(ctx, nil)
+			if err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, "SET LOCAL autocommit_before_ddl = false")
 			if err != nil {
 				return err
 			}
@@ -954,7 +957,7 @@ func waitForSchemaChangesToFinish(t *testing.T, tdb *sqlutils.SQLRunner) {
 
 func hasLatestSchemaChangeSucceeded(t *testing.T, tdb *sqlutils.SQLRunner) bool {
 	result := tdb.QueryStr(t, fmt.Sprintf(
-		`SELECT status FROM [SHOW JOBS] WHERE job_type IN ('%s') ORDER BY finished DESC LIMIT 1`,
+		`SELECT status FROM [SHOW JOBS] WHERE job_type IN ('%s') ORDER BY finished DESC, job_id DESC LIMIT 1`,
 		jobspb.TypeNewSchemaChange,
 	))
 	return result[0][0] == "succeeded"

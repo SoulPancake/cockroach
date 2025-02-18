@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord
 
@@ -156,7 +151,7 @@ func TestSpanImport(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	metrics := MakeDistSenderMetrics()
+	metrics := MakeDistSenderMetrics(roachpb.Locality{})
 	gt := grpcTransport{
 		opts: SendOptions{
 			metrics: &metrics,
@@ -190,7 +185,7 @@ func TestResponseVerifyFailure(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	metrics := MakeDistSenderMetrics()
+	metrics := MakeDistSenderMetrics(roachpb.Locality{})
 	gt := grpcTransport{
 		opts: SendOptions{
 			metrics: &metrics,
@@ -258,6 +253,12 @@ func (m *mockInternalClient) Batch(
 		}
 	}
 	return br, nil
+}
+
+func (m *mockInternalClient) BatchStream(
+	ctx context.Context, opts ...grpc.CallOption,
+) (kvpb.Internal_BatchStreamClient, error) {
+	return nil, fmt.Errorf("unsupported BatchStream call")
 }
 
 // RangeLookup implements the kvpb.InternalClient interface.

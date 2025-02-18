@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package physicalplan_test
 
@@ -24,9 +19,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/desctestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/distsql"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra/execagg"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/execversion"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
@@ -72,7 +67,7 @@ func runTestFlow(
 		t.Fatal(err)
 	}
 	req := execinfrapb.SetupFlowRequest{
-		Version:           execinfra.Version,
+		Version:           execversion.Latest,
 		LeafTxnInputState: leafInputState,
 		Flow: execinfrapb.FlowSpec{
 			FlowID:     execinfrapb.FlowID{UUID: uuid.MakeV4()},
@@ -190,8 +185,7 @@ func checkDistAggregationInfo(
 	// (e.g. DECIMAL instead of INT).
 	intermediaryTypes := make([]*types.T, numIntermediary)
 	for i, fn := range info.LocalStage {
-		var err error
-		_, returnTyp, err := execagg.GetAggregateInfo(fn, colTypes...)
+		returnTyp, err := execagg.GetAggregateOutputType(fn, colTypes)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -210,7 +204,7 @@ func checkDistAggregationInfo(
 			inputTypes[i] = intermediaryTypes[localIdx]
 		}
 		var err error
-		_, finalOutputTypes[i], err = execagg.GetAggregateInfo(finalInfo.Fn, inputTypes...)
+		finalOutputTypes[i], err = execagg.GetAggregateOutputType(finalInfo.Fn, inputTypes)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -512,7 +506,7 @@ func TestSingleArgumentDistAggregateFunctions(t *testing.T) {
 				continue
 			}
 			// See if this column works with this function.
-			_, _, err := execagg.GetAggregateInfo(fn, col.GetType())
+			_, err := execagg.GetAggregateOutputType(fn, []*types.T{col.GetType()})
 			if err != nil {
 				continue
 			}

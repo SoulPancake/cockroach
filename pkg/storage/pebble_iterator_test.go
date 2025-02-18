@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
@@ -54,11 +49,11 @@ func TestPebbleIterator_Corruption(t *testing.T) {
 	require.NoError(t, p.Flush())
 
 	// Corrupt the SSTs in the DB.
-	err = filepath.Walk(dataDir, func(path string, info stdfs.FileInfo, err error) error {
+	err = filepath.WalkDir(dataDir, func(path string, d stdfs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if !strings.HasSuffix(info.Name(), ".sst") {
+		if !strings.HasSuffix(d.Name(), ".sst") {
 			return nil
 		}
 		file, err := os.OpenFile(path, os.O_WRONLY, 0600)
@@ -110,7 +105,7 @@ func TestPebbleIterator_ExternalCorruption(t *testing.T) {
 	ctx := context.Background()
 	rng := rand.New(rand.NewSource(timeutil.Now().UnixNano()))
 	var f bytes.Buffer
-	w := MakeBackupSSTWriter(ctx, st, &f)
+	w := MakeTransportSSTWriter(ctx, st, &f)
 
 	// Create an example sstable.
 	var rawValue [64]byte

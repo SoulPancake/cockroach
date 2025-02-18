@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -29,12 +24,13 @@ import (
 )
 
 const (
-	crossFlag          = "cross"
-	cockroachTargetOss = "//pkg/cmd/cockroach-oss:cockroach-oss"
-	cockroachTarget    = "//pkg/cmd/cockroach:cockroach"
-	nogoDisableFlag    = "--//build/toolchains:nogo_disable_flag"
-	geosTarget         = "//c-deps:libgeos"
-	devTarget          = "//pkg/cmd/dev:dev"
+	crossFlag       = "cross"
+	lintFlag        = "lint"
+	cockroachTarget = "//pkg/cmd/cockroach:cockroach"
+	nogoEnableFlag  = "--run_validations"
+	nogoDisableFlag = "--norun_validations"
+	geosTarget      = "//c-deps:libgeos"
+	devTarget       = "//pkg/cmd/dev:dev"
 )
 
 type buildTarget struct {
@@ -59,12 +55,13 @@ func makeBuildCmd(runE func(cmd *cobra.Command, args []string) error) *cobra.Com
 		// TODO(irfansharif): Flesh out the example usage patterns.
 		Example: `
 	dev build cockroach
-	dev build cockroach-{short,oss}
+	dev build cockroach-short
 	dev build {opt,exec}gen`,
 		Args: cobra.MinimumNArgs(0),
 		RunE: runE,
 	}
 	buildCmd.Flags().String(volumeFlag, "bzlhome", "the Docker volume to use as the container home directory (only used for cross builds)")
+	buildCmd.Flags().BoolP(lintFlag, "l", false, "perform linting (nogo) as part of the build process (i.e. override nolintonbuild config)")
 	buildCmd.Flags().String(crossFlag, "", "cross-compiles using the builder image (options: linux, linuxarm, macos, macosarm, windows)")
 	buildCmd.Flags().Lookup(crossFlag).NoOptDefVal = "linux"
 	buildCmd.Flags().StringArray(dockerArgsFlag, []string{}, "additional arguments to pass to Docker (only used for cross builds)")
@@ -82,12 +79,12 @@ var buildTargetMapping = map[string]string{
 	"cloudupload":          "//pkg/cmd/cloudupload:cloudupload",
 	"cockroach":            cockroachTarget,
 	"cockroach-sql":        "//pkg/cmd/cockroach-sql:cockroach-sql",
-	"cockroach-oss":        cockroachTargetOss,
 	"cockroach-short":      "//pkg/cmd/cockroach-short:cockroach-short",
 	"crlfmt":               "@com_github_cockroachdb_crlfmt//:crlfmt",
 	"dev":                  devTarget,
 	"docgen":               "//pkg/cmd/docgen:docgen",
 	"docs-issue-gen":       "//pkg/cmd/docs-issue-generation:docs-issue-generation",
+	"drt-run":              "//pkg/cmd/drt-run:drt-run",
 	"execgen":              "//pkg/sql/colexec/execgen/cmd/execgen:execgen",
 	"gofmt":                "@com_github_cockroachdb_gostdlib//cmd/gofmt:gofmt",
 	"goimports":            "@com_github_cockroachdb_gostdlib//x/tools/cmd/goimports:goimports",
@@ -95,11 +92,11 @@ var buildTargetMapping = map[string]string{
 	"geos":                 geosTarget,
 	"langgen":              "//pkg/sql/opt/optgen/cmd/langgen:langgen",
 	"libgeos":              geosTarget,
-	"obsservice":           "//pkg/obsservice/cmd/obsservice:obsservice",
+	"microbench-ci":        "//pkg/cmd/microbench-ci:microbench-ci",
 	"optgen":               "//pkg/sql/opt/optgen/cmd/optgen:optgen",
 	"optfmt":               "//pkg/sql/opt/optgen/cmd/optfmt:optfmt",
-	"oss":                  cockroachTargetOss,
 	"reduce":               "//pkg/cmd/reduce:reduce",
+	"drtprod":              "//pkg/cmd/drtprod:drtprod",
 	"roachprod":            "//pkg/cmd/roachprod:roachprod",
 	"roachprod-stress":     "//pkg/cmd/roachprod-stress:roachprod-stress",
 	"roachprod-microbench": "//pkg/cmd/roachprod-microbench:roachprod-microbench",
@@ -148,21 +145,15 @@ func (d *dev) build(cmd *cobra.Command, commandLine []string) error {
 	targets, additionalBazelArgs := splitArgsAtDash(cmd, commandLine)
 	ctx := cmd.Context()
 	cross := mustGetFlagString(cmd, crossFlag)
+	lint := mustGetFlagBool(cmd, lintFlag)
 	dockerArgs := mustGetFlagStringArray(cmd, dockerArgsFlag)
-
-	// Set up dev cache unless it's disabled via the environment variable or the
-	// testing knob.
-	skipCacheCheck := d.knobs.skipCacheCheckDuringBuild || d.os.Getenv("DEV_NO_REMOTE_CACHE") != ""
-	if !skipCacheCheck {
-		_, err := d.setUpCache(ctx)
-		if err != nil {
-			return err
-		}
-	}
 
 	args, buildTargets, err := d.getBasicBuildArgs(ctx, targets)
 	if err != nil {
 		return err
+	}
+	if lint {
+		args = append(args, nogoEnableFlag)
 	}
 	args = append(args, additionalBazelArgs...)
 	configArgs := getConfigArgs(args)
@@ -198,7 +189,7 @@ func (d *dev) crossBuild(
 	volume string,
 	dockerArgs []string,
 ) error {
-	bazelArgs = append(bazelArgs, fmt.Sprintf("--config=%s", crossConfig), "--config=ci", "-c", "opt")
+	bazelArgs = append(bazelArgs, fmt.Sprintf("--config=%s", crossConfig), "--config=nolintonbuild", "-c", "opt")
 	configArgs := getConfigArgs(bazelArgs)
 	dockerArgs, err := d.getDockerRunArgs(ctx, volume, false, dockerArgs)
 	if err != nil {
@@ -387,9 +378,7 @@ func (d *dev) getBasicBuildArgs(
 	}
 
 	args = append(args, "build")
-	if numCPUs != 0 {
-		args = append(args, fmt.Sprintf("--local_cpu_resources=%d", numCPUs))
-	}
+	addCommonBazelArguments(&args)
 
 	canDisableNogo := true
 	shouldBuildWithTestConfig := false

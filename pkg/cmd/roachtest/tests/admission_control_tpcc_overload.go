@@ -1,24 +1,21 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
@@ -50,33 +47,31 @@ type tpccOLAPSpec struct {
 }
 
 func (s tpccOLAPSpec) run(ctx context.Context, t test.Test, c cluster.Cluster) {
-	crdbNodes, workloadNode := setupTPCC(
+	setupTPCC(
 		ctx, t, t.L(), c, tpccOptions{
 			Warehouses: s.Warehouses, SetupType: usingImport,
 		})
-	// We make use of querybench below, only available through the `workload`
-	// binary.
-	c.Put(ctx, t.DeprecatedWorkload(), "./workload", workloadNode)
-
 	const queryFileName = "queries.sql"
 	// querybench expects the entire query to be on a single line.
 	queryLine := `"` + strings.Replace(tpccOlapQuery, "\n", " ", -1) + `"`
-	c.Run(ctx, option.WithNodes(workloadNode), "echo", queryLine, "> "+queryFileName)
+	c.Run(ctx, option.WithNodes(c.WorkloadNode()), "echo", queryLine, "> "+queryFileName)
 	t.Status("waiting")
-	m := c.NewMonitor(ctx, crdbNodes)
+	m := c.NewMonitor(ctx, c.CRDBNodes())
 	rampDuration := 2 * time.Minute
 	duration := 3 * time.Minute
+	labels := getTpccLabels(s.Warehouses, rampDuration, duration, map[string]string{"concurrency": strconv.Itoa(s.Concurrency)})
 	m.Go(func(ctx context.Context) error {
 		t.WorkerStatus("running querybench")
 		cmd := fmt.Sprintf(
 			"./workload run querybench --db tpcc"+
 				" --tolerate-errors=t"+
 				" --concurrency=%d"+
-				" --query-file %s"+
-				" --histograms="+t.PerfArtifactsDir()+"/stats.json "+
+				" --query-file %s "+
+				" %s"+
 				" --ramp=%s --duration=%s {pgurl:1-%d}",
-			s.Concurrency, queryFileName, rampDuration, duration, c.Spec().NodeCount-1)
-		c.Run(ctx, option.WithNodes(workloadNode), cmd)
+			s.Concurrency, queryFileName, roachtestutil.GetWorkloadHistogramArgs(t, c, labels),
+			rampDuration, duration, c.Spec().NodeCount-1)
+		c.Run(ctx, option.WithNodes(c.WorkloadNode()), cmd)
 		return nil
 	})
 	m.Wait()
@@ -125,7 +120,7 @@ func verifyNodeLiveness(
 	if err := retry.WithMaxAttempts(ctx, retry.Options{
 		MaxBackoff: 500 * time.Millisecond,
 	}, 60, func() (err error) {
-		response, err = getMetrics(ctx, c, t, adminURLs[0], now.Add(-runDuration), now, []tsQuery{
+		response, err = getMetrics(ctx, c, t, adminURLs[0], "", now.Add(-runDuration), now, []tsQuery{
 			{
 				name:      "cr.node.liveness.heartbeatfailures",
 				queryType: total,
@@ -163,16 +158,17 @@ func registerTPCCOverload(r registry.Registry) {
 		name := fmt.Sprintf("admission-control/tpcc-olap/nodes=%d/cpu=%d/w=%d/c=%d",
 			s.Nodes, s.CPUs, s.Warehouses, s.Concurrency)
 		r.Add(registry.TestSpec{
-			Name:              name,
-			Owner:             registry.OwnerAdmissionControl,
-			Benchmark:         true,
-			CompatibleClouds:  registry.AllExceptAWS,
-			Suites:            registry.Suites(registry.Weekly),
-			Cluster:           r.MakeClusterSpec(s.Nodes+1, spec.CPU(s.CPUs)),
-			Run:               s.run,
-			EncryptionSupport: registry.EncryptionMetamorphic,
-			Leases:            registry.MetamorphicLeases,
-			Timeout:           20 * time.Minute,
+			Name:                       name,
+			Owner:                      registry.OwnerAdmissionControl,
+			Benchmark:                  true,
+			CompatibleClouds:           registry.AllExceptAWS,
+			Suites:                     registry.Suites(registry.Weekly),
+			Cluster:                    r.MakeClusterSpec(s.Nodes+1, spec.CPU(s.CPUs), spec.WorkloadNode()),
+			Run:                        s.run,
+			EncryptionSupport:          registry.EncryptionMetamorphic,
+			Leases:                     registry.MetamorphicLeases,
+			Timeout:                    20 * time.Minute,
+			RequiresDeprecatedWorkload: true, // uses querybench
 		})
 	}
 }
@@ -191,13 +187,11 @@ func registerTPCCSevereOverload(r registry.Registry) {
 		Name:             "admission-control/tpcc-severe-overload",
 		Owner:            registry.OwnerAdmissionControl,
 		Benchmark:        true,
-		Cluster:          r.MakeClusterSpec(7, spec.CPU(8)),
+		Cluster:          r.MakeClusterSpec(7, spec.CPU(8), spec.WorkloadNode(), spec.WorkloadNodeCPU(8)),
 		CompatibleClouds: registry.AllClouds,
 		Suites:           registry.Suites(registry.Weekly),
 		Timeout:          5 * time.Hour,
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-			roachNodes := c.Range(1, c.Spec().NodeCount-1)
-			workloadNode := c.Spec().NodeCount
 			warehouseCount := 10000
 			rampTime := 4 * time.Hour
 			if c.IsLocal() {
@@ -205,13 +199,13 @@ func registerTPCCSevereOverload(r registry.Registry) {
 				rampTime = 4 * time.Minute
 			}
 
-			c.Start(ctx, t.L(), option.DefaultStartOpts(), install.MakeClusterSettings(), roachNodes)
+			c.Start(ctx, t.L(), option.DefaultStartOpts(), install.MakeClusterSettings(), c.CRDBNodes())
 			t.Status("initializing (~30m)")
 			cmd := fmt.Sprintf(
 				"./cockroach workload fixtures import tpcc --checks=false --warehouses=%d {pgurl:1}",
 				warehouseCount,
 			)
-			c.Run(ctx, option.WithNodes(c.Node(workloadNode)), cmd)
+			c.Run(ctx, option.WithNodes(c.WorkloadNode()), cmd)
 
 			db := c.Conn(ctx, t.L(), 1)
 			defer db.Close()
@@ -229,11 +223,12 @@ func registerTPCCSevereOverload(r registry.Registry) {
 			// 4) Memory and goroutine unbounded growth with eventual node crashes (up to ~6000 warehouse).
 			t.Status("running workload (fails in ~1 hours)")
 			cmd = fmt.Sprintf(
-				"./cockroach workload run tpcc --duration=1s --ramp=%s --tolerate-errors --warehouses=%d {pgurl:1-6}",
+				"./cockroach workload run tpcc --duration=1s --ramp=%s --tolerate-errors --warehouses=%d {pgurl%s}",
 				rampTime,
 				warehouseCount,
+				c.CRDBNodes(),
 			)
-			c.Run(ctx, option.WithNodes(c.Node(workloadNode)), cmd)
+			c.Run(ctx, option.WithNodes(c.WorkloadNode()), cmd)
 		},
 	})
 }

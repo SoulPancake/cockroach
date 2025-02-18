@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package os
 
@@ -464,10 +459,10 @@ func (o *OS) ListFilesWithSuffix(root, suffix string) ([]string, error) {
 
 	output, err := o.Next(command, func() (output string, err error) {
 		var ret []string
-		if err := filepath.Walk(root, func(path string, info fs.FileInfo, err error) error {
+		if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			// If there's an error walking the tree, throw it away -- there's
 			// nothing interesting we can do with it.
-			if err != nil || info.IsDir() {
+			if err != nil || d.IsDir() {
 				//nolint:returnerrcheck
 				return nil
 			}

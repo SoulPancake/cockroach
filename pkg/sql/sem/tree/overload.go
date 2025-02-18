@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tree
 
@@ -43,6 +38,7 @@ const (
 	_ SpecializedVectorizedBuiltin = iota
 	SubstringStringIntInt
 	CrdbInternalRangeStats
+	CrdbInternalRangeStatsWithErrors
 )
 
 // AggregateOverload is an opaque type which is used to box an eval.AggregateOverload.
@@ -156,22 +152,30 @@ func (t RoutineType) String() string {
 	}
 }
 
+// OverloadPreference is used to disambiguate between eligible overload
+// candidates during type-checking. When multiple overloads are eligible based
+// on types even after applying all the other disambiguation heuristics, the
+// overload with the highest preference will be chosen, if no other overloads
+// have the same preference.
+//
+// NOTE: This is a hack that is necessary because we do not follow all of
+// Postgres's type conversion rules. It should be used sparingly.
+// See #75101.
+type OverloadPreference int
+
+const (
+	OverloadPreferenceUnpreferred = OverloadPreference(-1)
+	OverloadPreferenceNone        = OverloadPreference(0)
+	OverloadPreferencePreferred   = OverloadPreference(1)
+)
+
 // Overload is one of the overloads of a built-in function.
 // Each FunctionDefinition may contain one or more overloads.
 type Overload struct {
 	Types      TypeList
 	ReturnType ReturnTyper
 	Volatility volatility.V
-
-	// PreferredOverload determines overload resolution as follows.
-	// When multiple overloads are eligible based on types even after all of of
-	// the heuristics to pick one have been used, if one of the overloads is a
-	// Overload with the `PreferredOverload` flag set to true it can be selected
-	// rather than returning a no-such-method error.
-	// This should generally be avoided -- avoiding introducing ambiguous
-	// overloads in the first place is a much better solution -- and only done
-	// after consultation with @knz @nvanbenschoten.
-	PreferredOverload bool
+	OverloadPreference
 
 	// Info is a description of the function, which is surfaced on the CockroachDB
 	// docs site on the "Functions and Operators" page. Descriptions typically use
@@ -295,6 +299,11 @@ type Overload struct {
 	// UDFContainsOnlySignature is false, then DEFAULT expressions are included
 	// into RoutineParams.
 	DefaultExprs Exprs
+
+	// SecurityMode is true when privilege checks during function execution
+	// should be performed against the function owner rather than the invoking
+	// user.
+	SecurityMode RoutineSecurity
 }
 
 // params implements the overloadImpl interface.
@@ -304,7 +313,7 @@ func (b Overload) params() TypeList { return b.Types }
 func (b Overload) returnType() ReturnTyper { return b.ReturnType }
 
 // preferred implements the overloadImpl interface.
-func (b Overload) preferred() bool { return b.PreferredOverload }
+func (b Overload) preference() OverloadPreference { return b.OverloadPreference }
 
 func (b Overload) outParamInfo() (RoutineType, []int32, TypeList) {
 	return b.Type, b.OutParamOrdinals, b.OutParamTypes
@@ -314,7 +323,7 @@ func (b Overload) defaultExprs() Exprs {
 	return b.DefaultExprs
 }
 
-// FixedReturnType returns a fixed type that the function returns, returning Any
+// FixedReturnType returns a fixed type that the function returns, returning AnyElement
 // if the return type is based on the function's arguments.
 func (b Overload) FixedReturnType() *types.T {
 	if b.ReturnType == nil {
@@ -391,8 +400,7 @@ func (b Overload) SignatureWithDefaults(simplify bool, includeDefaults bool) str
 type overloadImpl interface {
 	params() TypeList
 	returnType() ReturnTyper
-	// allows manually resolving preference between multiple compatible overloads.
-	preferred() bool
+	preference() OverloadPreference
 	// outParamInfo is only used for routines. See comment on
 	// Overload.OutParamOrdinals and Overload.OutParamTypes for more details.
 	outParamInfo() (_ RoutineType, outParamOrdinals []int32, outParamTypes TypeList)
@@ -417,7 +425,7 @@ type TypeList interface {
 	// Match checks if all types in the TypeList match the corresponding elements in types.
 	Match(types []*types.T) bool
 	// MatchIdentical is similar to match but checks that the types are identical matches,
-	//instead of equivalent matches. See types.T.Equivalent and types.T.Identical.
+	// instead of equivalent matches. See types.T.Equivalent and types.T.Identical.
 	MatchIdentical(types []*types.T) bool
 	// MatchAt checks if the parameter type at index i of the TypeList matches type typ.
 	// In all implementations, types.Null will match with each parameter type, allowing
@@ -483,7 +491,7 @@ func (p ParamTypes) MatchAt(typ *types.T, i int) bool {
 	// The parameterized types for Tuples are checked in the type checking
 	// routines before getting here, so we only need to check if the parameter
 	// type is p types.TUPLE below. This allows us to avoid defining overloads
-	// for types.Tuple{}, types.Tuple{types.Any}, types.Tuple{types.Any, types.Any},
+	// for types.Tuple{}, types.Tuple{types.AnyElement}, types.Tuple{types.AnyElement, types.AnyElement},
 	// etc. for Tuple operators.
 	if typ.Family() == types.TupleFamily {
 		typ = types.AnyTuple
@@ -493,7 +501,14 @@ func (p ParamTypes) MatchAt(typ *types.T, i int) bool {
 
 // MatchAtIdentical is part of the TypeList interface.
 func (p ParamTypes) MatchAtIdentical(typ *types.T, i int) bool {
-	return i < len(p) && (typ.Family() == types.UnknownFamily || p[i].Typ.Identical(typ))
+	return i < len(p) && (typ.Family() == types.UnknownFamily ||
+		p[i].Typ.Identical(typ) ||
+		// Special case for CHAR, CHAR(N), and BPCHAR which are not "identical"
+		// but have the same OID. See #129007.
+		(p[i].Typ.Oid() == oid.T_bpchar && typ.Oid() == oid.T_bpchar) ||
+		// Special case for BIT, BIT(N), and BIT(0) which are not "identical"
+		// but have the same OID. See #132944.
+		(p[i].Typ.Oid() == oid.T_bit && typ.Oid() == oid.T_bit))
 }
 
 // MatchLen is part of the TypeList interface.
@@ -586,7 +601,7 @@ func (HomogeneousType) MatchLen(l int) bool {
 
 // GetAt is part of the TypeList interface.
 func (HomogeneousType) GetAt(i int) *types.T {
-	return types.Any
+	return types.AnyElement
 }
 
 // Length is part of the TypeList interface.
@@ -596,7 +611,7 @@ func (HomogeneousType) Length() int {
 
 // Types is part of the TypeList interface.
 func (HomogeneousType) Types() []*types.T {
-	return []*types.T{types.Any}
+	return []*types.T{types.AnyElement}
 }
 
 func (HomogeneousType) String() string {
@@ -749,7 +764,7 @@ func returnTypeToFixedType(s ReturnTyper, inputTyps []TypedExpr) *types.T {
 	if t := s(inputTyps); t != UnknownReturnType {
 		return t
 	}
-	return types.Any
+	return types.AnyElement
 }
 
 type overloadTypeChecker struct {
@@ -909,7 +924,7 @@ func (s *overloadTypeChecker) typeCheckOverloadedExprs(
 	// If no overloads are provided, just type check parameters and return.
 	if numOverloads == 0 {
 		for i, ok := s.resolvableIdxs.Next(0); ok; i, ok = s.resolvableIdxs.Next(i + 1) {
-			typ, err := s.exprs[i].TypeCheck(ctx, semaCtx, types.Any)
+			typ, err := s.exprs[i].TypeCheck(ctx, semaCtx, types.AnyElement)
 			if err != nil {
 				return pgerror.Wrapf(err, pgcode.InvalidParameterValue,
 					"error type checking resolved expression:")
@@ -941,6 +956,13 @@ func (s *overloadTypeChecker) typeCheckOverloadedExprs(
 		if !foundDefaultExprs {
 			foundDefaultExprs = len(s.overloads[i].defaultExprs()) > 0
 		}
+	}
+
+	if semaCtx != nil && semaCtx.Properties.IgnoreUnpreferredOverloads {
+		// Filter out unpreferred overloads.
+		s.overloadIdxs = filterOverloads(s.overloadIdxs, s.overloads, func(ov overloadImpl) bool {
+			return ov.preference() != OverloadPreferenceUnpreferred
+		})
 	}
 
 	// Filter out incorrect parameter length overloads.
@@ -1006,7 +1028,7 @@ func (s *overloadTypeChecker) typeCheckOverloadedExprs(
 		}
 	}
 	for i, ok := typeableIdxs.Next(0); ok; i, ok = typeableIdxs.Next(i + 1) {
-		paramDesired := types.Any
+		paramDesired := types.AnyElement
 
 		// If all remaining candidates require the same type for this parameter,
 		// begin desiring that type for the corresponding argument expression.
@@ -1073,7 +1095,7 @@ func (s *overloadTypeChecker) typeCheckOverloadedExprs(
 		argTypes := make([]*types.T, 0, len(params))
 		outArgTypes := make([]*types.T, 0, len(outParams))
 		for i := range s.exprs {
-			typedExpr, err := s.exprs[i].TypeCheck(ctx, semaCtx, types.Any)
+			typedExpr, err := s.exprs[i].TypeCheck(ctx, semaCtx, types.AnyElement)
 			if err != nil {
 				panic(errors.HandleAsAssertionFailure(err))
 			}
@@ -1171,6 +1193,43 @@ func (s *overloadTypeChecker) typeCheckOverloadedExprs(
 			if !homogeneousTyp.Equivalent(s.typedExprs[i].ResolvedType()) {
 				homogeneousTyp = nil
 				break
+			}
+		}
+	}
+
+	// If this is a binary operator with one untyped literal or placeholder,
+	// check for a binary operator with parameter types matching the type of the
+	// opposite argument.
+	if inBinOp && len(s.exprs) == 2 {
+		var typ *types.T
+		numConsts := s.constIdxs.Len()
+		numPlaceholders := s.placeholderIdxs.Len()
+		if (numConsts == 1 && numPlaceholders == 0) ||
+			(numConsts == 0 && numPlaceholders == 1) {
+			// If one argument is a constant then it assumes the same type
+			// as the other argument. This matches Postgres's behavior. See
+			// the documentation about "unknown" types (this is how Postgres
+			// initially types constant values):
+			// https://www.postgresql.org/docs/17/typeconv-oper.html.
+			if s.typedExprs[0] != nil {
+				typ = s.typedExprs[0].ResolvedType()
+			} else if s.typedExprs[1] != nil {
+				typ = s.typedExprs[1].ResolvedType()
+			}
+		}
+		if typ != nil {
+			exactOverloads := filterOverloads(s.overloadIdxs, s.overloads,
+				func(ov overloadImpl) bool {
+					typs := ov.params().Types()
+					return typ.Oid() == typs[0].Oid() && typ.Oid() == typs[1].Oid()
+				})
+			if len(exactOverloads) == 1 {
+				prevOverloadIdxs := s.overloadIdxs
+				s.overloadIdxs = exactOverloads
+				if ok, err := checkReturn(ctx, semaCtx, s); ok {
+					return err
+				}
+				s.overloadIdxs = prevOverloadIdxs
 			}
 		}
 	}
@@ -1313,11 +1372,19 @@ func (s *overloadTypeChecker) typeCheckOverloadedExprs(
 		}
 	}
 
-	// The fifth heuristic is to defer to preferred candidates, if one has been
-	// specified in the overload list.
+	// The fifth heuristic is to defer to candidates with the highest
+	// preference.
+	maxPreference := OverloadPreferenceUnpreferred
+	for _, idx := range s.overloadIdxs {
+		if p := s.overloads[idx].preference(); p > maxPreference {
+			maxPreference = p
+		}
+	}
 	if ok, err := filterAttempt(ctx, semaCtx, s, func() {
 		s.overloadIdxs = filterOverloads(
-			s.overloadIdxs, s.overloads, overloadImpl.preferred,
+			s.overloadIdxs, s.overloads, func(o overloadImpl) bool {
+				return o.preference() == maxPreference
+			},
 		)
 	}); ok {
 		return err
@@ -1425,19 +1492,22 @@ func (s *overloadTypeChecker) typeCheckOverloadedExprs(
 	// we prefer overloads where we infer the type of the NULL to be the same as the
 	// other argument. This is used to differentiate the behavior of
 	// STRING[] || NULL and STRING || NULL.
+	// TODO(mgartner): I think we can remove this heuristic in favor of the rule
+	// applied above that types untyped literals and placeholders based on the
+	// input types of overloads.
 	if inBinOp && len(s.exprs) == 2 {
 		if ok, err := filterAttempt(ctx, semaCtx, s, func() {
 			var err error
 			left := s.typedExprs[0]
 			if left == nil {
-				left, err = s.exprs[0].TypeCheck(ctx, semaCtx, types.Any)
+				left, err = s.exprs[0].TypeCheck(ctx, semaCtx, types.AnyElement)
 				if err != nil {
 					return
 				}
 			}
 			right := s.typedExprs[1]
 			if right == nil {
-				right, err = s.exprs[1].TypeCheck(ctx, semaCtx, types.Any)
+				right, err = s.exprs[1].TypeCheck(ctx, semaCtx, types.AnyElement)
 				if err != nil {
 					return
 				}
@@ -1473,14 +1543,14 @@ func (s *overloadTypeChecker) typeCheckOverloadedExprs(
 			var err error
 			left := s.typedExprs[0]
 			if left == nil {
-				left, err = s.exprs[0].TypeCheck(ctx, semaCtx, types.Any)
+				left, err = s.exprs[0].TypeCheck(ctx, semaCtx, types.AnyElement)
 				if err != nil {
 					return
 				}
 			}
 			right := s.typedExprs[1]
 			if right == nil {
-				right, err = s.exprs[1].TypeCheck(ctx, semaCtx, types.Any)
+				right, err = s.exprs[1].TypeCheck(ctx, semaCtx, types.AnyElement)
 				if err != nil {
 					return
 				}
@@ -1569,7 +1639,7 @@ func defaultTypeCheck(
 	ctx context.Context, semaCtx *SemaContext, s *overloadTypeChecker, errorOnPlaceholders bool,
 ) error {
 	for i, ok := s.constIdxs.Next(0); ok; i, ok = s.constIdxs.Next(i + 1) {
-		typ, err := s.exprs[i].TypeCheck(ctx, semaCtx, types.Any)
+		typ, err := s.exprs[i].TypeCheck(ctx, semaCtx, types.AnyElement)
 		if err != nil {
 			return pgerror.Wrapf(err, pgcode.InvalidParameterValue,
 				"error type checking constant value")
@@ -1578,7 +1648,7 @@ func defaultTypeCheck(
 	}
 	for i, ok := s.placeholderIdxs.Next(0); ok; i, ok = s.placeholderIdxs.Next(i + 1) {
 		if errorOnPlaceholders {
-			if _, err := s.exprs[i].TypeCheck(ctx, semaCtx, types.Any); err != nil {
+			if _, err := s.exprs[i].TypeCheck(ctx, semaCtx, types.AnyElement); err != nil {
 				return err
 			}
 		}
@@ -1692,8 +1762,11 @@ func formatCandidates(prefix string, candidates []overloadImpl, filter []uint8) 
 		}
 		buf.WriteString(") -> ")
 		buf.WriteString(returnTypeToFixedType(candidate.returnType(), inputTyps).String())
-		if candidate.preferred() {
+		switch candidate.preference() {
+		case OverloadPreferencePreferred:
 			buf.WriteString(" [preferred]")
+		case OverloadPreferenceUnpreferred:
+			buf.WriteString(" [unpreferred]")
 		}
 		buf.WriteByte('\n')
 	}

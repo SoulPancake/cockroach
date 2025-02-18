@@ -1,21 +1,16 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import { connect } from "react-redux";
-import { withRouter } from "react-router-dom";
 import {
   TransactionDetailsStateProps,
   TransactionDetailsDispatchProps,
   TransactionDetails,
 } from "@cockroachlabs/cluster-ui";
+import { connect } from "react-redux";
 import { RouteComponentProps } from "react-router";
+import { withRouter } from "react-router-dom";
 
 import {
   refreshNodes,
@@ -23,23 +18,28 @@ import {
   refreshTxnInsights,
   refreshUserSQLRoles,
 } from "src/redux/apiReducers";
-import { AdminUIState } from "src/redux/state";
 import { nodeRegionsByIDSelector } from "src/redux/nodes";
+import { AdminUIState } from "src/redux/state";
+import { setGlobalTimeScaleAction } from "src/redux/statements";
+import { selectTimeScale } from "src/redux/timeScale";
+import { selectHasAdminRole } from "src/redux/user";
+import { txnFingerprintIdAttr } from "src/util/constants";
+import { getMatchParamByName } from "src/util/query";
+import { selectTxnInsightsByFingerprint } from "src/views/insights/insightsSelectors";
 import {
   reqSortSetting,
   limitSetting,
   selectTxns,
   requestTimeLocalSetting,
 } from "src/views/transactions/transactionsPage";
-import { setGlobalTimeScaleAction } from "src/redux/statements";
-import { selectTimeScale } from "src/redux/timeScale";
-import { selectTxnInsightsByFingerprint } from "src/views/insights/insightsSelectors";
-import { selectHasAdminRole } from "src/redux/user";
-import { getMatchParamByName } from "src/util/query";
-import { txnFingerprintIdAttr } from "src/util/constants";
 
 export default withRouter(
-  connect<TransactionDetailsStateProps, TransactionDetailsDispatchProps, RouteComponentProps, AdminUIState>(
+  connect<
+    TransactionDetailsStateProps,
+    TransactionDetailsDispatchProps,
+    RouteComponentProps,
+    AdminUIState
+  >(
     (
       state: AdminUIState,
       props: RouteComponentProps,

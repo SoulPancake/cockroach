@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scmutationexec
 
@@ -101,5 +96,16 @@ func (i *immediateVisitor) SetFunctionBody(ctx context.Context, op scop.SetFunct
 	fn.SetFuncBody(op.Body.Body)
 	fn.SetLang(op.Body.Lang.Lang)
 
+	return nil
+}
+
+func (i *immediateVisitor) SetFunctionSecurity(
+	ctx context.Context, op scop.SetFunctionSecurity,
+) error {
+	fn, err := i.checkOutFunction(ctx, op.FunctionID)
+	if err != nil {
+		return err
+	}
+	fn.SetSecurity(op.Security)
 	return nil
 }

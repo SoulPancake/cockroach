@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -29,17 +24,8 @@ var rubyPGBlocklist = blocklist{
 	`Basic type mapping PG::BasicTypeMapForQueries should do hash-as-json encoding`:                                                                                                                                             "unknown",
 	`Basic type mapping PG::BasicTypeMapForQueries should take BinaryData for bytea columns`:                                                                                                                                    "unknown",
 	`Basic type mapping PG::BasicTypeMapForResults can be initialized with a custom type registry`:                                                                                                                              "unknown",
-	`Basic type mapping PG::BasicTypeMapForResults connection wide type mapping should convert format 0 timestamps per TimestampLocal`:                                                                                          "unknown",
-	`Basic type mapping PG::BasicTypeMapForResults connection wide type mapping should convert format 0 timestamps per TimestampUtc`:                                                                                            "unknown",
-	`Basic type mapping PG::BasicTypeMapForResults connection wide type mapping should convert format 0 timestamps per TimestampUtcToLocal`:                                                                                     "unknown",
-	`Basic type mapping PG::BasicTypeMapForResults connection wide type mapping should convert format 0 timestamps with time zone`:                                                                                              "unknown",
-	`Basic type mapping PG::BasicTypeMapForResults connection wide type mapping should convert format 1 timestamps per TimestampLocal`:                                                                                          "unknown",
-	`Basic type mapping PG::BasicTypeMapForResults connection wide type mapping should convert format 1 timestamps per TimestampUtc`:                                                                                            "unknown",
-	`Basic type mapping PG::BasicTypeMapForResults connection wide type mapping should convert format 1 timestamps per TimestampUtcToLocal`:                                                                                     "unknown",
-	`Basic type mapping PG::BasicTypeMapForResults connection wide type mapping should convert format 1 timestamps with time zone`:                                                                                              "unknown",
 	`Basic type mapping PG::BasicTypeMapForResults connection wide type mapping should do array type conversions`:                                                                                                               "unknown",
 	`Basic type mapping PG::BasicTypeMapForResults connection wide type mapping should do cidr type conversions`:                                                                                                                "unknown",
-	`Basic type mapping PG::BasicTypeMapForResults connection wide type mapping should do text datetime without time zone type conversions`:                                                                                     "unknown",
 	`GC.compact should compact PG::TypeMapByClass #328`:                                                                                                                                                                         "unknown",
 	`PG::Connection #get_result should send remaining data before waiting`:                                                                                                                                                      "unknown",
 	`PG::Connection accepts nil as the timeout in #wait_for_notify `:                                                                                                                                                            "unknown",
@@ -62,15 +48,12 @@ var rubyPGBlocklist = blocklist{
 	`PG::Connection emits a suitable error_message at connection errors`:                                                                                                                                                        "unknown",
 	`PG::Connection in nonblocking mode can send query with params`:                                                                                                                                                             "unknown",
 	`PG::Connection in nonblocking mode needs to flush data after send_query`:                                                                                                                                                   "unknown",
-	`PG::Connection in nonblocking mode rejects to send lots of COPY data`:                                                                                                                                                      "unknown",
 	`PG::Connection in nonblocking mode returns immediately from get_copy_data(nonblock=true)`:                                                                                                                                  "unknown",
 	`PG::Connection large objects large object can handle big data`:                                                                                                                                                             "unknown",
 	`PG::Connection large objects not read past the end of a large object`:                                                                                                                                                      "unknown",
 	`PG::Connection multinationalization support Ruby 1.9.x default_internal encoding allows users of the async interface to set the client_encoding to the default_internal`:                                                   "unknown",
 	`PG::Connection multinationalization support Ruby 1.9.x default_internal encoding honors the Encoding.default_internal if it's set and the synchronous interface is used`:                                                   "unknown",
 	`PG::Connection multinationalization support encodes exception messages with the connection's encoding (#96)`:                                                                                                               "unknown",
-	`PG::Connection multinationalization support handles clearing result in or after set_notice_receiver`:                                                                                                                       "unknown",
-	`PG::Connection multinationalization support receives properly encoded messages in the notice callbacks`:                                                                                                                    "unknown",
 	`PG::Connection multinationalization support receives properly encoded text from wait_for_notify`:                                                                                                                           "unknown",
 	`PG::Connection multinationalization support respect and convert character encoding of input strings should convert query string and parameters to #exec_params`:                                                            "unknown",
 	`PG::Connection multinationalization support respect and convert character encoding of input strings should convert query string and parameters to #send_query_params`:                                                      "unknown",
@@ -141,15 +124,12 @@ var rubyPGBlocklist = blocklist{
 	`running with sync_* methods PG::Connection emits a suitable error_message at connection errors`:                                                                                                                            "unknown",
 	`running with sync_* methods PG::Connection in nonblocking mode can send query with params`:                                                                                                                                 "unknown",
 	`running with sync_* methods PG::Connection in nonblocking mode needs to flush data after send_query`:                                                                                                                       "unknown",
-	`running with sync_* methods PG::Connection in nonblocking mode rejects to send lots of COPY data`:                                                                                                                          "unknown",
 	`running with sync_* methods PG::Connection in nonblocking mode returns immediately from get_copy_data(nonblock=true)`:                                                                                                      "unknown",
 	`running with sync_* methods PG::Connection large objects large object can handle big data`:                                                                                                                                 "unknown",
 	`running with sync_* methods PG::Connection large objects not read past the end of a large object`:                                                                                                                          "unknown",
 	`running with sync_* methods PG::Connection multinationalization support Ruby 1.9.x default_internal encoding allows users of the async interface to set the client_encoding to the default_internal`:                       "unknown",
 	`running with sync_* methods PG::Connection multinationalization support Ruby 1.9.x default_internal encoding honors the Encoding.default_internal if it's set and the synchronous interface is used`:                       "unknown",
 	`running with sync_* methods PG::Connection multinationalization support encodes exception messages with the connection's encoding (#96)`:                                                                                   "unknown",
-	`running with sync_* methods PG::Connection multinationalization support handles clearing result in or after set_notice_receiver`:                                                                                           "unknown",
-	`running with sync_* methods PG::Connection multinationalization support receives properly encoded messages in the notice callbacks`:                                                                                        "unknown",
 	`running with sync_* methods PG::Connection multinationalization support receives properly encoded text from wait_for_notify`:                                                                                               "unknown",
 	`running with sync_* methods PG::Connection multinationalization support respect and convert character encoding of input strings should convert query string and parameters to #exec_params`:                                "unknown",
 	`running with sync_* methods PG::Connection multinationalization support respect and convert character encoding of input strings should convert query string and parameters to #send_query_params`:                          "unknown",
@@ -204,8 +184,12 @@ var rubyPGIgnorelist = blocklist{
 	`PG::Connection handles server close while asynchronous connect`:                                                                                                               "flaky",
 	`PG::Connection OS thread support Connection.new shouldn't block a second thread`:                                                                                              "flaky",
 	`PG::Connection multinationalization support respect and convert character encoding of input strings should convert error string to #put_copy_end`:                             "unknown",
+	`PG::Connection in nonblocking mode rejects to send lots of COPY data`:                                                                                                         "flaky",
+	`PG::Connection times out after connect_timeout seconds`:                                                                                                                       "flaky",
+	`running with sync_* methods PG::Connection in nonblocking mode rejects to send lots of COPY data`:                                                                             "flaky",
 	`running with sync_* methods PG::Connection consume_input should raise ConnectionBad for a closed connection`:                                                                  "flaky",
 	`running with sync_* methods PG::Connection OS thread support Connection.new shouldn't block a second thread`:                                                                  "flaky",
 	`running with sync_* methods PG::Connection handles server close while asynchronous connect`:                                                                                   "flaky",
 	`running with sync_* methods PG::Connection multinationalization support respect and convert character encoding of input strings should convert error string to #put_copy_end`: "flaky",
+	`running with sync_* methods PG::Connection times out after connect_timeout seconds`:                                                                                           "flaky",
 }

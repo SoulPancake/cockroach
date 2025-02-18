@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -543,6 +538,8 @@ func (p *planner) getDescriptorsFromTargetListForPrivilegeChange(
 							objectType: privilege.Sequence,
 						},
 					)
+				} else if targets.Tables.SequenceOnly {
+					return nil, pgerror.Newf(pgcode.WrongObjectType, "%s is not a sequence", tableDesc.GetName())
 				} else {
 					descs = append(
 						descs,
@@ -567,7 +564,7 @@ func (p *planner) getFullyQualifiedNamesFromIDs(
 	ctx context.Context, ids []descpb.ID,
 ) (fullyQualifiedNames []string, _ error) {
 	for _, id := range ids {
-		desc, err := p.Descriptors().ByID(p.txn).Get().Desc(ctx, id)
+		desc, err := p.Descriptors().ByIDWithoutLeased(p.txn).Get().Desc(ctx, id)
 		if err != nil {
 			return nil, err
 		}
@@ -594,7 +591,7 @@ func (p *planner) getFullyQualifiedNamesFromIDs(
 func (p *planner) getQualifiedSchemaName(
 	ctx context.Context, desc catalog.SchemaDescriptor,
 ) (*tree.ObjectNamePrefix, error) {
-	dbDesc, err := p.Descriptors().ByID(p.txn).WithoutNonPublic().Get().Database(ctx, desc.GetParentID())
+	dbDesc, err := p.Descriptors().ByIDWithoutLeased(p.txn).WithoutNonPublic().Get().Database(ctx, desc.GetParentID())
 	if err != nil {
 		return nil, err
 	}
@@ -611,7 +608,7 @@ func (p *planner) getQualifiedSchemaName(
 func (p *planner) getQualifiedTypeName(
 	ctx context.Context, desc catalog.TypeDescriptor,
 ) (*tree.TypeName, error) {
-	dbDesc, err := p.Descriptors().ByID(p.txn).WithoutNonPublic().Get().Database(ctx, desc.GetParentID())
+	dbDesc, err := p.Descriptors().ByIDWithoutLeased(p.txn).WithoutNonPublic().Get().Database(ctx, desc.GetParentID())
 	if err != nil {
 		return nil, err
 	}

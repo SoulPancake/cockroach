@@ -1,5 +1,5 @@
-// This code has been modified from its original form by Cockroach Labs, Inc.
-// All modifications are Copyright 2024 Cockroach Labs, Inc.
+// This code has been modified from its original form by The Cockroach Authors.
+// All modifications are Copyright 2024 The Cockroach Authors.
 //
 // Copyright 2015 The etcd Authors
 //
@@ -20,15 +20,25 @@ package raft
 import (
 	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/raft/quorum"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftlogger"
 	pb "github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/raft/tracker"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 )
 
 // Status contains information about this Raft peer and its view of the system.
 // The Progress is only populated on the leader.
 type Status struct {
 	BasicStatus
-	Config   tracker.Config
+	Config   quorum.Config
+	Progress map[pb.PeerID]tracker.Progress
+}
+
+// SparseStatus is a variant of Status without Config or Progress.Inflights,
+// which are expensive to copy.
+type SparseStatus struct {
+	BasicStatus
 	Progress map[pb.PeerID]tracker.Progress
 }
 
@@ -41,14 +51,13 @@ type BasicStatus struct {
 
 	Applied uint64
 
-	LeadTransferee pb.PeerID
+	LeadTransferee   pb.PeerID
+	LeadSupportUntil hlc.Timestamp
 }
 
-// SparseStatus is a variant of Status without Config and Progress.Inflights,
-// which are expensive to copy.
-type SparseStatus struct {
-	BasicStatus
-	Progress map[pb.PeerID]tracker.Progress
+// Empty returns true if the receiver is empty.
+func (b BasicStatus) Empty() bool {
+	return b == BasicStatus{}
 }
 
 // withProgress calls the supplied visitor to introspect the progress for the
@@ -66,7 +75,7 @@ func withProgress(r *raft, visitor func(id pb.PeerID, typ ProgressType, pr track
 }
 
 func getProgressCopy(r *raft) map[pb.PeerID]tracker.Progress {
-	m := make(map[pb.PeerID]tracker.Progress)
+	m := make(map[pb.PeerID]tracker.Progress, r.trk.Len())
 	r.trk.Visit(func(id pb.PeerID, pr *tracker.Progress) {
 		p := *pr
 		p.Inflights = pr.Inflights.Clone()
@@ -85,6 +94,13 @@ func getBasicStatus(r *raft) BasicStatus {
 	s.HardState = r.hardState()
 	s.SoftState = r.softState()
 	s.Applied = r.raftLog.applied
+
+	// NOTE: we assign to LeadSupportUntil even if RaftState is not currently
+	// StateLeader. The replica may have been the leader and stepped down to a
+	// follower before its lead support ran out.
+	s.LeadSupportUntil = r.fortificationTracker.LeadSupportUntil()
+
+	assertTrue((s.RaftState == pb.StateLeader) == (s.Lead == r.id), "inconsistent lead / raft state")
 	return s
 }
 
@@ -92,10 +108,10 @@ func getBasicStatus(r *raft) BasicStatus {
 func getStatus(r *raft) Status {
 	var s Status
 	s.BasicStatus = getBasicStatus(r)
-	if s.RaftState == StateLeader {
+	if s.RaftState == pb.StateLeader {
 		s.Progress = getProgressCopy(r)
 	}
-	s.Config = r.trk.Config.Clone()
+	s.Config = r.config.Clone()
 	return s
 }
 
@@ -103,22 +119,21 @@ func getStatus(r *raft) Status {
 //
 // [*] See struct definition for what this entails.
 func getSparseStatus(r *raft) SparseStatus {
-	status := SparseStatus{
-		BasicStatus: getBasicStatus(r),
-	}
-	if status.RaftState == StateLeader {
-		status.Progress = map[pb.PeerID]tracker.Progress{}
+	var s SparseStatus
+	s.BasicStatus = getBasicStatus(r)
+	if s.RaftState == pb.StateLeader {
+		s.Progress = make(map[pb.PeerID]tracker.Progress, r.trk.Len())
 		withProgress(r, func(id pb.PeerID, _ ProgressType, pr tracker.Progress) {
-			status.Progress[id] = pr
+			s.Progress[id] = pr
 		})
 	}
-	return status
+	return s
 }
 
 // MarshalJSON translates the raft status into JSON.
 func (s Status) MarshalJSON() ([]byte, error) {
-	j := fmt.Sprintf(`{"id":"%x","term":%d,"vote":"%x","commit":%d,"lead":"%x","raftState":%q,"applied":%d,"progress":{`,
-		s.ID, s.Term, s.Vote, s.Commit, s.Lead, s.RaftState, s.Applied)
+	j := fmt.Sprintf(`{"id":"%x","term":%d,"vote":"%x","commit":%d,"lead":"%x","leadEpoch":"%d","raftState":%q,"applied":%d,"progress":{`,
+		s.ID, s.Term, s.Vote, s.Commit, s.Lead, s.LeadEpoch, s.RaftState, s.Applied)
 
 	if len(s.Progress) == 0 {
 		j += "},"
@@ -138,7 +153,7 @@ func (s Status) MarshalJSON() ([]byte, error) {
 func (s Status) String() string {
 	b, err := s.MarshalJSON()
 	if err != nil {
-		getLogger().Panicf("unexpected error: %v", err)
+		raftlogger.GetLogger().Panicf("unexpected error: %v", err)
 	}
 	return string(b)
 }

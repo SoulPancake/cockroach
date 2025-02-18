@@ -1,34 +1,29 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React, { useCallback, useState } from "react";
-import copy from "copy-to-clipboard";
-import { message } from "antd";
 import CopyOutlined from "@ant-design/icons/CopyOutlined";
 import { InlineAlert } from "@cockroachlabs/ui-components";
+import { message } from "antd";
 import classNames from "classnames/bind";
+import copy from "copy-to-clipboard";
+import React, { useCallback, useState } from "react";
 
-import { Modal } from "../modal";
-import { Text, TextTypes } from "../text";
-import { Button } from "../button";
+import { Anchor } from "../anchor";
 import {
   executeIndexRecAction,
   IndexActionResponse,
 } from "../api/indexActionsApi";
+import { Button } from "../button";
+import { Modal } from "../modal";
+import { Text, TextTypes } from "../text";
 import {
   alterIndex,
   createIndex,
   dropIndex,
   onlineSchemaChanges,
 } from "../util";
-import { Anchor } from "../anchor";
 
 import styles from "./indexActionBtn.module.scss";
 import { InsightType } from "./types";

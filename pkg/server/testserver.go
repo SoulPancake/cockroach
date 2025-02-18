@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -59,7 +54,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlclustersettings"
 	"github.com/cockroachdb/cockroach/pkg/storage"
-	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/upgrade/upgradebase"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -75,6 +69,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
+	"github.com/cockroachdb/redact"
 	"github.com/gogo/protobuf/proto"
 	"google.golang.org/grpc"
 )
@@ -100,8 +95,6 @@ func makeTestBaseConfig(st *cluster.Settings, tr *tracing.Tracer) BaseConfig {
 	baseCfg := MakeBaseConfig(st, tr, base.DefaultTestStoreSpec)
 	// Test servers start in secure mode by default.
 	baseCfg.Insecure = false
-	// Configure test storage engine.
-	baseCfg.StorageEngine = storage.DefaultStorageEngine
 	// Load test certs. In addition, the tests requiring certs
 	// need to call securityassets.SetLoader(securitytest.EmbeddedAssets)
 	// in their init to mock out the file system calls for calls to AssetFS,
@@ -149,7 +142,6 @@ func makeTestConfigFromParams(params base.TestServerArgs) Config {
 		st = cluster.MakeClusterSettings()
 	}
 
-	st.ExternalIODir = params.ExternalIODir
 	tr := params.Tracer
 	if params.Tracer == nil {
 		tr = tracing.NewTracerWithOpt(context.TODO(), tracing.WithClusterSettings(&st.SV), tracing.WithTracingMode(params.TracingDefault))
@@ -170,6 +162,7 @@ func makeTestConfigFromParams(params base.TestServerArgs) Config {
 	cfg.Locality = params.Locality
 	cfg.StartDiagnosticsReporting = params.StartDiagnosticsReporting
 	cfg.DisableSQLServer = params.DisableSQLServer
+	cfg.ExternalIODir = params.ExternalIODir
 	if params.TraceDir != "" {
 		if err := initTraceDir(params.TraceDir); err == nil {
 			cfg.InflightTraceDirName = params.TraceDir
@@ -305,8 +298,6 @@ func makeTestConfigFromParams(params base.TestServerArgs) Config {
 	if params.Knobs.AdmissionControlOptions == nil {
 		cfg.TestingKnobs.AdmissionControlOptions = &admission.Options{}
 	}
-
-	cfg.ObsServiceAddr = params.ObsServiceAddr
 
 	return cfg
 }
@@ -549,6 +540,14 @@ func (ts *testServer) RaftTransport() interface{} {
 	return nil
 }
 
+// StoreLivenessTransport is part of the serverutils.StorageLayerInterface.
+func (ts *testServer) StoreLivenessTransport() interface{} {
+	if ts != nil {
+		return ts.storelivenessTransport
+	}
+	return nil
+}
+
 // AmbientCtx implements serverutils.ApplicationLayerInterface. This
 // retrieves the ambient context for this server. This is intended for
 // exclusive use by test code.
@@ -562,6 +561,11 @@ func (ts *testServer) TestingKnobs() *base.TestingKnobs {
 		return &ts.Cfg.TestingKnobs
 	}
 	return nil
+}
+
+// ExternalIODir is part of the serverutils.ApplicationLayerInterface.
+func (ts *testServer) ExternalIODir() string {
+	return ts.cfg.ExternalIODir
 }
 
 // SQLServerInternal is part of the serverutils.ApplicationLayerInterface.
@@ -601,6 +605,7 @@ func (ts *testServer) startDefaultTestTenant(
 	}
 
 	params := base.TestTenantArgs{
+		TenantName: ts.params.DefaultTenantName,
 		// Currently, all the servers leverage the same tenant ID. We may
 		// want to change this down the road, for more elaborate testing.
 		TenantID:                  serverutils.TestTenantID(),
@@ -616,33 +621,36 @@ func (ts *testServer) startDefaultTestTenant(
 		StartDiagnosticsReporting: ts.params.StartDiagnosticsReporting,
 		Settings:                  tenantSettings,
 	}
-
-	// Since we're creating a tenant, it doesn't make sense to pass through the
-	// Server testing knobs, since the bulk of them only apply to the system
-	// tenant. Any remaining knobs which are required by the tenant should be
-	// passed through here.
-	params.TestingKnobs.Server = &TestingKnobs{}
-
-	if ts.params.Knobs.Server != nil {
-		params.TestingKnobs.Server.(*TestingKnobs).DiagnosticsTestingKnobs = ts.params.Knobs.Server.(*TestingKnobs).DiagnosticsTestingKnobs
-	}
+	ts.setupTenantTestingKnobs(&params.TestingKnobs)
 	return ts.StartTenant(ctx, params)
 }
 
 func (ts *testServer) getSharedProcessDefaultTenantArgs() base.TestSharedProcessTenantArgs {
 	args := base.TestSharedProcessTenantArgs{
-		TenantName:  "test-tenant",
+		TenantName:  ts.params.DefaultTenantName,
 		TenantID:    serverutils.TestTenantID(),
 		Knobs:       ts.params.Knobs,
 		UseDatabase: ts.params.UseDatabase,
 		Settings:    ts.params.Settings,
 	}
-	// See comment above on separate process tenant regarding the testing knobs.
-	args.Knobs.Server = &TestingKnobs{}
-	if ts.params.Knobs.Server != nil {
-		args.Knobs.Server.(*TestingKnobs).DiagnosticsTestingKnobs = ts.params.Knobs.Server.(*TestingKnobs).DiagnosticsTestingKnobs
-	}
+	ts.setupTenantTestingKnobs(&args.Knobs)
 	return args
+}
+
+func (ts *testServer) setupTenantTestingKnobs(tenantKnobs *base.TestingKnobs) {
+	// Since we're creating a tenant, it doesn't make sense to pass through the
+	// Server testing k, since the bulk of them only apply to the system
+	// tenant. Any remaining k which are required by the tenant should be
+	// passed through here.
+	tenantKnobs.Server = &TestingKnobs{}
+	if ts.params.Knobs.Server != nil {
+		tenantKnobs.Server.(*TestingKnobs).DiagnosticsTestingKnobs =
+			ts.params.Knobs.Server.(*TestingKnobs).DiagnosticsTestingKnobs
+		tenantKnobs.Server.(*TestingKnobs).ContextTestingKnobs = rpc.ContextTestingKnobs{
+			InjectedLatencyOracle:  ts.params.Knobs.Server.(*TestingKnobs).ContextTestingKnobs.InjectedLatencyOracle,
+			InjectedLatencyEnabled: ts.params.Knobs.Server.(*TestingKnobs).ContextTestingKnobs.InjectedLatencyEnabled,
+		}
+	}
 }
 
 func (ts *testServer) startSharedProcessDefaultTestTenant(
@@ -785,6 +793,12 @@ func (ts *testServer) PreStart(ctx context.Context) error {
 	func(args base.TestSharedProcessTenantArgs) {
 		ts.topLevelServer.serverController.mu.Lock()
 		defer ts.topLevelServer.serverController.mu.Unlock()
+		// Note: Since we are fetching default tenant args, only the default tenant
+		// (i.e., demoapp, test-tenant) is present here. If a test starts another
+		// secondary tenant with different arguments (such as testing knobs), those
+		// arguments won't be present in the testArgs map. To prevent the race
+		// condition mentioned earlier, we should disable the server controller
+		// tenant watcher and start those tenants explicitly on every node.
 		ts.topLevelServer.serverController.mu.testArgs[args.TenantName] = args
 	}(ts.getSharedProcessDefaultTenantArgs())
 	return ts.topLevelServer.PreStart(ctx)
@@ -895,6 +909,9 @@ type testTenant struct {
 	// pgPreServer handles SQL connections prior to routing them to a
 	// specific tenant.
 	pgPreServer *pgwire.PreServeConnHandler
+	// deploymentMode specifies the tenant's deployment mode.
+	// Allowed values: ExternalProcess or SharedProcess.
+	deploymentMode serverutils.DeploymentMode
 }
 
 var _ serverutils.ApplicationLayerInterface = &testTenant{}
@@ -932,6 +949,11 @@ func (t *testTenant) HTTPAddr() string {
 // RPCAddr is part of the serverutils.ApplicationLayerInterface.
 func (t *testTenant) RPCAddr() string {
 	return t.Cfg.Addr
+}
+
+// ExternalIODir is part of the serverutils.ApplicationLayerInterface.
+func (t *testTenant) ExternalIODir() string {
+	return t.Cfg.ExternalIODir
 }
 
 // SQLConn is part of the serverutils.ApplicationLayerInterface.
@@ -1238,6 +1260,11 @@ func (t *testTenant) SettingsWatcher() interface{} {
 	return t.sql.settingsWatcher
 }
 
+// DeploymentMode is part of the serverutils.ApplicationLayerInterface.
+func (t *testTenant) DeploymentMode() serverutils.DeploymentMode {
+	return t.deploymentMode
+}
+
 // WaitForTenantCapabilities is part of the serverutils.TenantControlInterface.
 func (ts *testServer) WaitForTenantCapabilities(
 	ctx context.Context,
@@ -1265,7 +1292,7 @@ func (ts *testServer) WaitForTenantCapabilities(
 	// the closed timestamp interval required to see new updates.
 	ts.tenantCapabilitiesWatcher.TestingRestart()
 
-	return testutils.SucceedsSoonError(func() error {
+	wrappedFn := func() error {
 		capabilities, found := ts.TenantCapabilitiesReader().GetCapabilities(tenID)
 		if !found {
 			return errors.Newf("%scapabilities not ready for tenant %v", errPrefix, tenID)
@@ -1279,7 +1306,8 @@ func (ts *testServer) WaitForTenantCapabilities(
 		}
 
 		return nil
-	})
+	}
+	return retry.ForDuration(200*time.Second, wrappedFn)
 }
 
 // StartSharedProcessTenant is part of the serverutils.TenantControlInterface.
@@ -1291,7 +1319,7 @@ func (ts *testServer) StartSharedProcessTenant(
 	}
 	// Helper function to execute SQL statements.
 	ie := ts.InternalExecutor().(*sql.InternalExecutor)
-	execSQL := func(opName, stmt string, qargs ...interface{}) error {
+	execSQL := func(opName redact.RedactableString, stmt string, qargs ...interface{}) error {
 		_, err := ie.ExecEx(ctx, opName, nil /* txn */, sessiondata.NodeUserSessionDataOverride, stmt, qargs...)
 		return err
 	}
@@ -1395,6 +1423,7 @@ func (ts *testServer) StartSharedProcessTenant(
 		pgL:            sqlServerWrapper.loopbackPgL,
 		httpTestServer: hts,
 		drain:          sqlServerWrapper.drainServer,
+		deploymentMode: serverutils.SharedProcess,
 	}
 
 	sqlDB, err := ts.SQLConnE(serverutils.DBName("cluster:" + string(args.TenantName) + "/" + args.UseDatabase))
@@ -1542,15 +1571,15 @@ func (ts *testServer) StartTenant(
 
 	ie := ts.InternalExecutor().(*sql.InternalExecutor)
 	if !params.DisableCreateTenant {
-		rowCount, err := ie.Exec(
+		row, err := ie.QueryRow(
 			ctx, "testserver-check-tenant-active", nil,
-			"SELECT 1 FROM system.tenants WHERE id=$1 AND active=true",
+			"SELECT name FROM system.tenants WHERE id=$1 AND active=true",
 			params.TenantID.ToUint64(),
 		)
 		if err != nil {
 			return nil, err
 		}
-		if rowCount == 0 {
+		if row == nil {
 			// Tenant doesn't exist. Create it.
 			if _, err := ie.Exec(
 				ctx, "testserver-create-tenant", nil /* txn */, "SELECT crdb_internal.create_tenant($1, $2)",
@@ -1558,7 +1587,7 @@ func (ts *testServer) StartTenant(
 			); err != nil {
 				return nil, err
 			}
-		} else if params.TenantName != "" {
+		} else if params.TenantName != "" && params.TenantName != roachpb.TenantName(tree.MustBeDString(row[0])) {
 			_, err := ie.Exec(ctx, "rename-test-tenant", nil,
 				`ALTER TENANT [$1] RENAME TO $2`,
 				params.TenantID.ToUint64(), params.TenantName)
@@ -1630,7 +1659,6 @@ func (ts *testServer) StartTenant(
 		st = cluster.MakeTestingClusterSettings()
 	}
 
-	st.ExternalIODir = params.ExternalIODir
 	sqlCfg := makeTestSQLConfig(st, params.TenantID)
 	sqlCfg.TenantLoopbackAddr = ts.AdvRPCAddr()
 	if params.MemoryPoolSize != 0 {
@@ -1644,7 +1672,11 @@ func (ts *testServer) StartTenant(
 	if stopper == nil {
 		// We don't share the stopper with the server because we want their Tracers
 		// to be different, to simulate them being different processes.
-		tr := tracing.NewTracerWithOpt(ctx, tracing.WithClusterSettings(&st.SV), tracing.WithTracingMode(params.TracingDefault))
+		tr := params.Tracer
+		if tr == nil {
+			tr = tracing.NewTracerWithOpt(ctx, tracing.WithClusterSettings(&st.SV), tracing.WithTracingMode(params.TracingDefault))
+		}
+
 		stopper = stop.NewStopper(stop.WithTracer(tr))
 		// The server's stopper stops the tenant, for convenience.
 		// Use main server quiesce as a signal to stop tenants stopper. In the
@@ -1663,7 +1695,10 @@ func (ts *testServer) StartTenant(
 			return nil, err
 		}
 	} else if stopper.Tracer() == nil {
-		tr := tracing.NewTracerWithOpt(ctx, tracing.WithClusterSettings(&st.SV), tracing.WithTracingMode(params.TracingDefault))
+		tr := params.Tracer
+		if tr == nil {
+			tr = tracing.NewTracerWithOpt(ctx, tracing.WithClusterSettings(&st.SV), tracing.WithTracingMode(params.TracingDefault))
+		}
 		stopper.SetTracer(tr)
 	}
 
@@ -1681,6 +1716,7 @@ func (ts *testServer) StartTenant(
 	baseCfg.CPUProfileDirName = ts.Cfg.BaseConfig.CPUProfileDirName
 	baseCfg.GoroutineDumpDirName = ts.Cfg.BaseConfig.GoroutineDumpDirName
 	baseCfg.ExternalIODirConfig = params.ExternalIODirConfig
+	baseCfg.ExternalIODir = params.ExternalIODir
 
 	// Grant the tenant the default capabilities.
 	if err := ts.grantDefaultTenantCapabilities(ctx, params.TenantID, params.SkipTenantCheck); err != nil {
@@ -1764,6 +1800,7 @@ func (ts *testServer) StartTenant(
 		http:           sw.http,
 		drain:          sw.drainServer,
 		pgL:            sw.loopbackPgL,
+		deploymentMode: serverutils.ExternalProcess,
 	}, err
 }
 
@@ -1891,6 +1928,11 @@ func (ts *testServer) MustGetSQLNetworkCounter(name string) int64 {
 		reg.AddMetricStruct(m)
 	}
 	return mustGetSQLCounterForRegistry(reg, name)
+}
+
+// DeploymentMode is part of the serverutils.ApplicationLayerInterface.
+func (ts *testServer) DeploymentMode() serverutils.DeploymentMode {
+	return serverutils.SingleTenant
 }
 
 // Locality is part of the serverutils.ApplicationLayerInterface.
@@ -2498,14 +2540,14 @@ func TestingMakeLoggingContexts(
 	appTenantID roachpb.TenantID,
 ) (sysContext, appContext context.Context) {
 	ctxSysTenant := context.Background()
-	ctxSysTenant = context.WithValue(ctxSysTenant, serverident.ServerIdentificationContextKey{}, &idProvider{
+	ctxSysTenant = serverident.ContextWithServerIdentification(ctxSysTenant, &idProvider{
 		tenantID:   roachpb.SystemTenantID,
 		clusterID:  &base.ClusterIDContainer{},
 		serverID:   &base.NodeIDContainer{},
 		tenantName: roachpb.NewTenantNameContainer("system"),
 	})
 	ctxAppTenant := context.Background()
-	ctxAppTenant = context.WithValue(ctxAppTenant, serverident.ServerIdentificationContextKey{}, &idProvider{
+	ctxAppTenant = serverident.ContextWithServerIdentification(ctxAppTenant, &idProvider{
 		tenantID:   appTenantID,
 		clusterID:  &base.ClusterIDContainer{},
 		serverID:   &base.NodeIDContainer{},
@@ -2540,7 +2582,7 @@ func (ts *testServer) RPCClientConn(
 func (ts *testServer) RPCClientConnE(user username.SQLUsername) (*grpc.ClientConn, error) {
 	ctx := context.Background()
 	rpcCtx := ts.NewClientRPCContext(ctx, user)
-	return rpcCtx.GRPCDialNode(ts.AdvRPCAddr(), ts.NodeID(), rpc.DefaultClass).Connect(ctx)
+	return rpcCtx.GRPCDialNode(ts.AdvRPCAddr(), ts.NodeID(), ts.Locality(), rpc.DefaultClass).Connect(ctx)
 }
 
 // GetAdminClient is part of the serverutils.ApplicationLayerInterface.
@@ -2581,7 +2623,7 @@ func (t *testTenant) RPCClientConn(
 func (t *testTenant) RPCClientConnE(user username.SQLUsername) (*grpc.ClientConn, error) {
 	ctx := context.Background()
 	rpcCtx := t.NewClientRPCContext(ctx, user)
-	return rpcCtx.GRPCDialPod(t.AdvRPCAddr(), t.SQLInstanceID(), rpc.DefaultClass).Connect(ctx)
+	return rpcCtx.GRPCDialPod(t.AdvRPCAddr(), t.SQLInstanceID(), t.Locality(), rpc.DefaultClass).Connect(ctx)
 }
 
 // GetAdminClient is part of the serverutils.ApplicationLayerInterface.

@@ -1,16 +1,12 @@
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package mixedversion
 
 import (
+	"fmt"
 	"math/rand"
 	"reflect"
 	"testing"
@@ -37,18 +33,20 @@ func TestPreserveDowngradeOptionRandomizerMutator(t *testing.T) {
 	require.NotEmpty(t, mutations)
 	require.True(t, len(mutations)%2 == 0, "should produce even number of mutations") // one removal and one insertion per upgrade
 
-	// First half of mutations should be the removals of the existing
-	// `allowUpgradeStep`s.
-	for j := 0; j < numUpgrades/2; j++ {
+	// Mutations should be a removal (of the existing
+	// `allowUpgradeStep`), followed by an insertion of the same step in
+	// a different spot.
+	var j int
+	for j < len(mutations) {
+		// Removal
 		require.Equal(t, mutationRemove, mutations[j].op)
 		require.IsType(t, allowUpgradeStep{}, mutations[j].reference.impl)
-	}
 
-	// Second half of mutations should be insertions of new
-	// `allowUpgradeStep`s.
-	for j := numUpgrades / 2; j < len(mutations); j++ {
-		require.Equal(t, mutationInsertBefore, mutations[j].op)
-		require.IsType(t, allowUpgradeStep{}, mutations[j].impl)
+		// Insertion
+		require.Equal(t, mutationInsertBefore, mutations[j+1].op)
+		require.IsType(t, allowUpgradeStep{}, mutations[j+1].impl)
+
+		j += 2 // check next pair
 	}
 }
 
@@ -67,7 +65,7 @@ func TestClusterSettingMutator(t *testing.T) {
 	// words, there should be at least one node running at least
 	// `minVersion`, so that we are able to service the cluster setting
 	// change request.
-	verifyVersionRequirement := func(minVersion *clusterupgrade.Version, m mutation) {
+	verifyVersionRequirement := func(minVersion *clusterupgrade.Version, m mutation, plan *TestPlan) {
 		if minVersion == nil {
 			return
 		}
@@ -84,7 +82,8 @@ func TestClusterSettingMutator(t *testing.T) {
 
 		require.NotEmpty(
 			t, nodesInValidVersion,
-			"attempting to change setting but no node can service request",
+			"attempting to change setting but no node can service request (minVersion: %s). Mutation:\n%s\nPlan:\n%s",
+			minVersion, fmt.Sprintf("op: %d | ref: %d", m.op, m.reference.ID), plan.PrettyPrint(),
 		)
 	}
 
@@ -92,11 +91,6 @@ func TestClusterSettingMutator(t *testing.T) {
 		numUpgrades int, possibleValues []interface{}, options []clusterSettingMutatorOption,
 	) bool {
 		mvt := newBasicUpgradeTest(NumUpgrades(numUpgrades))
-		mvt.predecessorFunc = func(rng *rand.Rand, v *clusterupgrade.Version, n int) ([]*clusterupgrade.Version, error) {
-			// NB: we need at least `maxUpgrades` (defined in the generator
-			// below) versions here.
-			return parseVersions([]string{"v19.2.0", "v22.1.28", "v22.2.2", "v23.1.9", "v23.2.7", "v24.1.3"}), nil
-		}
 
 		plan, err := mvt.plan()
 		require.NoError(t, err)
@@ -112,7 +106,7 @@ func TestClusterSettingMutator(t *testing.T) {
 		// For every mutation:
 		var prevImpl singleStepProtocol
 		for j, m := range mutations {
-			verifyVersionRequirement(mut.minVersion, m)
+			verifyVersionRequirement(mut.minVersion, m, plan)
 
 			switch step := m.impl.(type) {
 			case setClusterSettingStep:

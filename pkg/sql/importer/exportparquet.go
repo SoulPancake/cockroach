@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package importer
 
@@ -25,11 +20,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/parquet"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/cockroachdb/cockroach/pkg/util/unique"
 	"github.com/cockroachdb/errors"
 )
 
@@ -107,7 +102,7 @@ func (sp *parquetWriterProcessor) Run(ctx context.Context, output execinfra.RowR
 	defer memAcc.Close(ctx)
 
 	instanceID := sp.flowCtx.EvalCtx.NodeID.SQLInstanceID()
-	uniqueID := builtins.GenerateUniqueInt(builtins.ProcessUniqueID(instanceID))
+	uniqueID := unique.GenerateUniqueInt(unique.ProcessUniqueID(instanceID))
 
 	err := func() error {
 		typs := sp.input.OutputTypes()
@@ -250,15 +245,16 @@ func (sp *parquetWriterProcessor) Run(ctx context.Context, output execinfra.RowR
 		return nil
 	}()
 
-	// TODO(dt): pick up tracing info in trailing meta
-	execinfra.DrainAndClose(
-		ctx, output, err, func(context.Context, execinfra.RowReceiver) {} /* pushTrailingMeta */, sp.input)
+	execinfra.DrainAndClose(ctx, sp.flowCtx, sp.input, output, err)
 }
 
 // Resume is part of the execinfra.Processor interface.
 func (sp *parquetWriterProcessor) Resume(output execinfra.RowReceiver) {
 	panic("not implemented")
 }
+
+// Close is part of the execinfra.Processor interface.
+func (*parquetWriterProcessor) Close(context.Context) {}
 
 // Resume is part of the execinfra.Processor interface.
 func (sp *parquetWriterProcessor) testingKnobsOrNil() *ExportTestingKnobs {

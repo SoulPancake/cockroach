@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package concurrency provides a concurrency manager structure that
 // encapsulates the details of concurrency control and contention handling for
@@ -295,9 +290,14 @@ type RangeStateListener interface {
 	// replica is the leaseholder going forward.
 	OnRangeLeaseUpdated(_ roachpb.LeaseSequence, isLeaseholder bool)
 
-	// OnRangeSplit informs the concurrency manager that its range has split off
-	// a new range to its RHS.
-	OnRangeSplit()
+	// OnRangeSplit informs the concurrency manager that its range
+	// has split off a new range to its RHS. The provided key
+	// should be the new RHS StartKey (LHS EndKey). Note that this
+	// is inclusives so all locks on keys greater or equal to this
+	// key will be cleared. The returned LockAcquistion structs
+	// represent locks that we may want to acquire on the RHS
+	// replica before it is serving requests.
+	OnRangeSplit(roachpb.Key) []roachpb.LockAcquisition
 
 	// OnRangeMerge informs the concurrency manager that its range has merged
 	// into its LHS neighbor. This is not called on the LHS range being merged
@@ -437,6 +437,10 @@ type Request struct {
 	// The SafeFormatter capable of formatting the request. This is used to enrich
 	// logging with request level information when latches conflict.
 	BaFmt redact.SafeFormatter
+
+	// DeadlockTimeout is the amount of time that the request will wait on a lock
+	// before pushing the lock holder's transaction for deadlock detection.
+	DeadlockTimeout time.Duration
 }
 
 // Guard is returned from Manager.SequenceReq. The guard is passed back in to
@@ -1030,4 +1034,8 @@ type requestQueuer interface {
 	// Clear empties the queue(s) and causes all waiting requests to
 	// return. If disable is true, future requests must not be enqueued.
 	Clear(disable bool)
+
+	// ClearGE empties the queue(s) for any keys greater or equal
+	// to than the given key.
+	ClearGE(roachpb.Key) []roachpb.LockAcquisition
 }

@@ -1,15 +1,8 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React, { useCallback, useEffect, useState, useMemo } from "react";
-import ReactDOM from "react-dom";
 import {
   Button,
   FilterCheckboxOption,
@@ -19,12 +12,14 @@ import {
   FilterSearchOption,
 } from "@cockroachlabs/cluster-ui";
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
-import isEmpty from "lodash/isEmpty";
-import isArray from "lodash/isArray";
-import isString from "lodash/isString";
 import classNames from "classnames/bind";
-import { useHistory } from "react-router-dom";
+import isArray from "lodash/isArray";
+import isEmpty from "lodash/isEmpty";
+import isString from "lodash/isString";
 import noop from "lodash/noop";
+import React, { useCallback, useEffect, useState, useMemo } from "react";
+import ReactDOM from "react-dom";
+import { useHistory } from "react-router-dom";
 
 import styles from "./hotRanges.module.styl";
 
@@ -56,7 +51,7 @@ export const HotRangesFilter = (props: HotRangesFilterProps) => {
   // provided list of hot ranges.
   const databaseOptions = useMemo(
     () =>
-      Array.from(new Set(hotRanges.map(r => r.database_name)))
+      Array.from(new Set(hotRanges.map(r => r.databases).flat()))
         .filter(i => !isEmpty(i))
         .sort()
         .map(dbName => ({ label: dbName, value: dbName })),
@@ -154,18 +149,18 @@ export const HotRangesFilter = (props: HotRangesFilterProps) => {
 
       if (!isEmpty(dbNames)) {
         filtered = filtered.filter(r =>
-          dbNames.some(
-            (f: FilterCheckboxOptionItem) => f.value === r.database_name,
+          dbNames.some((f: FilterCheckboxOptionItem) =>
+            r.databases?.includes(f.value),
           ),
         );
       }
 
       if (!isEmpty(tableName)) {
-        filtered = filtered.filter(r => r.table_name?.includes(tableName));
+        filtered = filtered.filter(r => r.tables?.includes(tableName));
       }
 
       if (!isEmpty(indexName)) {
-        filtered = filtered.filter(r => r.index_name?.includes(indexName));
+        filtered = filtered.filter(r => r.indexes?.includes(indexName));
       }
 
       if (!isEmpty(localities)) {
@@ -265,17 +260,16 @@ export const HotRangesFilter = (props: HotRangesFilterProps) => {
       [indexName, filterIndexName],
       [localities, filterLocalities],
     ];
-    filters.filter(f => !isEmpty(f[1]))
-      .forEach(
-        ([name, value]) => {
-          if (isArray(value)) {
-            params.set(name, value.map(f => f.value).join("|"));
-          }
-          if (isString(value)) {
-            params.set(name, value);
-          }
-        },
-      );
+    filters
+      .filter(f => !isEmpty(f[1]))
+      .forEach(([name, value]) => {
+        if (isArray(value)) {
+          params.set(name, value.map(f => f.value).join("|"));
+        }
+        if (isString(value)) {
+          params.set(name, value);
+        }
+      });
     return params;
   }, [
     filterNodeIds,

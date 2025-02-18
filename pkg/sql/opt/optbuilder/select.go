@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package optbuilder
 
@@ -160,16 +155,7 @@ func (b *Builder) buildDataSource(
 		switch t := ds.(type) {
 		case cat.Table:
 			tabMeta := b.addTable(t, &resName)
-			locking := lockCtx.locking
-			if locking.isSet() {
-				lb := newLockBuilder(tabMeta)
-				for _, item := range locking {
-					item.builders = append(item.builders, lb)
-				}
-			}
-			if b.shouldBuildLockOp() {
-				locking = nil
-			}
+			locking := b.lockingSpecForTableScan(lockCtx.locking, tabMeta)
 			return b.buildScan(
 				tabMeta,
 				tableOrdinals(t, columnKinds{
@@ -179,6 +165,7 @@ func (b *Builder) buildDataSource(
 				}),
 				indexFlags, locking, inScope,
 				false, /* disableNotVisibleIndex */
+				cat.PolicyScopeSelect,
 			)
 
 		case cat.Sequence:
@@ -218,11 +205,6 @@ func (b *Builder) buildDataSource(
 		// This is the special '[ ... ]' syntax. We treat this as syntactic sugar
 		// for a top-level CTE, so it cannot refer to anything in the input scope.
 		// See #41078.
-		if b.insideFuncDef {
-			panic(unimplemented.NewWithIssue(
-				92961, "statement source (square bracket syntax) within user-defined function",
-			))
-		}
 		emptyScope := b.allocScope()
 		innerScope := b.buildStmt(source.Statement, nil /* desiredTypes */, emptyScope)
 		if len(innerScope.cols) == 0 {
@@ -497,17 +479,10 @@ func (b *Builder) buildScanFromTableRef(
 
 	tn := tree.MakeUnqualifiedTableName(tab.Name())
 	tabMeta := b.addTable(tab, &tn)
-	if locking.isSet() {
-		lb := newLockBuilder(tabMeta)
-		for _, item := range locking {
-			item.builders = append(item.builders, lb)
-		}
-	}
-	if b.shouldBuildLockOp() {
-		locking = nil
-	}
+	locking = b.lockingSpecForTableScan(locking, tabMeta)
 	return b.buildScan(
 		tabMeta, ordinals, indexFlags, locking, inScope, false, /* disableNotVisibleIndex */
+		cat.PolicyScopeSelect,
 	)
 }
 
@@ -550,18 +525,6 @@ func errorOnInvalidMultiregionDB(
 // be in the list (in practice, this coincides with all "ordinary" table columns
 // being in the list).
 //
-// If scanMutationCols is true, then include columns being added or dropped from
-// the table. These are currently required by the execution engine as "fetch
-// columns", when performing mutation DML statements (INSERT, UPDATE, UPSERT,
-// DELETE).
-//
-// NOTE: Callers must take care that mutation columns (columns that are being
-//
-//	added or dropped from the table) are only used when performing mutation
-//	DML statements (INSERT, UPDATE, UPSERT, DELETE). They cannot be used in
-//	any other way because they may not have been initialized yet by the
-//	backfiller!
-//
 // See Builder.buildStmt for a description of the remaining input and return
 // values.
 func (b *Builder) buildScan(
@@ -571,6 +534,7 @@ func (b *Builder) buildScan(
 	locking lockingSpec,
 	inScope *scope,
 	disableNotVisibleIndex bool,
+	policyCommandScope cat.PolicyCommandScope,
 ) (outScope *scope) {
 	if ordinals == nil {
 		panic(errors.AssertionFailedf("no ordinals"))
@@ -675,6 +639,7 @@ func (b *Builder) buildScan(
 		private.Flags.NoIndexJoin = indexFlags.NoIndexJoin
 		private.Flags.NoZigzagJoin = indexFlags.NoZigzagJoin
 		private.Flags.NoFullScan = indexFlags.NoFullScan
+		private.Flags.AvoidFullScan = indexFlags.AvoidFullScan
 		private.Flags.ForceInvertedIndex = indexFlags.ForceInvertedIndex
 		if indexFlags.Index != "" || indexFlags.IndexID != 0 {
 			idx := -1
@@ -747,7 +712,7 @@ func (b *Builder) buildScan(
 	}
 	if locking.isSet() {
 		private.Locking = locking.get()
-		if b.shouldUseGuaranteedDurability() {
+		if private.Locking.IsLocking() && b.shouldUseGuaranteedDurability() {
 			// Under weaker isolation levels we use fully-durable locks for SELECT FOR
 			// UPDATE statements, SELECT FOR SHARE statements, and constraint checks
 			// (e.g. FK checks), regardless of locking strength and wait policy.
@@ -787,6 +752,7 @@ func (b *Builder) buildScan(
 	// Add the partial indexes after constructing the scan so we can use the
 	// logical properties of the scan to fully normalize the index predicates.
 	b.addPartialIndexPredicatesForTable(tabMeta, outScope.expr)
+	b.addRowLevelSecurityFilter(tabMeta, outScope, policyCommandScope)
 
 	if !virtualColIDs.Empty() {
 		// Project the expressions for the virtual columns (and pass through all
@@ -858,6 +824,16 @@ func (b *Builder) addCheckConstraintsForTable(tabMeta *opt.TableMeta) {
 	// Create a scope that can be used for building the scalar expressions.
 	tableScope := b.allocScope()
 	tableScope.appendOrdinaryColumnsFromTable(tabMeta, &tabMeta.Alias)
+	// Synthesized CHECK expressions, e.g., for columns of ENUM types, may
+	// reference inaccessible columns. This can happen when the type of an
+	// indexed expression is an ENUM. We make these columns visible so that they
+	// can be resolved while building the CHECK expressions. This is safe to do
+	// for all CHECK expressions, not just synthesized ones, because
+	// user-created CHECK expressions will never reference inaccessible columns
+	// - this is enforced during CREATE TABLE and ALTER TABLE statements.
+	for i := range tableScope.cols {
+		tableScope.cols[i].visibility = columnVisibility(cat.Visible)
+	}
 
 	// Find the non-nullable table columns. Mutation columns can be NULL during
 	// backfill, so they should be excluded.
@@ -963,10 +939,7 @@ func (b *Builder) addComputedColsForTable(
 							scalarType, colType, string(tabCol.ColName()),
 						))
 					}
-					// TODO(mgartner): This should be an assignment cast, but
-					// until #81698 is addressed, that could cause reads to
-					// error after adding a virtual computed column to a table.
-					scalar = b.factory.ConstructCast(scalar, colType)
+					scalar = b.factory.ConstructAssignmentCast(scalar, colType)
 				}
 			})
 			// Check if the expression contains non-immutable operators.
@@ -1203,10 +1176,6 @@ func (b *Builder) buildSelectStmtWithoutParens(
 		outScope = projectionsScope
 	}
 
-	if limit != nil {
-		b.buildLimit(limit, inScope, outScope)
-	}
-
 	// Remove locking items from scope, validate that they were found within the
 	// FROM clause, and build them.
 	for range lockingClause {
@@ -1216,6 +1185,10 @@ func (b *Builder) buildSelectStmtWithoutParens(
 			// TODO(michae2): Combine multiple buildLock calls for the same table.
 			b.buildLocking(item, outScope)
 		}
+	}
+
+	if limit != nil {
+		b.buildLimit(limit, inScope, outScope)
 	}
 
 	// TODO(rytaft): Support FILTER expression.

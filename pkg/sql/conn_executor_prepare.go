@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -61,7 +56,7 @@ func (ex *connExecutor) execPrepare(
 		return ev, payload
 	}
 
-	ctx, sp := tracing.EnsureChildSpan(ctx, ex.server.cfg.AmbientCtx.Tracer, "prepare stmt")
+	ctx, sp := tracing.ChildSpan(ctx, "prepare stmt")
 	defer sp.Finish()
 
 	// The anonymous statement can be overwritten.
@@ -230,7 +225,7 @@ func (ex *connExecutor) prepare(
 			ex.resetPlanner(ctx, p, txn, ex.server.cfg.Clock.PhysicalTime())
 		}
 
-		if err := ex.maybeUpgradeToSerializable(ctx, stmt); err != nil {
+		if err := ex.maybeAdjustTxnForDDL(ctx, stmt); err != nil {
 			return err
 		}
 
@@ -716,7 +711,8 @@ func (ex *connExecutor) execDescribe(
 // prepared and executed inside of an aborted transaction.
 func (ex *connExecutor) isAllowedInAbortedTxn(ast tree.Statement) bool {
 	switch s := ast.(type) {
-	case *tree.CommitTransaction, *tree.RollbackTransaction, *tree.RollbackToSavepoint:
+	case *tree.CommitTransaction, *tree.PrepareTransaction,
+		*tree.RollbackTransaction, *tree.RollbackToSavepoint:
 		return true
 	case *tree.Savepoint:
 		if ex.isCommitOnReleaseSavepoint(s.Name) {

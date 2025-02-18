@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package upgrades_test
 
@@ -356,9 +351,7 @@ func testMigrationWithFailures(
 						},
 						UpgradeManager: &upgradebase.TestingKnobs{
 							ListBetweenOverride: func(from, to roachpb.Version) []roachpb.Version {
-								return []roachpb.Version{
-									endCV,
-								}
+								return []roachpb.Version{to}
 							},
 							RegistryOverride: func(cv roachpb.Version) (upgradebase.Upgrade, bool) {
 								if cv.Equal(endCV) {
@@ -369,7 +362,7 @@ func testMigrationWithFailures(
 										upgrade.RestoreActionNotRequired("test"),
 									), true
 								}
-								panic("unexpected version")
+								return nil, false
 							}},
 					},
 				},
@@ -486,7 +479,7 @@ func testMigrationWithFailures(
 			// If canceled the job, wait for the job to finish.
 			if test.cancelSchemaJob {
 				t.Log("waiting for the schema job to reach the cancel status")
-				waitUntilState(t, tdb, schemaEvent.orig.ID, jobs.StatusCanceled)
+				waitUntilState(t, tdb, schemaEvent.orig.ID, jobs.StateCanceled)
 			}
 			// Ensure all migrations complete.
 			go func() {
@@ -536,7 +529,7 @@ func cancelJob(
 			ctx, jobID, txn, func(
 				txn isql.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater,
 			) error {
-				ju.UpdateStatus(jobs.StatusCancelRequested)
+				ju.UpdateState(jobs.StateCancelRequested)
 				return nil
 			})
 	})
@@ -545,10 +538,10 @@ func cancelJob(
 
 // waitUntilState waits until the specified job reaches to given state.
 func waitUntilState(
-	t *testing.T, tdb *sqlutils.SQLRunner, jobID jobspb.JobID, expectedStatus jobs.Status,
+	t *testing.T, tdb *sqlutils.SQLRunner, jobID jobspb.JobID, expectedStatus jobs.State,
 ) {
 	testutils.SucceedsSoon(t, func() error {
-		var status jobs.Status
+		var status jobs.State
 		tdb.QueryRow(t,
 			"SELECT status FROM system.jobs WHERE id = $1", jobID,
 		).Scan(&status)

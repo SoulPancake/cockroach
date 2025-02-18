@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package pgwire
 
@@ -45,10 +40,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/cidr"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
+	"github.com/cockroachdb/cockroach/pkg/util/metric/aggmetric"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -59,6 +56,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 )
+
+var nilStat = func(int64) {}
 
 // Test the conn struct: check that it marshalls the correct commands to the
 // stmtBuf.
@@ -689,12 +688,20 @@ func client(ctx context.Context, serverAddr net.Addr, wg *sync.WaitGroup) error 
 func newTestServer() *Server {
 	sqlMetrics := sql.MakeMemMetrics("test" /* endpoint */, time.Second /* histogramWindow */)
 	metrics := newTenantSpecificMetrics(sqlMetrics /* sqlMemMetrics */, metric.TestSampleInterval)
-	return &Server{
+	st := cluster.MakeTestingClusterSettings()
+	s := &Server{
 		tenantMetrics: metrics,
+		destinationMetrics: destinationAggMetrics{
+			BytesInCount:  aggmetric.NewCounter(MetaBytesIn, "remote"),
+			BytesOutCount: aggmetric.NewCounter(MetaBytesOut, "remote"),
+		},
 		execCfg: &sql.ExecutorConfig{
-			Settings: cluster.MakeTestingClusterSettings(),
+			Settings:   st,
+			CidrLookup: cidr.NewLookup(&st.SV),
 		},
 	}
+	s.mu.destinations = make(map[string]*destinationMetrics)
+	return s
 }
 
 // waitForClientConn blocks until a client connects and performs the pgwire
@@ -742,7 +749,7 @@ func getSessionArgs(
 			// Implement a fake pgwire connection handshake. Send the response
 			// after parsing the client-sent parameters.
 			c := &conn{conn: netConn}
-			c.msgBuilder.init(metric.NewCounter(metric.Metadata{}))
+			c.msgBuilder.init(nilStat)
 			if err := c.authOKMessage(); err != nil {
 				retErr = errors.CombineErrors(retErr, err)
 				return
@@ -828,10 +835,10 @@ func expectExecStmt(
 		t.Fatalf("expected %s, got %s", expSQL, es.AST.String())
 	}
 
-	if es.ParseStart == (time.Time{}) {
+	if es.ParseStart == 0 {
 		t.Fatalf("ParseStart not filled in")
 	}
-	if es.ParseEnd == (time.Time{}) {
+	if es.ParseEnd == 0 {
 		t.Fatalf("ParseEnd not filled in")
 	}
 	if typ == queryStringComplete {
@@ -2276,4 +2283,122 @@ func TestConnCloseReleasesReservedMem(t *testing.T) {
 	// Check that no accounted-for memory is leaked, after the connection attempt fails.
 	after := s.PGServer().(*Server).tenantSpecificConnMonitor.AllocBytes()
 	require.Equal(t, before, after)
+}
+
+// write unit tests for the function publishConnLatencyMetric
+func TestPublishConnLatencyMetric(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	c := conn{
+		metrics: &tenantSpecificMetrics{
+			AuthJWTConnLatency: metric.NewHistogram(
+				getHistogramOptionsForIOLatency(AuthJWTConnLatency, time.Hour)),
+			AuthCertConnLatency: metric.NewHistogram(
+				getHistogramOptionsForIOLatency(AuthCertConnLatency, time.Hour)),
+			AuthPassConnLatency: metric.NewHistogram(
+				getHistogramOptionsForIOLatency(AuthPassConnLatency, time.Hour)),
+			AuthLDAPConnLatency: metric.NewHistogram(
+				getHistogramOptionsForIOLatency(AuthLDAPConnLatency, time.Hour)),
+			AuthGSSConnLatency: metric.NewHistogram(
+				getHistogramOptionsForIOLatency(AuthGSSConnLatency, time.Hour)),
+			AuthScramConnLatency: metric.NewHistogram(
+				getHistogramOptionsForIOLatency(AuthScramConnLatency, time.Hour)),
+		},
+	}
+
+	// JWT Token Authentication
+	jwtDuration := int64(1)
+	c.publishConnLatencyMetric(jwtDuration, jwtHBAEntry.string())
+	w := c.metrics.AuthJWTConnLatency.WindowedSnapshot()
+	count, sum := w.Total()
+	require.Equal(t, int64(1), count)
+	require.Equal(t, float64(1), sum)
+
+	// republish on JWT
+	jwtDuration = int64(2)
+	c.publishConnLatencyMetric(jwtDuration, jwtHBAEntry.string())
+	w = c.metrics.AuthJWTConnLatency.WindowedSnapshot()
+	count, sum = w.Total()
+	require.Equal(t, int64(2), count)
+	require.Equal(t, float64(3), sum)
+
+	// Cert
+	certDuration := int64(3)
+	c.publishConnLatencyMetric(certDuration, certHBAEntry.string())
+	w = c.metrics.AuthCertConnLatency.WindowedSnapshot()
+	count, sum = w.Total()
+	require.Equal(t, int64(1), count)
+	require.Equal(t, float64(3), sum)
+
+	// republish on cert
+	certDuration = int64(2)
+	c.publishConnLatencyMetric(certDuration, certHBAEntry.string())
+	w = c.metrics.AuthCertConnLatency.WindowedSnapshot()
+	count, sum = w.Total()
+	require.Equal(t, int64(2), count)
+	require.Equal(t, float64(5), sum)
+
+	// Password
+	passDuration := int64(4)
+	c.publishConnLatencyMetric(passDuration, passwordHBAEntry.string())
+	w = c.metrics.AuthPassConnLatency.WindowedSnapshot()
+	count, sum = w.Total()
+	require.Equal(t, int64(1), count)
+	require.Equal(t, float64(4), sum)
+
+	// republish on pass
+	passDuration = int64(3)
+	c.publishConnLatencyMetric(passDuration, passwordHBAEntry.string())
+	w = c.metrics.AuthPassConnLatency.WindowedSnapshot()
+	count, sum = w.Total()
+	require.Equal(t, int64(2), count)
+	require.Equal(t, float64(7), sum)
+
+	// LDAP
+	ldapDuration := int64(5)
+	c.publishConnLatencyMetric(ldapDuration, ldapHBAEntry.string())
+	w = c.metrics.AuthLDAPConnLatency.WindowedSnapshot()
+	count, sum = w.Total()
+	require.Equal(t, int64(1), count)
+	require.Equal(t, float64(5), sum)
+
+	// republish on LDAP
+	ldapDuration = int64(2)
+	c.publishConnLatencyMetric(ldapDuration, ldapHBAEntry.string())
+	w = c.metrics.AuthLDAPConnLatency.WindowedSnapshot()
+	count, sum = w.Total()
+	require.Equal(t, int64(2), count)
+	require.Equal(t, float64(7), sum)
+
+	// GSS
+	gssDuration := int64(6)
+	c.publishConnLatencyMetric(gssDuration, gssHBAEntry.string())
+	w = c.metrics.AuthGSSConnLatency.WindowedSnapshot()
+	count, sum = w.Total()
+	require.Equal(t, int64(1), count)
+	require.Equal(t, float64(6), sum)
+
+	// republish on GSS
+	gssDuration = int64(3)
+	c.publishConnLatencyMetric(gssDuration, gssHBAEntry.string())
+	w = c.metrics.AuthGSSConnLatency.WindowedSnapshot()
+	count, sum = w.Total()
+	require.Equal(t, int64(2), count)
+	require.Equal(t, float64(9), sum)
+
+	// scram
+	scramDuration := int64(7)
+	c.publishConnLatencyMetric(scramDuration, scramSHA256HBAEntry.string())
+	w = c.metrics.AuthScramConnLatency.WindowedSnapshot()
+	count, sum = w.Total()
+	require.Equal(t, int64(1), count)
+	require.Equal(t, float64(7), sum)
+
+	// republish on scram
+	scramDuration = int64(2)
+	c.publishConnLatencyMetric(scramDuration, scramSHA256HBAEntry.string())
+	w = c.metrics.AuthScramConnLatency.WindowedSnapshot()
+	count, sum = w.Total()
+	require.Equal(t, int64(2), count)
+	require.Equal(t, float64(9), sum)
 }

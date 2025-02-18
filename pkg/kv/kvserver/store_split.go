@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -268,9 +263,9 @@ func prepareRightReplicaForSplit(
 	// the replica according to whether it holds the lease. This enables the
 	// txnWaitQueue.
 	rightRepl.leasePostApplyLocked(ctx,
-		rightRepl.mu.state.Lease, /* prevLease */
-		rightRepl.mu.state.Lease, /* newLease - same as prevLease */
-		nil,                      /* priorReadSum */
+		rightRepl.shMu.state.Lease, /* prevLease */
+		rightRepl.shMu.state.Lease, /* newLease - same as prevLease */
+		nil,                        /* priorReadSum */
 		assertNoLeaseJump)
 
 	// We need to explicitly unquiesce the Raft group on the right-hand range or
@@ -309,11 +304,11 @@ func (s *Store) SplitRange(
 	defer s.mu.Unlock()
 	leftRepl.setDescRaftMuLocked(ctx, newLeftDesc)
 
-	// Clear the LHS lock and txn wait-queues, to redirect to the RHS if
+	// Clear or split the LHS lock and txn wait-queues, to redirect to the RHS if
 	// appropriate. We do this after setDescWithoutProcessUpdate to ensure
 	// that no pre-split commands are inserted into the wait-queues after we
 	// clear them.
-	leftRepl.concMgr.OnRangeSplit()
+	locksToAcquireOnRHS := leftRepl.concMgr.OnRangeSplit(roachpb.Key(rightDesc.StartKey))
 
 	if rightReplOrNil == nil {
 		// There is no RHS replica, so (heuristically) halve the load stats for the
@@ -323,6 +318,13 @@ func (s *Store) SplitRange(
 		return nil
 	}
 	rightRepl := rightReplOrNil
+
+	// Acquire unreplicated locks on the RHS. We expect locksToAcquireOnRHS to be
+	// empty if UnreplicatedLockReliabilityUpgrade is false.
+	log.VInfof(ctx, 2, "acquiring %d locks on the RHS", len(locksToAcquireOnRHS))
+	for _, l := range locksToAcquireOnRHS {
+		rightRepl.concMgr.OnLockAcquired(ctx, &l)
+	}
 
 	// Split the replica load of the LHS evenly (50:50) with the RHS. NB: this
 	// ignores the split point, and makes as simplifying assumption that

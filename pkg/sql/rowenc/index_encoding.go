@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowenc
 
@@ -31,9 +26,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc/rowencpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc/valueside"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/idxtype"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/deduplicate"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/cockroach/pkg/util/json"
@@ -41,7 +38,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/trigram"
 	"github.com/cockroachdb/cockroach/pkg/util/tsearch"
-	"github.com/cockroachdb/cockroach/pkg/util/unique"
 	"github.com/cockroachdb/errors"
 )
 
@@ -880,7 +876,7 @@ func encodeArrayInvertedIndexTableKeys(
 		}
 		outKeys = append(outKeys, newKey)
 	}
-	outKeys = unique.UniquifyByteSlices(outKeys)
+	outKeys = deduplicate.ByteSlices(outKeys)
 	return outKeys, nil
 }
 
@@ -1129,14 +1125,8 @@ func encodeTrigramInvertedIndexTableKeys(
 	return outKeys, nil
 }
 
-// EncodePrimaryIndex constructs a list of k/v pairs for a
-// row encoded as a primary index. This function mirrors the encoding
-// logic in prepareInsertOrUpdateBatch in pkg/sql/row/writer.go.
-// It is somewhat duplicated here due to the different arguments
-// that prepareOrInsertUpdateBatch needs and uses to generate
-// the k/v's for the row it inserts. includeEmpty controls
-// whether or not k/v's with empty values should be returned.
-// It returns indexEntries in family sorted order.
+// EncodePrimaryIndex constructs the key prefix for the primary index and
+// delegates the rest of the encoding to EncodePrimaryIndexWithKeyPrefix.
 func EncodePrimaryIndex(
 	codec keys.SQLCodec,
 	tableDesc catalog.TableDescriptor,
@@ -1146,6 +1136,25 @@ func EncodePrimaryIndex(
 	includeEmpty bool,
 ) ([]IndexEntry, error) {
 	keyPrefix := MakeIndexKeyPrefix(codec, tableDesc.GetID(), index.GetID())
+	return EncodePrimaryIndexWithKeyPrefix(tableDesc, index, keyPrefix, colMap, values, includeEmpty)
+}
+
+// EncodePrimaryIndexWithKeyPrefix constructs a list of k/v pairs for a
+// row encoded as a primary index, using the provided key prefix specific to
+// that index. This function mirrors the encoding logic in
+// prepareInsertOrUpdateBatch in pkg/sql/row/writer.go. It is somewhat
+// duplicated here due to the different arguments that
+// prepareOrInsertUpdateBatch needs and uses to generate the k/v's for the row
+// it inserts. includeEmpty controls whether or not k/v's with empty values
+// should be returned. It returns indexEntries in family sorted order.
+func EncodePrimaryIndexWithKeyPrefix(
+	tableDesc catalog.TableDescriptor,
+	index catalog.Index,
+	keyPrefix []byte,
+	colMap catalog.TableColMap,
+	values []tree.Datum,
+	includeEmpty bool,
+) ([]IndexEntry, error) {
 	indexKey, containsNull, err := EncodeIndexKey(tableDesc, index, colMap, values, keyPrefix)
 	if err != nil {
 		return nil, err
@@ -1155,6 +1164,7 @@ func EncodePrimaryIndex(
 	}
 
 	storedColumns := getStoredColumnsForPrimaryIndex(index, colMap)
+	keyColumns := index.CollectKeyColumnIDs()
 
 	var entryValue []byte
 	indexEntries := make([]IndexEntry, 0, tableDesc.NumFamilies())
@@ -1172,13 +1182,14 @@ func EncodePrimaryIndex(
 		// The decoders expect that column family 0 is encoded with a TUPLE value tag, so we
 		// don't want to use the untagged value encoding.
 		if len(family.ColumnIDs) == 1 && family.ColumnIDs[0] == family.DefaultColumnID && family.ID != 0 {
-			// Single column value families which are not stored can be skipped, these
-			// may exist temporarily while adding a column.
-			if !storedColumns.Contains(family.DefaultColumnID) {
-				if cdatum, ok := values[colMap.GetDefault(family.DefaultColumnID)].(tree.CompositeDatum); !ok ||
-					!cdatum.IsComposite() {
-					return nil
-				}
+			// Single column value families which are not stored or key columns can be skipped,
+			// these may exist temporarily while adding a column. For key columns composite keys may
+			// be stored at the same time.
+			if skipColumn, _ := SkipColumnNotInPrimaryIndexValue(family.DefaultColumnID,
+				values[colMap.GetDefault(family.DefaultColumnID)],
+				keyColumns,
+				storedColumns); skipColumn {
+				return nil
 			}
 			datum := findColumnValue(family.DefaultColumnID, colMap, values)
 			// We want to include this column if its value is non-null or
@@ -1286,12 +1297,50 @@ func MakeNullPKError(
 	return errors.AssertionFailedf("NULL value in unknown key column")
 }
 
-// EncodeSecondaryIndex encodes key/values for a secondary
-// index. colMap maps descpb.ColumnIDs to indices in `values`. This returns a
-// slice of IndexEntry. includeEmpty controls whether or not
-// EncodeSecondaryIndex should return k/v's that contain
-// empty values. For forward indexes the returned list of
-// index entries is in family sorted order.
+// EncodeSecondaryIndexKey constructs the key prefix for the secondary index and
+// delegates the rest of the encoding to EncodeSecondaryIndexWithKeyPrefix.
+func EncodeSecondaryIndexKey(
+	ctx context.Context,
+	codec keys.SQLCodec,
+	tableDesc catalog.TableDescriptor,
+	secondaryIndex catalog.Index,
+	colMap catalog.TableColMap,
+	values []tree.Datum,
+) ([][]byte, bool, error) {
+	keyPrefix := MakeIndexKeyPrefix(codec, tableDesc.GetID(), secondaryIndex.GetID())
+	return EncodeSecondaryIndexKeyWithKeyPrefix(ctx, tableDesc, secondaryIndex, keyPrefix, colMap,
+		values)
+}
+
+// EncodeSecondaryIndexKeyWithKeyPrefix generates a slice of byte arrays
+// representing encoded key values for the given secondary index, using the
+// provided key prefix specific to that index. The colMap maps descpb.ColumnIDs
+// to positions in the values slice.
+func EncodeSecondaryIndexKeyWithKeyPrefix(
+	ctx context.Context,
+	tableDesc catalog.TableDescriptor,
+	secondaryIndex catalog.Index,
+	keyPrefix []byte,
+	colMap catalog.TableColMap,
+	values []tree.Datum,
+) ([][]byte, bool, error) {
+	var containsNull = false
+	var secondaryKeys [][]byte
+	var err error
+	if secondaryIndex.GetType() == idxtype.INVERTED {
+		secondaryKeys, err = EncodeInvertedIndexKeys(ctx, secondaryIndex, colMap, values, keyPrefix)
+	} else {
+		var secondaryIndexKey []byte
+		secondaryIndexKey, containsNull, err = EncodeIndexKey(
+			tableDesc, secondaryIndex, colMap, values, keyPrefix)
+
+		secondaryKeys = [][]byte{secondaryIndexKey}
+	}
+	return secondaryKeys, containsNull, err
+}
+
+// EncodeSecondaryIndex constructs the key prefix for the secondary index and
+// delegates the rest of the encoding to EncodeSecondaryIndexWithKeyPrefix.
 func EncodeSecondaryIndex(
 	ctx context.Context,
 	codec keys.SQLCodec,
@@ -1301,25 +1350,35 @@ func EncodeSecondaryIndex(
 	values []tree.Datum,
 	includeEmpty bool,
 ) ([]IndexEntry, error) {
-	secondaryIndexKeyPrefix := MakeIndexKeyPrefix(codec, tableDesc.GetID(), secondaryIndex.GetID())
+	keyPrefix := MakeIndexKeyPrefix(codec, tableDesc.GetID(), secondaryIndex.GetID())
+	return EncodeSecondaryIndexWithKeyPrefix(ctx, tableDesc, secondaryIndex, keyPrefix, colMap,
+		values, includeEmpty)
+}
 
+// EncodeSecondaryIndexWithKeyPrefix generates a slice of IndexEntry objects
+// representing encoded key/value pairs for the given secondary index, using the
+// provided key prefix specific to that index. This encoding is performed in
+// EncodeSecondaryIndexKeyWithKeyPrefix for secondary indexes. The colMap maps
+// descpb.ColumnIDs to positions in the values slice. The 'includeEmpty'
+// parameter determines whether entries with empty values should be included.
+// For forward indexes, the resulting entries are sorted by column family order.
+func EncodeSecondaryIndexWithKeyPrefix(
+	ctx context.Context,
+	tableDesc catalog.TableDescriptor,
+	secondaryIndex catalog.Index,
+	keyPrefix []byte,
+	colMap catalog.TableColMap,
+	values []tree.Datum,
+	includeEmpty bool,
+) ([]IndexEntry, error) {
 	// Use the primary key encoding for covering indexes.
 	if secondaryIndex.GetEncodingType() == catenumpb.PrimaryIndexEncoding {
-		return EncodePrimaryIndex(codec, tableDesc, secondaryIndex, colMap, values, includeEmpty)
+		return EncodePrimaryIndexWithKeyPrefix(tableDesc, secondaryIndex, keyPrefix, colMap, values,
+			includeEmpty)
 	}
 
-	var containsNull = false
-	var secondaryKeys [][]byte
-	var err error
-	if secondaryIndex.GetType() == descpb.IndexDescriptor_INVERTED {
-		secondaryKeys, err = EncodeInvertedIndexKeys(ctx, secondaryIndex, colMap, values, secondaryIndexKeyPrefix)
-	} else {
-		var secondaryIndexKey []byte
-		secondaryIndexKey, containsNull, err = EncodeIndexKey(
-			tableDesc, secondaryIndex, colMap, values, secondaryIndexKeyPrefix)
-
-		secondaryKeys = [][]byte{secondaryIndexKey}
-	}
+	secondaryKeys, containsNull, err := EncodeSecondaryIndexKeyWithKeyPrefix(ctx, tableDesc,
+		secondaryIndex, keyPrefix, colMap, values)
 	if err != nil {
 		return []IndexEntry{}, err
 	}
@@ -1348,7 +1407,7 @@ func EncodeSecondaryIndex(
 		}
 
 		if tableDesc.NumFamilies() == 1 ||
-			secondaryIndex.GetType() == descpb.IndexDescriptor_INVERTED ||
+			secondaryIndex.GetType() == idxtype.INVERTED ||
 			secondaryIndex.GetVersion() == descpb.BaseIndexFormatVersion {
 			// We do all computation that affects indexes with families in a separate code path to avoid performance
 			// regression for tables without column families.
@@ -1548,7 +1607,7 @@ func GetValueColumns(index catalog.Index) []ValueEncodedColumn {
 		id := index.GetCompositeColumnID(i)
 		// Inverted indexes on a composite type (i.e. an array of composite types)
 		// should not add the indexed column to the value.
-		if index.GetType() == descpb.IndexDescriptor_INVERTED && id == index.InvertedColumnID() {
+		if index.GetType() == idxtype.INVERTED && id == index.InvertedColumnID() {
 			continue
 		}
 		cols = append(cols, ValueEncodedColumn{ColID: id, IsComposite: true})
@@ -1571,7 +1630,7 @@ func writeColumnValues(
 		colIDDelta := valueside.MakeColumnIDDelta(lastColID, col.ColID)
 		lastColID = col.ColID
 		var err error
-		value, err = valueside.Encode(value, colIDDelta, val, nil)
+		value, err = valueside.Encode(value, colIDDelta, val)
 		if err != nil {
 			return nil, err
 		}
@@ -1580,14 +1639,18 @@ func writeColumnValues(
 }
 
 // EncodeSecondaryIndexes encodes key/values for the secondary indexes. colMap
-// maps descpb.ColumnIDs to indices in `values`. secondaryIndexEntries is the return
-// value (passed as a parameter so the caller can reuse between rows) and is
-// expected to be the same length as indexes.
+// maps descpb.ColumnIDs to indices in `values`. keyPrefixes is a slice that
+// associates indexes to their key prefix; the caller can reuse this between
+// rows to save work from creating key prefixes. the indexes and keyPrefixes
+// slice should have the same ordering. secondaryIndexEntries is the return
+// value (passed as a parameter so the caller can reuse between rows) and
+// is expected to be the same length as indexes.
 func EncodeSecondaryIndexes(
 	ctx context.Context,
 	codec keys.SQLCodec,
 	tableDesc catalog.TableDescriptor,
 	indexes []catalog.Index,
+	keyPrefixes [][]byte,
 	colMap catalog.TableColMap,
 	values []tree.Datum,
 	secondaryIndexEntries []IndexEntry,
@@ -1600,8 +1663,16 @@ func EncodeSecondaryIndexes(
 	}
 	const sizeOfIndexEntry = int64(unsafe.Sizeof(IndexEntry{}))
 
-	for i := range indexes {
-		entries, err := EncodeSecondaryIndex(ctx, codec, tableDesc, indexes[i], colMap, values, includeEmpty)
+	for i, idx := range indexes {
+		keyPrefix := keyPrefixes[i]
+		// TODO(annie): For now, we recompute the key prefix of inverted indexes. This is because index
+		// keys with multiple associated values somehow get encoded into the same kv pair when using
+		// our precomputed key prefix. `inverted_index/arrays` (logictest) illustrates this issue.
+		if idx.GetType() == idxtype.INVERTED {
+			keyPrefix = MakeIndexKeyPrefix(codec, tableDesc.GetID(), idx.GetID())
+		}
+		entries, err := EncodeSecondaryIndexWithKeyPrefix(ctx, tableDesc, idx, keyPrefix, colMap, values,
+			includeEmpty)
 		if err != nil {
 			return secondaryIndexEntries, 0, err
 		}
@@ -1617,7 +1688,7 @@ func EncodeSecondaryIndexes(
 		if cap(secondaryIndexEntries)-len(secondaryIndexEntries) < len(entries) {
 			resliceSize := sizeOfIndexEntry * int64(cap(secondaryIndexEntries))
 			if err := indexBoundAccount.Grow(ctx, resliceSize); err != nil {
-				return nil, 0, errors.Wrap(err,
+				return nil, memUsedEncodingSecondaryIdxs, errors.Wrap(err,
 					"failed to re-slice index entries buffer")
 			}
 			memUsedEncodingSecondaryIdxs += resliceSize
@@ -1629,11 +1700,11 @@ func EncodeSecondaryIndexes(
 		// non-trivial.
 		for _, index := range entries {
 			if err := indexBoundAccount.Grow(ctx, int64(len(index.Key))); err != nil {
-				return nil, 0, errors.Wrap(err, "failed to allocate space for index keys")
+				return nil, memUsedEncodingSecondaryIdxs, errors.Wrap(err, "failed to allocate space for index keys")
 			}
 			memUsedEncodingSecondaryIdxs += int64(len(index.Key))
 			if err := indexBoundAccount.Grow(ctx, int64(len(index.Value.RawBytes))); err != nil {
-				return nil, 0, errors.Wrap(err, "failed to allocate space for index values")
+				return nil, memUsedEncodingSecondaryIdxs, errors.Wrap(err, "failed to allocate space for index values")
 			}
 			memUsedEncodingSecondaryIdxs += int64(len(index.Value.RawBytes))
 		}
@@ -1718,4 +1789,28 @@ func DecodeWrapper(value *roachpb.Value) (*rowencpb.IndexValueWrapper, error) {
 	}
 
 	return &wrapper, nil
+}
+
+// SkipColumnNotInPrimaryIndexValue returns true if the value at column colID
+// does not need to be encoded, either because it is already part of the primary
+// key, or because it is not part of the primary index altogether. Composite
+// datums are considered too, so a composite datum in a PK will return false
+// (but will return true for couldBeComposite).
+func SkipColumnNotInPrimaryIndexValue(
+	colID descpb.ColumnID,
+	value tree.Datum,
+	keyCols catalog.TableColSet,
+	storedCols catalog.TableColSet,
+) (skip, couldBeComposite bool) {
+	if !keyCols.Contains(colID) {
+		return !storedCols.Contains(colID), false
+	}
+	if cdatum, ok := value.(tree.CompositeDatum); ok {
+		// Composite columns are encoded in both the key and the value.
+		return !cdatum.IsComposite(), true
+	}
+	// Skip primary key columns as their values are encoded in the key of
+	// each family. Family 0 is guaranteed to exist and acts as a
+	// sentinel.
+	return true, false
 }

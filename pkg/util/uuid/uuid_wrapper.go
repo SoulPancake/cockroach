@@ -1,27 +1,49 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package uuid
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/util/uint128"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 )
 
-// Short returns the first eight characters of the output of String().
-func (u UUID) Short() string {
-	return u.String()[:8]
+const (
+	shortSize    = 4
+	shortStrSize = 8
+)
+
+type Short struct {
+	b [shortSize]byte
+}
+
+var _ redact.SafeValue = Short{}
+
+// SafeValue implements the redact.SafeValue interface.
+func (s Short) SafeValue() {}
+
+// String returns the 8-character hexidecimal representation of the abbreviated
+// UUID.
+func (s Short) String() string {
+	var b [shortStrSize]byte
+	hex.Encode(b[:], s.b[:])
+	return string(b[:])
+}
+
+// Short returns an abbreviated version of the UUID containing the first four
+// bytes.
+func (u UUID) Short() Short {
+	return Short{
+		b: [shortSize]byte(u[0:shortSize]),
+	}
 }
 
 // ShortStringer implements fmt.Stringer to output Short() on String().
@@ -29,7 +51,7 @@ type ShortStringer UUID
 
 // String is part of fmt.Stringer.
 func (s ShortStringer) String() string {
-	return UUID(s).Short()
+	return UUID(s).Short().String()
 }
 
 var _ fmt.Stringer = ShortStringer{}

@@ -114,7 +114,7 @@ plan regressions in early versions of generic query plans.
 There is one exception for `force_custom_plan` with statements that either have
 no placeholders nor fold-able, stable expressions, or statements that can
 utilize the placeholder fast path. These statements can be fully optimized into
-_absolute_ generic plans that can be reused without re-optimization because the
+_ideal_ generic plans that can be reused without re-optimization because the
 optimal query plan will not change between executions.
 
 If `plan_cache_mode` is set to `auto`, the optimizer will automatically choose
@@ -143,8 +143,8 @@ statements are prepared.
 The prepared statement namespace will be expanded to store both a "base memo"
 and a "generic memo". The base memo will be a normalized, yet unoptimized memo
 that can be used as a starting point for build custom plans. The generic memo
-will be fully optimized as an absolute generic query plan or non-absolute
-generic query plan.
+will be fully optimized as an ideal generic query plan or non-ideal generic
+query plan.
 
 ### Using Lookup-Joins as "Constrained Scans"
 
@@ -312,16 +312,6 @@ existing, non-stale generic plan is not available. In the future, we can reduce
 some of this work if a normalized, base query plan is available. The base plan
 can be used as a starting point for building the generic plan, eliminating some
 of the overhead of `optbuilder` and normalization.
-
-### Adding Generic Plans to the Query Cache
-
-A notable divergence of CockroachDB from Postgres is that CockroachDB has a
-query cache which is used across sessions of the same gateway node. Storing
-generic query plans in the query cache would allow sessions to reuse generic
-plans across sessions, reducing planning overhead further. This will bring the
-benefits of generic query plans to applications using client libraries and ORMs
-that don't use proper, named prepared statements, such as
-[knex.js](https://github.com/knex/knex/issues/802).
 
 ### Replacing the placeholder fast path
 

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package importer_test
 
@@ -204,7 +199,7 @@ func TestRandomParquetExports(t *testing.T) {
 		)
 
 		stmts := randgen.RandCreateTables(
-			ctx, rng, tablePrefix, numTables, false, /* isMultiRegion */
+			ctx, rng, tablePrefix, numTables, randgen.TableOptNone,
 			randgen.PartialIndexMutator, randgen.ForeignKeyMutator,
 		)
 
@@ -397,7 +392,7 @@ func TestMemoryMonitor(t *testing.T) {
 	// Arrange for a small memory budget.
 	budget := int64(4096)
 	mm := mon.NewMonitor(mon.Options{
-		Name:      "test-mm",
+		Name:      mon.MakeMonitorName("test-mm"),
 		Limit:     budget,
 		Increment: 128, /* small allocation increment */
 		Settings:  cluster.MakeTestingClusterSettings(),

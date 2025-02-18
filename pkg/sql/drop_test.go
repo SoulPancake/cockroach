@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -15,6 +10,7 @@ import (
 	gosql "database/sql"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
+	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
@@ -130,8 +127,8 @@ INSERT INTO t.kv VALUES ('c', 'e'), ('a', 'c'), ('b', 'd');
 
 	tbDesc := desctestutils.TestingGetPublicTableDescriptor(kvDB, s.Codec(), "t", "kv")
 	var dbDesc catalog.DatabaseDescriptor
-	require.NoError(t, sql.TestingDescsTxn(ctx, s, func(ctx context.Context, txn isql.Txn, col *descs.Collection) (err error) {
-		dbDesc, err = col.ByID(txn.KV()).Get().Database(ctx, tbDesc.GetParentID())
+	require.NoError(t, sqltestutils.TestingDescsTxn(ctx, s, func(ctx context.Context, txn isql.Txn, col *descs.Collection) (err error) {
+		dbDesc, err = col.ByIDWithoutLeased(txn.KV()).Get().Database(ctx, tbDesc.GetParentID())
 		return err
 	}))
 
@@ -208,7 +205,7 @@ INSERT INTO t.kv VALUES ('c', 'e'), ('a', 'c'), ('b', 'd');
 	// Job still running, waiting for GC.
 	// TODO (lucy): Maybe this test API should use an offset starting
 	// from the most recent job instead.
-	if err := jobutils.VerifySystemJob(t, sqlRun, 0, jobspb.TypeNewSchemaChange, jobs.StatusSucceeded, jobs.Record{
+	if err := jobutils.VerifySystemJob(t, sqlRun, 0, jobspb.TypeNewSchemaChange, jobs.StateSucceeded, jobs.Record{
 		Username:      username.RootUserName(),
 		Description:   "DROP DATABASE t CASCADE",
 		DescriptorIDs: nil,
@@ -270,6 +267,31 @@ func TestDropDatabaseDeleteData(t *testing.T) {
 	// Speed up mvcc queue scan.
 	params.ScanMaxIdleTime = time.Millisecond
 
+	// fullReconcilierStarted is used to block the full reconciliation from
+	// starting before we drop the database. This is used to avoid a race
+	// condition where the full reconciliation starts after we drop the database,
+	// it will ignore the dropped database. Then, there is a race between the
+	// SQLWatcher and the GC job where the SQLWatcher might write a zone config
+	// of table1 before table2, while the GC queue might not know that this range
+	// needs to be split because it has different span config.
+	//
+	// zoneCfgRangeFeedStarted is used to signal that the zone config range feed
+	// started and that the full reconciliation has finished. This is used to
+	// avoid a race where we update `system.zones` before the full reconciliation
+	// of zone configs has finished. If we write to `system.zones` before that,
+	// our write will not be reconciled.
+	var fullReconcilierStarted, zoneCfgRangeFeedStarted sync.WaitGroup
+	fullReconcilierStarted.Add(1)
+	zoneCfgRangeFeedStarted.Add(1)
+	params.Knobs.SpanConfig = &spanconfig.TestingKnobs{
+		OnFullReconcilerStart: func() {
+			fullReconcilierStarted.Wait()
+		},
+		OnWatchForZoneConfigUpdatesEstablished: func() {
+			zoneCfgRangeFeedStarted.Done()
+		},
+	}
+
 	srv, sqlDB, kvDB := serverutils.StartServer(t, params)
 	defer srv.Stopper().Stop(context.Background())
 	ctx := context.Background()
@@ -278,10 +300,19 @@ func TestDropDatabaseDeleteData(t *testing.T) {
 	systemDB := srv.SystemLayer().SQLConn(t)
 	_, err := systemDB.Exec(`SET CLUSTER SETTING sql.gc_job.wait_for_gc.interval = '1s';`)
 	require.NoError(t, err)
-
 	// Refresh protected timestamp cache immediately to make MVCC GC queue to
 	// process GC immediately.
 	_, err = systemDB.Exec(`SET CLUSTER SETTING kv.protectedts.poll_interval = '1s';`)
+	require.NoError(t, err)
+
+	// Turn off storage_coalesce_adjacent to avoid a race between the GC and the
+	// split queues where a range might get GCed before splitting. This is
+	// more likely to happen in this test since increase the GC queue scan rate.
+	// If we don't turn the setting off, setting the TTL to table 1 might cause
+	// table 2 to also get purged.
+	_, err = systemDB.Exec(`SET CLUSTER SETTING spanconfig.storage_coalesce_adjacent.enabled = 'false';`)
+	require.NoError(t, err)
+	_, err = systemDB.Exec(`SET CLUSTER SETTING spanconfig.tenant_coalesce_adjacent.enabled = 'false';`)
 	require.NoError(t, err)
 
 	// Disable strict GC TTL enforcement because we're going to shove a zero-value
@@ -303,8 +334,8 @@ INSERT INTO t.kv2 VALUES ('c', 'd'), ('a', 'b'), ('e', 'a');
 	tbDesc := desctestutils.TestingGetPublicTableDescriptor(kvDB, s.Codec(), "t", "kv")
 	tb2Desc := desctestutils.TestingGetPublicTableDescriptor(kvDB, s.Codec(), "t", "kv2")
 	var dbDesc catalog.DatabaseDescriptor
-	require.NoError(t, sql.TestingDescsTxn(ctx, s, func(ctx context.Context, txn isql.Txn, col *descs.Collection) (err error) {
-		dbDesc, err = col.ByID(txn.KV()).Get().Database(ctx, tbDesc.GetParentID())
+	require.NoError(t, sqltestutils.TestingDescsTxn(ctx, s, func(ctx context.Context, txn isql.Txn, col *descs.Collection) (err error) {
+		dbDesc, err = col.ByIDWithoutLeased(txn.KV()).Get().Database(ctx, tbDesc.GetParentID())
 		return err
 	}))
 
@@ -322,6 +353,12 @@ INSERT INTO t.kv2 VALUES ('c', 'd'), ('a', 'b'), ('e', 'a');
 		t.Fatal(err)
 	}
 
+	// Unblock the full reconciliation.
+	fullReconcilierStarted.Done()
+
+	// Wait for the zone config range feed to start.
+	zoneCfgRangeFeedStarted.Wait()
+
 	if _, err := sqlDB.Exec(`DROP DATABASE t CASCADE`); err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +368,7 @@ INSERT INTO t.kv2 VALUES ('c', 'd'), ('a', 'b'), ('e', 'a');
 
 	sqlRun := sqlutils.MakeSQLRunner(sqlDB)
 	if err := jobutils.VerifySystemJob(t, sqlRun, 0,
-		jobspb.TypeNewSchemaChange, jobs.StatusSucceeded, jobs.Record{
+		jobspb.TypeNewSchemaChange, jobs.StateSucceeded, jobs.Record{
 			Username:    username.RootUserName(),
 			Description: "DROP DATABASE t CASCADE",
 		}); err != nil {
@@ -361,7 +398,7 @@ INSERT INTO t.kv2 VALUES ('c', 'd'), ('a', 'b'), ('e', 'a');
 	}
 
 	testutils.SucceedsSoon(t, func() error {
-		return jobutils.VerifySystemJob(t, sqlRun, 0, jobspb.TypeSchemaChangeGC, jobs.StatusRunning, jobs.Record{
+		return jobutils.VerifySystemJob(t, sqlRun, 0, jobspb.TypeSchemaChangeGC, jobs.StateRunning, jobs.Record{
 			Username:    username.NodeUserName(),
 			Description: "GC for DROP DATABASE t CASCADE",
 			DescriptorIDs: descpb.IDs{
@@ -389,7 +426,7 @@ INSERT INTO t.kv2 VALUES ('c', 'd'), ('a', 'b'), ('e', 'a');
 	tests.CheckKeyCountIncludingTombstoned(t, srv.StorageLayer(), table2Span, 0)
 
 	testutils.SucceedsSoon(t, func() error {
-		return jobutils.VerifySystemJob(t, sqlRun, 0, jobspb.TypeSchemaChangeGC, jobs.StatusSucceeded, jobs.Record{
+		return jobutils.VerifySystemJob(t, sqlRun, 0, jobspb.TypeSchemaChangeGC, jobs.StateSucceeded, jobs.Record{
 			Username:    username.NodeUserName(),
 			Description: "GC for DROP DATABASE t CASCADE",
 			DescriptorIDs: descpb.IDs{
@@ -458,7 +495,7 @@ func TestDropIndex(t *testing.T) {
 		t.Fatalf("table descriptor still contains index after index is dropped")
 	}
 	sqlRun := sqlutils.MakeSQLRunner(sqlDB)
-	if err := jobutils.VerifySystemJob(t, sqlRun, 1, jobspb.TypeNewSchemaChange, jobs.StatusSucceeded, jobs.Record{
+	if err := jobutils.VerifySystemJob(t, sqlRun, 1, jobspb.TypeNewSchemaChange, jobs.StateSucceeded, jobs.Record{
 		Username:    username.RootUserName(),
 		Description: `DROP INDEX t.public.kv@foo`,
 	}); err != nil {
@@ -498,7 +535,7 @@ func TestDropIndex(t *testing.T) {
 			},
 		}); err != nil {
 			// If the job is not running, check if it already succeeded.
-			if secondErr := jobutils.VerifySystemJob(t, sqlRun, 2, jobspb.TypeSchemaChangeGC, jobs.StatusSucceeded, jobs.Record{
+			if secondErr := jobutils.VerifySystemJob(t, sqlRun, 2, jobspb.TypeSchemaChangeGC, jobs.StateSucceeded, jobs.Record{
 				Username:    username.NodeUserName(),
 				Description: `GC for CREATE INDEX foo ON t.public.kv (v)`,
 				DescriptorIDs: descpb.IDs{
@@ -661,7 +698,7 @@ func TestDropTable(t *testing.T) {
 	// Job still running, waiting for GC.
 	sqlRun := sqlutils.MakeSQLRunner(sqlDB)
 	if err := jobutils.VerifySystemJob(t, sqlRun, 1,
-		jobspb.TypeNewSchemaChange, jobs.StatusSucceeded, jobs.Record{
+		jobspb.TypeNewSchemaChange, jobs.StateSucceeded, jobs.Record{
 			Username:      username.RootUserName(),
 			Description:   `DROP TABLE t.public.kv`,
 			DescriptorIDs: nil,
@@ -776,7 +813,7 @@ func TestDropTableDeleteData(t *testing.T) {
 	sqlRun := sqlutils.MakeSQLRunner(sqlDB)
 	for i := 0; i < numTables; i++ {
 		if err := jobutils.VerifySystemJob(t, sqlRun, numTables+i,
-			jobspb.TypeNewSchemaChange, jobs.StatusSucceeded, jobs.Record{
+			jobspb.TypeNewSchemaChange, jobs.StateSucceeded, jobs.Record{
 				Username:    username.RootUserName(),
 				Description: fmt.Sprintf(`DROP TABLE t.public.%s`, descs[i].GetName()),
 			}); err != nil {
@@ -802,7 +839,7 @@ func TestDropTableDeleteData(t *testing.T) {
 
 		// Ensure that the job is marked as succeeded.
 		if err := jobutils.VerifySystemJob(t, sqlRun, numTables+i,
-			jobspb.TypeNewSchemaChange, jobs.StatusSucceeded, jobs.Record{
+			jobspb.TypeNewSchemaChange, jobs.StateSucceeded, jobs.Record{
 				Username:    username.RootUserName(),
 				Description: fmt.Sprintf(`DROP TABLE t.public.%s`, descs[i].GetName()),
 			}); err != nil {
@@ -812,7 +849,7 @@ func TestDropTableDeleteData(t *testing.T) {
 		// Ensure that the gc job is marked as succeeded.
 		testutils.SucceedsSoon(t, func() error {
 			return jobutils.VerifySystemJob(t, sqlRun, numTables+i,
-				jobspb.TypeSchemaChangeGC, jobs.StatusSucceeded, jobs.Record{
+				jobspb.TypeSchemaChangeGC, jobs.StateSucceeded, jobs.Record{
 					Username:    username.NodeUserName(),
 					Description: fmt.Sprintf(`GC for DROP TABLE t.public.%s`, descs[i].GetName()),
 					DescriptorIDs: descpb.IDs{
@@ -896,8 +933,8 @@ func TestDropTableWhileUpgradingFormat(t *testing.T) {
 
 	// Simulate a migration upgrading the table descriptor's format version after
 	// the table has been dropped but before the truncation has occurred.
-	if err := sql.TestingDescsTxn(ctx, s, func(ctx context.Context, txn isql.Txn, col *descs.Collection) (err error) {
-		tbl, err := col.ByID(txn.KV()).Get().Table(ctx, tableDesc.ID)
+	if err := sqltestutils.TestingDescsTxn(ctx, s, func(ctx context.Context, txn isql.Txn, col *descs.Collection) (err error) {
+		tbl, err := col.ByIDWithoutLeased(txn.KV()).Get().Table(ctx, tableDesc.ID)
 		if err != nil {
 			return err
 		}
@@ -944,6 +981,9 @@ CREATE TABLE t.kv (k CHAR PRIMARY KEY, v CHAR);
 
 	tx, err := sqlDB.Begin()
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`SET LOCAL autocommit_before_ddl = false`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1109,6 +1149,8 @@ WHERE
 	codec := s.Codec()
 	txn, err := conn.Begin()
 	require.NoError(t, err)
+	_, err = txn.Exec("SET LOCAL autocommit_before_ddl = false")
+	require.NoError(t, err)
 	// Let's find out our transaction ID for our transaction by running a query.
 	// We'll also use this query to install a refresh span over the table data.
 	// Inject a request filter to snag the transaction ID.
@@ -1240,9 +1282,9 @@ func TestDropIndexOnHashShardedIndexWithStoredShardColumn(t *testing.T) {
 	var tableDesc catalog.TableDescriptor
 	query = `SELECT id FROM system.namespace WHERE name = 'tbl'`
 	tdb.QueryRow(t, query).Scan(&tableID)
-	require.NoError(t, sql.TestingDescsTxn(ctx, s,
+	require.NoError(t, sqltestutils.TestingDescsTxn(ctx, s,
 		func(ctx context.Context, txn isql.Txn, col *descs.Collection) (err error) {
-			tableDesc, err = col.ByID(txn.KV()).Get().Table(ctx, tableID)
+			tableDesc, err = col.ByIDWithoutLeased(txn.KV()).Get().Table(ctx, tableID)
 			return err
 		}))
 	shardIdx, err := catalog.MustFindIndexByName(tableDesc, "idx")
@@ -1258,9 +1300,9 @@ func TestDropIndexOnHashShardedIndexWithStoredShardColumn(t *testing.T) {
 	tdb.Exec(t, query)
 
 	// Assert that the index is dropped but the shard column remains after dropping the index.
-	require.NoError(t, sql.TestingDescsTxn(ctx, s,
+	require.NoError(t, sqltestutils.TestingDescsTxn(ctx, s,
 		func(ctx context.Context, txn isql.Txn, col *descs.Collection) (err error) {
-			tableDesc, err = col.ByID(txn.KV()).Get().Table(ctx, tableID)
+			tableDesc, err = col.ByIDWithoutLeased(txn.KV()).Get().Table(ctx, tableID)
 			return err
 		}))
 	_, err = catalog.MustFindIndexByName(tableDesc, "idx")

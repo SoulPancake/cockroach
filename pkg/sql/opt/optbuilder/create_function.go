@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package optbuilder
 
@@ -22,7 +17,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/plpgsql"
 	plpgsqlparser "github.com/cockroachdb/cockroach/pkg/sql/plpgsql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/cast"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/plpgsqltree"
@@ -65,15 +59,6 @@ func (b *Builder) buildCreateFunction(cf *tree.CreateRoutine, inScope *scope) (o
 		case nil:
 			// No error.
 		case error:
-			if errors.Is(recErr, tree.ErrRoutineUndefined) {
-				panic(
-					errors.WithHint(
-						recErr,
-						"There is probably a typo in function name. Or the intention was to use a user-defined "+
-							"function in the function body, which is currently not supported.",
-					),
-				)
-			}
 			panic(recErr)
 		default:
 			panic(recErr)
@@ -114,11 +99,6 @@ func (b *Builder) buildCreateFunction(cf *tree.CreateRoutine, inScope *scope) (o
 	}
 	if !languageFound {
 		panic(pgerror.New(pgcode.InvalidFunctionDefinition, "no language specified"))
-	}
-	if language == tree.RoutineLangPLpgSQL {
-		if err := plpgsql.CheckClusterSupportsPLpgSQL(b.evalCtx.Settings); err != nil {
-			panic(err)
-		}
 	}
 
 	// Track the dependencies in the arguments, return type, and statements in
@@ -181,11 +161,33 @@ func (b *Builder) buildCreateFunction(cf *tree.CreateRoutine, inScope *scope) (o
 		if err != nil {
 			panic(err)
 		}
+		if typ.Identical(types.Trigger) {
+			// TRIGGER is not allowed in this context.
+			if language == tree.RoutineLangPLpgSQL {
+				panic(pgerror.New(pgcode.FeatureNotSupported,
+					"PL/pgSQL functions cannot accept type trigger",
+				))
+			}
+			if param.IsOutParam() {
+				panic(pgerror.New(pgcode.InvalidFunctionDefinition,
+					"SQL functions cannot return type trigger",
+				))
+			} else {
+				panic(pgerror.New(pgcode.InvalidFunctionDefinition,
+					"SQL functions cannot have arguments of type trigger",
+				))
+			}
+		}
 		if param.Class == tree.RoutineParamInOut && param.Name == "" {
 			panic(unimplemented.NewWithIssue(121251, "unnamed INOUT parameters are not yet supported"))
 		}
-		if param.IsInParam() && typ.IsPolymorphicType() {
-			sawPolymorphicInParam = true
+		if param.IsInParam() {
+			if typ.Family() == types.VoidFamily {
+				panic(pgerror.Newf(pgcode.InvalidFunctionDefinition, "SQL functions cannot have arguments of type VOID"))
+			}
+			if typ.IsPolymorphicType() {
+				sawPolymorphicInParam = true
+			}
 		}
 		if param.IsOutParam() {
 			outParamTypes = append(outParamTypes, typ)
@@ -294,11 +296,12 @@ func (b *Builder) buildCreateFunction(cf *tree.CreateRoutine, inScope *scope) (o
 			panic(pgerror.Newf(pgcode.InvalidFunctionDefinition, "function result type must be %s because of OUT parameters", outParamType.Name()))
 		}
 		// Override the return types so that we do return type validation and SHOW
-		// CREATE correctly.
-		funcReturnType = outParamType
-		cf.ReturnType = &tree.RoutineReturnType{
-			Type: outParamType,
+		// CREATE correctly. Take care not to override the SetOf value if it is set.
+		if cf.ReturnType == nil {
+			cf.ReturnType = &tree.RoutineReturnType{}
 		}
+		cf.ReturnType.Type = outParamType
+		funcReturnType = outParamType
 	} else if funcReturnType == nil {
 		if cf.IsProcedure {
 			// A procedure doesn't need a return type. Use a VOID return type to avoid
@@ -341,6 +344,15 @@ func (b *Builder) buildCreateFunction(cf *tree.CreateRoutine, inScope *scope) (o
 			panic(pgerror.New(pgcode.InvalidFunctionDefinition, "SQL functions cannot return type unknown"))
 		} else if language == tree.RoutineLangPLpgSQL {
 			panic(pgerror.New(pgcode.InvalidFunctionDefinition, "PL/pgSQL functions cannot return type unknown"))
+		}
+	} else if funcReturnType.Identical(types.Trigger) {
+		if language == tree.RoutineLangSQL {
+			// Postgres does not allow SQL trigger functions.
+			panic(pgerror.New(pgcode.InvalidFunctionDefinition, "SQL functions cannot return type trigger"))
+		}
+		if len(cf.Params) > 0 {
+			// Trigger functions cannot have parameters.
+			panic(pgerror.New(pgcode.InvalidFunctionDefinition, "trigger functions cannot have declared arguments"))
 		}
 	}
 	// Collect the user defined type dependency of the return type.
@@ -414,13 +426,38 @@ func (b *Builder) buildCreateFunction(cf *tree.CreateRoutine, inScope *scope) (o
 			}
 		}
 
+		// Special handling for trigger functions.
+		buildSQL := true
+		if funcReturnType.Identical(types.Trigger) {
+			// Trigger functions cannot have user-defined parameters. However, they do
+			// have a set of implicitly defined parameters.
+			for i := range createTriggerFuncParams {
+				param := &createTriggerFuncParams[i]
+				paramColName := funcParamColName(param.name, i)
+				col := b.synthesizeColumn(
+					bodyScope, paramColName, param.typ, nil /* expr */, nil, /* scalar */
+				)
+				col.setParamOrd(i)
+			}
+			routineParams = createTriggerFuncParams
+
+			// The actual return type for a trigger function is not known until it is
+			// bound to a trigger. Therefore, during function creation we use NULL as a
+			// placeholder type.
+			funcReturnType = types.Unknown
+
+			// Analysis of SQL expressions for trigger functions must be deferred
+			// until the function is bound to a trigger.
+			buildSQL = false
+		}
+
 		// We need to disable stable function folding because we want to catch the
 		// volatility of stable functions. If folded, we only get a scalar and lose
 		// the volatility.
 		b.factory.FoldingControl().TemporarilyDisallowStableFolds(func() {
 			plBuilder := newPLpgSQLBuilder(
-				b, cf.Name.Object(), stmt.AST.Label, nil, /* colRefs */
-				routineParams, funcReturnType, cf.IsProcedure, nil, /* outScope */
+				b, cf.Name.Object(), stmt.AST.Label, nil /* colRefs */, routineParams,
+				funcReturnType, cf.IsProcedure, false /* isDoBlock */, buildSQL, nil, /* outScope */
 			)
 			stmtScope = plBuilder.buildRootBlock(stmt.AST, bodyScope, routineParams)
 		})
@@ -475,6 +512,15 @@ func (b *Builder) buildCreateFunction(cf *tree.CreateRoutine, inScope *scope) (o
 	return outScope
 }
 
+// createTriggerFuncParams is the set of implicitly-defined parameters for a
+// PL/pgSQL trigger function. createTriggerFuncParams is used during trigger
+// function creation, when the type of the NEW and OLD variables is not yet
+// known.
+var createTriggerFuncParams = append([]routineParam{
+	{name: triggerColNew, typ: types.Unknown, class: tree.RoutineParamIn},
+	{name: triggerColOld, typ: types.Unknown, class: tree.RoutineParamIn},
+}, triggerFuncStaticParams...)
+
 func formatFuncBodyStmt(
 	fmtCtx *tree.FmtCtx, ast tree.NodeFormatter, lang tree.RoutineLanguage, newLine bool,
 ) {
@@ -510,6 +556,11 @@ func validateReturnType(
 			),
 			pgcode.InvalidFunctionDefinition,
 		)
+	}
+
+	// Any column types are allowed when the return type is TRIGGER.
+	if expected.Identical(types.Trigger) {
+		return nil
 	}
 
 	// If return type is RECORD and the tuple content types unspecified by OUT

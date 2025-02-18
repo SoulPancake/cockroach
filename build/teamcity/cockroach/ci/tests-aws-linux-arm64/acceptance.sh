@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+# Copyright 2022 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 set -xeuo pipefail
 
 dir="$(dirname $(dirname $(dirname $(dirname $(dirname "${0}")))))"
@@ -13,7 +19,7 @@ else
 fi
 
 tc_start_block "Build cockroach"
-build_script='bazel build --config $1 --config ci //pkg/cmd/cockroach-short && cp $(bazel info bazel-bin --config $1 --config ci)/pkg/cmd/cockroach-short/cockroach-short_/cockroach-short /artifacts/cockroach && chmod a+w /artifacts/cockroach'
+build_script='bazel build --config $1 //pkg/cmd/cockroach-short && cp $(bazel info bazel-bin --config $1)/pkg/cmd/cockroach-short/cockroach-short_/cockroach-short /artifacts/cockroach && chmod a+w /artifacts/cockroach'
 run_bazel /usr/bin/bash -c "$build_script" -- "$CROSSLINUX_CONFIG"
 tc_end_block "Build cockroach"
 
@@ -23,8 +29,8 @@ mkdir -p "$ARTIFACTSDIR"
 tc_start_block "Run acceptance tests"
 status=0
 
-bazel build //pkg/cmd/bazci --config=ci
-BAZCI=$(bazel info bazel-bin --config=ci)/pkg/cmd/bazci/bazci_/bazci
+bazel build //pkg/cmd/bazci
+BAZCI=$(bazel info bazel-bin)/pkg/cmd/bazci/bazci_/bazci
 
 $BAZCI --artifacts_dir=$PWD/artifacts -- \
   test //pkg/acceptance:acceptance_test \

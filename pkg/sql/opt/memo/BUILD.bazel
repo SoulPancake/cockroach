@@ -43,6 +43,7 @@ go_library(
         "//pkg/sql/sem/cast",
         "//pkg/sql/sem/catid",
         "//pkg/sql/sem/eval",
+        "//pkg/sql/sem/idxtype",
         "//pkg/sql/sem/tree",
         "//pkg/sql/sem/tree/treewindow",
         "//pkg/sql/sem/volatility",
@@ -82,6 +83,7 @@ go_test(
     embed = [":memo"],
     deps = [
         "//pkg/kv/kvserver/concurrency/isolation",
+        "//pkg/security/username",
         "//pkg/settings/cluster",
         "//pkg/sql/inverted",
         "//pkg/sql/opt",
@@ -125,7 +127,7 @@ genrule(
     cmd = """
       $(location //pkg/sql/opt/optgen/cmd/optgen) -out $@ exprs $(locations //pkg/sql/opt:ops)
     """,
-    exec_tools = ["//pkg/sql/opt/optgen/cmd/optgen"],
+    tools = ["//pkg/sql/opt/optgen/cmd/optgen"],
     visibility = ["//visibility:public"],
 )
 

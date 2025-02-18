@@ -1,19 +1,13 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord
 
 import (
 	"context"
 	"math/rand"
-	"runtime/debug"
 
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/kv"
@@ -22,6 +16,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
+	"github.com/cockroachdb/cockroach/pkg/util/debugutil"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -62,6 +57,11 @@ const (
 	// txnError means that a batch encountered a non-retriable error. Further
 	// batches except EndTxn(commit=false) will be rejected.
 	txnError
+
+	// txnPrepared means that an EndTxn(commit=true,prepare=true) has been
+	// executed successfully. Further batches except EndTxn(commit=*) will
+	// be rejected.
+	txnPrepared
 
 	// txnFinalized means that an EndTxn(commit=true) has been executed
 	// successfully, or an EndTxn(commit=false) was sent - regardless of
@@ -161,9 +161,10 @@ type TxnCoordSender struct {
 	// additional heap allocations necessary.
 	interceptorStack []txnInterceptor
 	interceptorAlloc struct {
-		arr [6]txnInterceptor
+		arr [7]txnInterceptor
 		txnHeartbeater
 		txnSeqNumAllocator
+		txnWriteBuffer
 		txnPipeliner
 		txnCommitter
 		txnSpanRefresher
@@ -275,6 +276,10 @@ func newRootTxnCoordSender(
 		// Various interceptors below rely on sequence number allocation,
 		// so the sequence number allocator is near the top of the stack.
 		&tcs.interceptorAlloc.txnSeqNumAllocator,
+		// The write buffer sits above the pipeliner to ensure it doesn't need to
+		// know how to handle QueryIntentRequests, as those are only generated (and
+		// handled) by the pipeliner.
+		&tcs.interceptorAlloc.txnWriteBuffer,
 		// The pipeliner sits above the span refresher because it will
 		// never generate transaction retry errors that could be avoided
 		// with a refresh.
@@ -458,19 +463,23 @@ func (tc *TxnCoordSender) finalizeNonLockingTxnLocked(
 			ba.Txn = txn
 			return tc.updateStateLocked(ctx, ba, nil /* br */, pErr)
 		}
-		// Mark the transaction as committed so that, in case this commit is done by
-		// the closure passed to db.Txn()), db.Txn() doesn't attempt to commit again.
-		// Also so that the correct metric gets incremented.
-		tc.mu.txn.Status = roachpb.COMMITTED
 		tc.interceptorAlloc.txnMetricRecorder.setReadOnlyCommit()
-	} else {
-		tc.mu.txn.Status = roachpb.ABORTED
-	}
-	tc.finalizeAndCleanupTxnLocked(ctx)
-	if et.Commit {
+		if et.Prepare {
+			tc.mu.txn.Status = roachpb.PREPARED
+			tc.markTxnPreparedLocked(ctx)
+		} else {
+			// Mark the transaction as committed so that, in case this commit is done
+			// by the closure passed to db.Txn()), db.Txn() doesn't attempt to commit
+			// again. Also, so that the correct metric gets incremented.
+			tc.mu.txn.Status = roachpb.COMMITTED
+			tc.finalizeAndCleanupTxnLocked(ctx)
+		}
 		if err := tc.maybeCommitWait(ctx, false /* deferred */); err != nil {
 			return kvpb.NewError(err)
 		}
+	} else {
+		tc.mu.txn.Status = roachpb.ABORTED
+		tc.finalizeAndCleanupTxnLocked(ctx)
 	}
 	return nil
 }
@@ -496,7 +505,8 @@ func (tc *TxnCoordSender) Send(
 		return nil, pErr
 	}
 
-	if ba.IsSingleEndTxnRequest() && !tc.interceptorAlloc.txnPipeliner.hasAcquiredLocks() {
+	if ba.IsSingleEndTxnRequest() && !tc.interceptorAlloc.txnPipeliner.hasAcquiredLocks() &&
+		!tc.interceptorAlloc.txnWriteBuffer.hasBufferedWrites() {
 		return nil, tc.finalizeNonLockingTxnLocked(ctx, ba)
 	}
 
@@ -541,16 +551,22 @@ func (tc *TxnCoordSender) Send(
 	pErr = tc.updateStateLocked(ctx, ba, br, pErr)
 
 	// If we succeeded to commit, or we attempted to rollback, we move to
-	// txnFinalized.
+	// txnFinalized. If we succeeded to prepare, we move to txnPrepared.
 	if req, ok := ba.GetArg(kvpb.EndTxn); ok {
 		et := req.(*kvpb.EndTxnRequest)
-		if (et.Commit && pErr == nil) || !et.Commit {
-			tc.finalizeAndCleanupTxnLocked(ctx)
-			if et.Commit {
+		if et.Commit {
+			if pErr == nil {
+				if et.Prepare {
+					tc.markTxnPreparedLocked(ctx)
+				} else {
+					tc.finalizeAndCleanupTxnLocked(ctx)
+				}
 				if err := tc.maybeCommitWait(ctx, false /* deferred */); err != nil {
 					return nil, kvpb.NewError(err)
 				}
 			}
+		} else /* !et.Commit */ {
+			tc.finalizeAndCleanupTxnLocked(ctx)
 		}
 	}
 
@@ -635,8 +651,8 @@ func (tc *TxnCoordSender) Send(
 // For more, see https://www.cockroachlabs.com/blog/consistency-model/ and
 // docs/RFCS/20200811_non_blocking_txns.md.
 func (tc *TxnCoordSender) maybeCommitWait(ctx context.Context, deferred bool) error {
-	if tc.mu.txn.Status != roachpb.COMMITTED {
-		log.Fatalf(ctx, "maybeCommitWait called when not committed")
+	if tc.mu.txn.Status != roachpb.PREPARED && tc.mu.txn.Status != roachpb.COMMITTED {
+		log.Fatalf(ctx, "maybeCommitWait called when not prepared/committed")
 	}
 	if tc.mu.commitWaitDeferred && !deferred {
 		// If this is an automatic commit-wait call and the user of this
@@ -732,6 +748,15 @@ func (tc *TxnCoordSender) maybeRejectClientLocked(
 		return kvpb.NewError(tc.mu.storedRetryableErr)
 	case txnError:
 		return tc.mu.storedErr
+	case txnPrepared:
+		endTxn := ba != nil && ba.IsSingleEndTxnRequest()
+		if endTxn {
+			return nil
+		}
+		msg := redact.Sprintf("client already prepared the transaction. "+
+			"Trying to execute: %s", ba.Summary())
+		reason := kvpb.TransactionStatusError_REASON_UNKNOWN
+		return kvpb.NewErrorWithTxn(kvpb.NewTransactionStatusError(reason, msg), &tc.mu.txn)
 	case txnFinalized:
 		msg := redact.Sprintf("client already committed or rolled back the transaction. "+
 			"Trying to execute: %s", ba.Summary())
@@ -739,7 +764,7 @@ func (tc *TxnCoordSender) maybeRejectClientLocked(
 			// If the client is trying to do anything other than rollback, it is
 			// unexpected for it to find the transaction already in a txnFinalized
 			// state. This may be a bug, so log a stack trace.
-			stack := string(debug.Stack())
+			stack := debugutil.Stack()
 			log.Errorf(ctx, "%s. stack:\n%s", msg, stack)
 		}
 		reason := kvpb.TransactionStatusError_REASON_UNKNOWN
@@ -786,6 +811,13 @@ func (tc *TxnCoordSender) ClientFinalized() bool {
 // closes all interceptors.
 func (tc *TxnCoordSender) finalizeAndCleanupTxnLocked(ctx context.Context) {
 	tc.mu.txnState = txnFinalized
+	tc.cleanupTxnLocked(ctx)
+}
+
+// markTxnPreparedLocked marks the transaction state as prepared and closes all
+// interceptors.
+func (tc *TxnCoordSender) markTxnPreparedLocked(ctx context.Context) {
+	tc.mu.txnState = txnPrepared
 	tc.cleanupTxnLocked(ctx)
 }
 
@@ -842,13 +874,6 @@ func (tc *TxnCoordSender) handleRetryableErrLocked(ctx context.Context, pErr *kv
 
 	case *kvpb.WriteTooOldError:
 		tc.metrics.RestartsWriteTooOld.Inc()
-		// Also increment the deprecated "txn.restarts.writetoooldmulti" metric.
-		// We preserve this for one release to avoid confusion in mixed-version
-		// clusters.
-		// TODO(nvanbenschoten): remove this when compatibility with v23.2 is no
-		// longer needed. At the same time, also remove the corresponding metric
-		// from the "Transaction Restarts" graph in the SQL Dashboard.
-		tc.metrics.RestartsWriteTooOldMulti.Inc()
 
 	case *kvpb.ReadWithinUncertaintyIntervalError:
 		tc.metrics.RestartsReadWithinUncertainty.Inc()
@@ -1131,6 +1156,27 @@ func (tc *TxnCoordSender) SetOmitInRangefeeds() {
 	tc.mu.txn.OmitInRangefeeds = true
 }
 
+// SetBufferedWritesEnabled is part of the kv.TxnSender interface.
+func (tc *TxnCoordSender) SetBufferedWritesEnabled(enabled bool) {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+
+	if tc.mu.active && enabled && !tc.interceptorAlloc.txnWriteBuffer.enabled {
+		panic("cannot enable buffered writes on a running transaction")
+	}
+	tc.interceptorAlloc.txnWriteBuffer.enabled = enabled
+	// TODO(yuzefovich): flush the buffer when going from "enabled" to
+	// "disabled".
+}
+
+// BufferedWritesEnabled is part of the kv.TxnSender interface.
+func (tc *TxnCoordSender) BufferedWritesEnabled() bool {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+
+	return tc.interceptorAlloc.txnWriteBuffer.enabled
+}
+
 // String is part of the kv.TxnSender interface.
 func (tc *TxnCoordSender) String() string {
 	tc.mu.Lock()
@@ -1302,6 +1348,13 @@ func (tc *TxnCoordSender) IsSerializablePushAndRefreshNotPossible() bool {
 	// We check ReadTimestampFixed here because, if that's set, refreshing
 	// of reads is not performed.
 	return isTxnSerializable && isTxnPushed && refreshAttemptNotPossible
+}
+
+// Key is part of the kv.TxnSender interface.
+func (tc *TxnCoordSender) Key() roachpb.Key {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	return tc.mu.txn.Key
 }
 
 // Epoch is part of the kv.TxnSender interface.

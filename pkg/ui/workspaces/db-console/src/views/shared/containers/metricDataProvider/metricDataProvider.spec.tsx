@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { shallow } from "enzyme";
 import map from "lodash/map";
@@ -15,6 +10,7 @@ import Long from "long";
 import React, { Fragment } from "react";
 
 import * as protos from "src/js/protos";
+import { refreshSettings } from "src/redux/apiReducers";
 import { MetricsQuery, requestMetrics } from "src/redux/metrics";
 import {
   Axis,
@@ -23,7 +19,6 @@ import {
   QueryTimeInfo,
 } from "src/views/shared/components/metricQuery";
 import { MetricsDataProviderUnconnected as MetricsDataProvider } from "src/views/shared/containers/metricDataProvider";
-import { refreshSettings } from "src/redux/apiReducers";
 
 // TextGraph is a proof-of-concept component used to demonstrate that
 // MetricsDataProvider is working correctly. Used in tests.

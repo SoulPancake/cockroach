@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 package main
 
 import (
@@ -103,11 +98,7 @@ func getUIDirs(d *dev) (*UIDirectories, error) {
 func (d *dev) assertNoLinkedNpmDeps(targets []buildTarget) error {
 	uiWillBeBuilt := false
 	for _, target := range targets {
-		// TODO: This could potentially be a bazel query, e.g.
-		// 'somepath(${target.fullName}, //pkg/ui/workspaces/db-console:*)' or
-		// similar, but with only two eligible targets it doesn't seem quite
-		// worth it.
-		if target.fullName == cockroachTarget || target.fullName == cockroachTargetOss {
+		if target.fullName == cockroachTarget {
 			uiWillBeBuilt = true
 			break
 		}
@@ -321,6 +312,10 @@ Replaces 'make ui-watch'.`,
 			}
 			if !isOss {
 				args = append(args, "//pkg/ui/workspaces/db-console/ccl/src/js:crdb-protobuf-client-ccl-lib")
+				args = append(args, "//pkg/ui/workspaces/db-console/src/js:crdb-protobuf-client_files")
+				args = append(args, "//pkg/ui/workspaces/db-console/src/js:crdb-protobuf-client")
+				args = append(args, "//pkg/ui/workspaces/db-console/ccl/src/js:crdb-protobuf-client-ccl_files")
+				args = append(args, "//pkg/ui/workspaces/db-console/ccl/src/js:crdb-protobuf-client-ccl")
 			}
 			logCommand("bazel", args...)
 			err = d.exec.CommandContextInheritingStdStreams(ctx, "bazel", args...)

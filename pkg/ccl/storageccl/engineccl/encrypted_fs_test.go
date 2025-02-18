@@ -1,10 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package engineccl
 
@@ -21,13 +18,12 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/ccl/baseccl"
-	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl/engineccl/enginepbccl"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/storage/fs"
+	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/storageutils"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -240,15 +236,14 @@ func TestPebbleEncryption(t *testing.T) {
 	keyFile128 := "111111111111111111111111111111111234567890123456"
 	writeToFile(t, stickyRegistry.Get(stickyVFSID), "16.key", []byte(keyFile128))
 
-	encOptionsBytes, err := protoutil.Marshal(&baseccl.EncryptionOptions{
-		KeySource: baseccl.EncryptionKeySource_KeyFiles,
-		KeyFiles: &baseccl.EncryptionKeyFiles{
+	encOptions := &storagepb.EncryptionOptions{
+		KeySource: storagepb.EncryptionKeySource_KeyFiles,
+		KeyFiles: &storagepb.EncryptionKeyFiles{
 			CurrentKey: "16.key",
 			OldKey:     "plain",
 		},
 		DataKeyRotationPeriod: 1000, // arbitrary seconds
-	})
-	require.NoError(t, err)
+	}
 
 	func() {
 		// Initialize the filesystem env.
@@ -257,8 +252,8 @@ func TestPebbleEncryption(t *testing.T) {
 			base.StoreSpec{
 				InMemory:          true,
 				Attributes:        roachpb.Attributes{},
-				Size:              base.SizeSpec{InBytes: 512 << 20},
-				EncryptionOptions: encOptionsBytes,
+				Size:              storagepb.SizeSpec{Capacity: 512 << 20},
+				EncryptionOptions: encOptions,
 				StickyVFSID:       stickyVFSID,
 			},
 			fs.ReadWrite,
@@ -276,7 +271,7 @@ func TestPebbleEncryption(t *testing.T) {
 
 		var fileRegistry enginepb.FileRegistry
 		require.NoError(t, protoutil.Unmarshal(r.FileRegistry, &fileRegistry))
-		var keyRegistry enginepbccl.DataKeysRegistry
+		var keyRegistry enginepb.DataKeysRegistry
 		require.NoError(t, protoutil.Unmarshal(r.KeyRegistry, &keyRegistry))
 
 		stats, err := db.GetEnvStats()
@@ -285,10 +280,10 @@ func TestPebbleEncryption(t *testing.T) {
 		require.GreaterOrEqual(t, stats.TotalFiles, uint64(3))
 		// We also created markers for the format version and the manifest.
 		require.Equal(t, uint64(5), stats.ActiveKeyFiles)
-		var s enginepbccl.EncryptionStatus
+		var s enginepb.EncryptionStatus
 		require.NoError(t, protoutil.Unmarshal(stats.EncryptionStatus, &s))
 		require.Equal(t, "16.key", s.ActiveStoreKey.Source)
-		require.Equal(t, int32(enginepbccl.EncryptionType_AES128_CTR), stats.EncryptionType)
+		require.Equal(t, int32(enginepb.EncryptionType_AES128_CTR), stats.EncryptionType)
 		t.Logf("EnvStats:\n%+v\n\n", *stats)
 
 		batch := db.NewWriteBatch()
@@ -306,8 +301,8 @@ func TestPebbleEncryption(t *testing.T) {
 			base.StoreSpec{
 				InMemory:          true,
 				Attributes:        roachpb.Attributes{},
-				Size:              base.SizeSpec{InBytes: 512 << 20},
-				EncryptionOptions: encOptionsBytes,
+				Size:              storagepb.SizeSpec{Capacity: 512 << 20},
+				EncryptionOptions: encOptions,
 				StickyVFSID:       stickyVFSID,
 			},
 			fs.ReadWrite,
@@ -378,15 +373,14 @@ func TestPebbleEncryption2(t *testing.T) {
 	addKeyAndValidate := func(
 		key string, val string, encKeyFile string, oldEncFileKey string,
 	) {
-		encOptionsBytes, err := protoutil.Marshal(&baseccl.EncryptionOptions{
-			KeySource: baseccl.EncryptionKeySource_KeyFiles,
-			KeyFiles: &baseccl.EncryptionKeyFiles{
+		encOptions := &storagepb.EncryptionOptions{
+			KeySource: storagepb.EncryptionKeySource_KeyFiles,
+			KeyFiles: &storagepb.EncryptionKeyFiles{
 				CurrentKey: encKeyFile,
 				OldKey:     oldEncFileKey,
 			},
 			DataKeyRotationPeriod: 1000,
-		})
-		require.NoError(t, err)
+		}
 
 		// Initialize the filesystem env.
 		ctx := context.Background()
@@ -395,8 +389,8 @@ func TestPebbleEncryption2(t *testing.T) {
 			base.StoreSpec{
 				InMemory:          true,
 				Attributes:        roachpb.Attributes{},
-				Size:              base.SizeSpec{InBytes: 512 << 20},
-				EncryptionOptions: encOptionsBytes,
+				Size:              storagepb.SizeSpec{Capacity: 512 << 20},
+				EncryptionOptions: encOptions,
 				StickyVFSID:       stickyVFSID,
 			},
 			fs.ReadWrite,
@@ -439,13 +433,13 @@ func TestCanRegistryElide(t *testing.T) {
 	require.True(t, canRegistryElide(entry))
 
 	entry = &enginepb.FileEntry{EnvType: enginepb.EnvType_Store}
-	settings := &enginepbccl.EncryptionSettings{EncryptionType: enginepbccl.EncryptionType_Plaintext}
+	settings := &enginepb.EncryptionSettings{EncryptionType: enginepb.EncryptionType_Plaintext}
 	b, err := protoutil.Marshal(settings)
 	require.NoError(t, err)
 	entry.EncryptionSettings = b
 	require.True(t, canRegistryElide(entry))
 
-	settings = &enginepbccl.EncryptionSettings{EncryptionType: enginepbccl.EncryptionType_AES128_CTR}
+	settings = &enginepb.EncryptionSettings{EncryptionType: enginepb.EncryptionType_AES128_CTR}
 	b, err = protoutil.Marshal(settings)
 	require.NoError(t, err)
 	entry.EncryptionSettings = b
@@ -511,10 +505,10 @@ func (ptfs *plainTestFS) syncDir(t *testing.T) {}
 // encryptedTestFS is the encrypted FS being tested.
 type encryptedTestFS struct {
 	// The base strict FS which is wrapped for error injection and encryption.
-	mem             *vfs.MemFS
-	encOptionsBytes []byte
-	errorProb       float64
-	errorRand       *rand.Rand
+	mem        *vfs.MemFS
+	encOptions *storagepb.EncryptionOptions
+	errorProb  float64
+	errorRand  *rand.Rand
 
 	encEnv *fs.EncryptionEnv
 }
@@ -536,7 +530,7 @@ func (etfs *encryptedTestFS) restart() error {
 		etfs.encEnv.Closer.Close()
 		etfs.encEnv = nil
 	}
-	etfs.mem.ResetToSyncedState()
+	etfs.mem = etfs.mem.CrashClone(vfs.CrashCloneCfg{})
 	ei := &errorInjector{prob: etfs.errorProb, rand: etfs.errorRand}
 	fsMeta := errorfs.Wrap(etfs.mem, ei)
 	// TODO(sumeer): Do deterministic rollover of file registry after small
@@ -547,7 +541,7 @@ func (etfs *encryptedTestFS) restart() error {
 		return err
 	}
 	encEnv, err := newEncryptedEnv(
-		fsMeta, fileRegistry, "", false, etfs.encOptionsBytes)
+		fsMeta, fileRegistry, "", false, etfs.encOptions)
 	if err != nil {
 		return err
 	}
@@ -559,7 +553,7 @@ func (etfs *encryptedTestFS) restart() error {
 }
 
 func makeEncryptedTestFS(t *testing.T, errorProb float64, errorRand *rand.Rand) *encryptedTestFS {
-	mem := vfs.NewStrictMem()
+	mem := vfs.NewCrashableMem()
 	keyFile128 := "111111111111111111111111111111111234567890123456"
 	writeToFile(t, mem, "16.key", []byte(keyFile128))
 	dir, err := mem.OpenDir("/")
@@ -567,9 +561,9 @@ func makeEncryptedTestFS(t *testing.T, errorProb float64, errorRand *rand.Rand) 
 	require.NoError(t, dir.Sync())
 	require.NoError(t, dir.Close())
 
-	var encOptions baseccl.EncryptionOptions
-	encOptions.KeySource = baseccl.EncryptionKeySource_KeyFiles
-	encOptions.KeyFiles = &baseccl.EncryptionKeyFiles{
+	var encOptions storagepb.EncryptionOptions
+	encOptions.KeySource = storagepb.EncryptionKeySource_KeyFiles
+	encOptions.KeyFiles = &storagepb.EncryptionKeyFiles{
 		CurrentKey: "16.key",
 		OldKey:     "plain",
 	}
@@ -578,14 +572,12 @@ func makeEncryptedTestFS(t *testing.T, errorProb float64, errorRand *rand.Rand) 
 	// TODO(sumeer): Do deterministic data key rotation. Inject kmTimeNow and
 	// operations that advance time.
 	encOptions.DataKeyRotationPeriod = 100000
-	encOptionsBytes, err := protoutil.Marshal(&encOptions)
-	require.NoError(t, err)
 	etfs := &encryptedTestFS{
-		mem:             mem,
-		encOptionsBytes: encOptionsBytes,
-		errorProb:       errorProb,
-		errorRand:       errorRand,
-		encEnv:          nil,
+		mem:        mem,
+		encOptions: &encOptions,
+		errorProb:  errorProb,
+		errorRand:  errorRand,
+		encEnv:     nil,
 	}
 	require.NoError(t, etfs.restart())
 	return etfs

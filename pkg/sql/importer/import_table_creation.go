@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package importer
 
@@ -181,6 +176,8 @@ func MakeSimpleTableDescriptor(
 		&evalCtx,
 		evalCtx.SessionData(), /* sessionData */
 		tree.PersistencePermanent,
+		// Sequences are unsupported here.
+		nil, /* colToSequenceRefs */
 		// We need to bypass the LOCALITY on non multi-region check here because
 		// we cannot access the database region config at import level.
 		// There is code that only allows REGIONAL BY TABLE tables to be imported,

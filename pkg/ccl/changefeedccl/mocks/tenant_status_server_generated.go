@@ -66,6 +66,21 @@ func (mr *MockTenantStatusServerMockRecorder) HotRangesV2(arg0, arg1 interface{}
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HotRangesV2", reflect.TypeOf((*MockTenantStatusServer)(nil).HotRangesV2), arg0, arg1)
 }
 
+// NetworkConnectivity mocks base method.
+func (m *MockTenantStatusServer) NetworkConnectivity(arg0 context.Context, arg1 *serverpb.NetworkConnectivityRequest) (*serverpb.NetworkConnectivityResponse, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "NetworkConnectivity", arg0, arg1)
+	ret0, _ := ret[0].(*serverpb.NetworkConnectivityResponse)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// NetworkConnectivity indicates an expected call of NetworkConnectivity.
+func (mr *MockTenantStatusServerMockRecorder) NetworkConnectivity(arg0, arg1 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NetworkConnectivity", reflect.TypeOf((*MockTenantStatusServer)(nil).NetworkConnectivity), arg0, arg1)
+}
+
 // Nodes mocks base method.
 func (m *MockTenantStatusServer) Nodes(arg0 context.Context, arg1 *serverpb.NodesRequest) (*serverpb.NodesResponse, error) {
 	m.ctrl.T.Helper()
@@ -79,6 +94,21 @@ func (m *MockTenantStatusServer) Nodes(arg0 context.Context, arg1 *serverpb.Node
 func (mr *MockTenantStatusServerMockRecorder) Nodes(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Nodes", reflect.TypeOf((*MockTenantStatusServer)(nil).Nodes), arg0, arg1)
+}
+
+// Ranges mocks base method.
+func (m *MockTenantStatusServer) Ranges(arg0 context.Context, arg1 *serverpb.RangesRequest) (*serverpb.RangesResponse, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Ranges", arg0, arg1)
+	ret0, _ := ret[0].(*serverpb.RangesResponse)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Ranges indicates an expected call of Ranges.
+func (mr *MockTenantStatusServerMockRecorder) Ranges(arg0, arg1 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Ranges", reflect.TypeOf((*MockTenantStatusServer)(nil).Ranges), arg0, arg1)
 }
 
 // Regions mocks base method.

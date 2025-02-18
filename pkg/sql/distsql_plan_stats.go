@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -15,7 +10,6 @@ import (
 	"math"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/settings"
@@ -23,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
@@ -31,11 +26,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/idxtype"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/span"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats/bounds"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
@@ -160,6 +157,8 @@ func (dsp *DistSQLPlanner) createAndAttachSamplers(
 	jobID jobspb.JobID,
 	reqStats []requestedStat,
 	sketchSpec, invSketchSpec []execinfrapb.SketchSpec,
+	numIndexes int,
+	curIndex int,
 ) *PhysicalPlan {
 	// Estimate the expected number of rows based on existing stats in the cache.
 	var rowsExpected uint64
@@ -169,11 +168,20 @@ func (dsp *DistSQLPlanner) createAndAttachSamplers(
 			overhead = autoStatsFractionStaleRowsForTable
 		}
 		// Convert to a signed integer first to make the linter happy.
-		rowsExpected = uint64(int64(
-			// The total expected number of rows is the same number that was measured
-			// most recently, plus some overhead for possible insertions.
-			float64(tableStats[0].RowCount) * (1 + overhead),
-		))
+		if details.UsingExtremes {
+			rowsExpected = uint64(int64(
+				// The total expected number of rows is the estimated number of stale
+				// rows since we're only collecting stats on rows outside the bounds of
+				// the most recent statistic.
+				float64(tableStats[0].RowCount) * overhead,
+			))
+		} else {
+			rowsExpected = uint64(int64(
+				// The total expected number of rows is the same number that was measured
+				// most recently, plus some overhead for possible insertions.
+				float64(tableStats[0].RowCount) * (1 + overhead),
+			))
+		}
 	}
 
 	// Set up the samplers.
@@ -249,6 +257,8 @@ func (dsp *DistSQLPlanner) createAndAttachSamplers(
 		JobID:            jobID,
 		RowsExpected:     rowsExpected,
 		DeleteOtherStats: details.DeleteOtherStats,
+		NumIndexes:       uint64(numIndexes),
+		CurIndex:         uint64(curIndex),
 	}
 	// Plan the SampleAggregator on the gateway, unless we have a single Sampler.
 	node := dsp.gatewaySQLInstanceID
@@ -273,14 +283,16 @@ func (dsp *DistSQLPlanner) createPartialStatsPlan(
 	reqStats []requestedStat,
 	jobID jobspb.JobID,
 	details jobspb.CreateStatsDetails,
+	numIndexes int,
+	curIndex int,
 ) (*PhysicalPlan, error) {
-
-	// Currently, we limit the number of requests for partial statistics
-	// stats at a given point in time to 1.
-	// TODO (faizaanmadhani): Add support for multiple distinct requested
-	// partial stats in one job.
+	// Partial stats collections on multiple columns create different plans,
+	// so we only support one requested stat at a time here.
 	if len(reqStats) > 1 {
-		return nil, pgerror.Newf(pgcode.FeatureNotSupported, "cannot process multiple partial statistics at once")
+		return nil, unimplemented.NewWithIssue(
+			128904,
+			"cannot process multiple partial statistics requests at once",
+		)
 	}
 
 	reqStat := reqStats[0]
@@ -290,8 +302,13 @@ func (dsp *DistSQLPlanner) createPartialStatsPlan(
 		return nil, pgerror.Newf(pgcode.FeatureNotSupported, "multi-column partial statistics are not currently supported")
 	}
 
+	var typeResolver *descs.DistSQLTypeResolver
+	if p := planCtx.planner; p != nil {
+		r := descs.NewDistSQLTypeResolver(p.Descriptors(), p.Txn())
+		typeResolver = &r
+	}
 	// Fetch all stats for the table that matches the given table descriptor.
-	tableStats, err := planCtx.ExtendedEvalCtx.ExecCfg.TableStatsCache.GetTableStats(ctx, desc)
+	tableStats, err := planCtx.ExtendedEvalCtx.ExecCfg.TableStatsCache.GetTableStats(ctx, desc, typeResolver)
 	if err != nil {
 		return nil, err
 	}
@@ -323,7 +340,9 @@ func (dsp *DistSQLPlanner) createPartialStatsPlan(
 	}
 
 	var sb span.Builder
-	sb.Init(planCtx.EvalContext(), planCtx.ExtendedEvalCtx.Codec, desc, scan.index)
+	sb.InitAllowingExternalRowData(
+		planCtx.EvalContext(), planCtx.ExtendedEvalCtx.Codec, desc, scan.index,
+	)
 
 	var stat *stats.TableStatistic
 	var histogram []cat.HistogramBucket
@@ -422,7 +441,7 @@ func (dsp *DistSQLPlanner) createPartialStatsPlan(
 		// (i.e., with different configurations). See #50655.
 		if len(reqStat.columns) == 1 {
 			for _, index := range desc.PublicNonPrimaryIndexes() {
-				if index.GetType() == descpb.IndexDescriptor_INVERTED && index.InvertedColumnID() == column.GetID() {
+				if index.GetType() == idxtype.INVERTED && index.InvertedColumnID() == column.GetID() {
 					spec.Index = index.IndexDesc()
 					break
 				}
@@ -445,7 +464,8 @@ func (dsp *DistSQLPlanner) createPartialStatsPlan(
 		sampledColumnIDs,
 		jobID,
 		reqStats,
-		sketchSpec, invSketchSpec), nil
+		sketchSpec, invSketchSpec,
+		numIndexes, curIndex), nil
 }
 
 func (dsp *DistSQLPlanner) createStatsPlan(
@@ -456,6 +476,8 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 	reqStats []requestedStat,
 	jobID jobspb.JobID,
 	details jobspb.CreateStatsDetails,
+	numIndexes int,
+	curIndex int,
 ) (*PhysicalPlan, error) {
 	if len(reqStats) == 0 {
 		return nil, errors.New("no stats requested")
@@ -514,12 +536,20 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 
 	// Create the table readers; for this we initialize a dummy scanNode.
 	scan := scanNode{desc: desc}
+	if colCfg.wantedColumns == nil {
+		// wantedColumns cannot be left nil, and if it is nil at this point,
+		// then we only have virtual computed columns, so we'll allocate an
+		// empty slice.
+		colCfg.wantedColumns = []tree.ColumnID{}
+	}
 	err := scan.initDescDefaults(colCfg)
 	if err != nil {
 		return nil, err
 	}
 	var sb span.Builder
-	sb.Init(planCtx.EvalContext(), planCtx.ExtendedEvalCtx.Codec, desc, scan.index)
+	sb.InitAllowingExternalRowData(
+		planCtx.EvalContext(), planCtx.ExtendedEvalCtx.Codec, desc, scan.index,
+	)
 	scan.spans, err = sb.UnconstrainedSpans()
 	if err != nil {
 		return nil, err
@@ -651,7 +681,7 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 			if len(s.columns) == 1 {
 				col := s.columns[0]
 				for _, index := range desc.PublicNonPrimaryIndexes() {
-					if index.GetType() == descpb.IndexDescriptor_INVERTED && index.InvertedColumnID() == col {
+					if index.GetType() == idxtype.INVERTED && index.InvertedColumnID() == col {
 						spec.Index = index.IndexDesc()
 						break
 					}
@@ -667,7 +697,12 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 		}
 	}
 
-	tableStats, err := planCtx.ExtendedEvalCtx.ExecCfg.TableStatsCache.GetTableStats(ctx, desc)
+	var typeResolver *descs.DistSQLTypeResolver
+	if p := planCtx.planner; p != nil {
+		r := descs.NewDistSQLTypeResolver(p.Descriptors(), p.Txn())
+		typeResolver = &r
+	}
+	tableStats, err := planCtx.ExtendedEvalCtx.ExecCfg.TableStatsCache.GetTableStats(ctx, desc, typeResolver)
 	if err != nil {
 		return nil, err
 	}
@@ -681,7 +716,8 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 		sampledColumnIDs,
 		jobID,
 		reqStats,
-		sketchSpecs, invSketchSpecs), nil
+		sketchSpecs, invSketchSpecs,
+		numIndexes, curIndex), nil
 }
 
 func (dsp *DistSQLPlanner) createPlanForCreateStats(
@@ -690,6 +726,8 @@ func (dsp *DistSQLPlanner) createPlanForCreateStats(
 	semaCtx *tree.SemaContext,
 	jobID jobspb.JobID,
 	details jobspb.CreateStatsDetails,
+	numIndexes int,
+	curIndex int,
 ) (*PhysicalPlan, error) {
 	reqStats := make([]requestedStat, len(details.ColumnStats))
 	histogramCollectionEnabled := stats.HistogramClusterMode.Get(&dsp.st.SV)
@@ -718,9 +756,9 @@ func (dsp *DistSQLPlanner) createPlanForCreateStats(
 	}
 
 	if details.UsingExtremes {
-		return dsp.createPartialStatsPlan(ctx, planCtx, tableDesc, reqStats, jobID, details)
+		return dsp.createPartialStatsPlan(ctx, planCtx, tableDesc, reqStats, jobID, details, numIndexes, curIndex)
 	}
-	return dsp.createStatsPlan(ctx, planCtx, semaCtx, tableDesc, reqStats, jobID, details)
+	return dsp.createStatsPlan(ctx, planCtx, semaCtx, tableDesc, reqStats, jobID, details, numIndexes, curIndex)
 }
 
 func (dsp *DistSQLPlanner) planAndRunCreateStats(
@@ -729,13 +767,15 @@ func (dsp *DistSQLPlanner) planAndRunCreateStats(
 	planCtx *PlanningCtx,
 	semaCtx *tree.SemaContext,
 	txn *kv.Txn,
-	job *jobs.Job,
 	resultWriter *RowResultWriter,
+	jobId jobspb.JobID,
+	details jobspb.CreateStatsDetails,
+	numIndexes int,
+	curIndex int,
 ) error {
 	ctx = logtags.AddTag(ctx, "create-stats-distsql", nil)
 
-	details := job.Details().(jobspb.CreateStatsDetails)
-	physPlan, err := dsp.createPlanForCreateStats(ctx, planCtx, semaCtx, job.ID(), details)
+	physPlan, err := dsp.createPlanForCreateStats(ctx, planCtx, semaCtx, jobId, details, numIndexes, curIndex)
 	if err != nil {
 		return err
 	}

@@ -1,10 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -25,7 +22,7 @@ type Encoder interface {
 	// `TableDescriptor`, but only the primary key fields will be used. The
 	// returned bytes are only valid until the next call to Encode*.
 	EncodeKey(context.Context, cdcevent.Row) ([]byte, error)
-	// EncodeValue encodes the primary key of the given row. The columns of the
+	// EncodeValue encodes the values of the given row. The columns of the
 	// datums are expected to match 1:1 with the `Columns` field of the
 	// `TableDescriptor`. The returned bytes are only valid until the next call
 	// to Encode*.
@@ -48,12 +45,13 @@ func getEncoder(
 	encodeForQuery bool,
 	p externalConnectionProvider,
 	sliMetrics *sliMetrics,
+	sourceProvider *enrichedSourceProvider,
 ) (Encoder, error) {
 	switch opts.Format {
 	case changefeedbase.OptFormatJSON:
-		return makeJSONEncoder(ctx, jsonEncoderOptions{EncodingOptions: opts, encodeForQuery: encodeForQuery})
+		return makeJSONEncoder(ctx, jsonEncoderOptions{EncodingOptions: opts, encodeForQuery: encodeForQuery}, sourceProvider)
 	case changefeedbase.OptFormatAvro, changefeedbase.DeprecatedOptFormatAvro:
-		return newConfluentAvroEncoder(opts, targets, p, sliMetrics)
+		return newConfluentAvroEncoder(opts, targets, p, sliMetrics, sourceProvider)
 	case changefeedbase.OptFormatCSV:
 		return newCSVEncoder(opts), nil
 	case changefeedbase.OptFormatParquet:

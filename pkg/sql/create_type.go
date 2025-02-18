@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -41,6 +36,7 @@ import (
 )
 
 type createTypeNode struct {
+	zeroInputPlanNode
 	n        *tree.CreateType
 	typeName *tree.TypeName
 	dbDesc   catalog.DatabaseDescriptor
@@ -418,8 +414,10 @@ func createCompositeTypeDesc(
 		if err != nil {
 			return nil, err
 		}
-		err = tree.CheckUnsupportedType(params.ctx, &params.p.semaCtx, typ)
-		if err != nil {
+		if typ.Identical(types.Trigger) {
+			return nil, tree.CannotAcceptTriggerErr
+		}
+		if err = tree.CheckUnsupportedType(params.ctx, &params.p.semaCtx, typ); err != nil {
 			return nil, err
 		}
 		if typ.UserDefined() {

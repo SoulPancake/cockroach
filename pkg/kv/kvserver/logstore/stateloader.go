@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package logstore
 
@@ -158,7 +153,7 @@ func (sl StateLoader) SetHardState(
 // taking care that a HardState compatible with the existing data is written.
 func (sl StateLoader) SynthesizeHardState(
 	ctx context.Context,
-	readWriter storage.ReadWriter,
+	writer storage.Writer,
 	oldHS raftpb.HardState,
 	truncState kvserverpb.RaftTruncatedState,
 	raftAppliedIndex kvpb.RaftIndex,
@@ -174,6 +169,11 @@ func (sl StateLoader) SynthesizeHardState(
 		return errors.Newf("can't decrease HardState.Commit from %d to %d",
 			redact.Safe(oldHS.Commit), redact.Safe(newHS.Commit))
 	}
+
+	// TODO(arul): This function can be called with an empty OldHS. In all other
+	// cases, where a term is included, we should be able to assert that the term
+	// isn't regressing (i.e. oldHS.Term >= newHS.Term).
+
 	if oldHS.Term > newHS.Term {
 		// The existing HardState is allowed to be ahead of us, which is
 		// relevant in practice for the split trigger. We already checked above
@@ -181,11 +181,14 @@ func (sl StateLoader) SynthesizeHardState(
 		// updated votes yet.
 		newHS.Term = oldHS.Term
 	}
-	// If the existing HardState voted in this term, remember that.
+	// If the existing HardState voted in this term and knows who the leader is,
+	// remember that.
 	if oldHS.Term == newHS.Term {
 		newHS.Vote = oldHS.Vote
+		newHS.Lead = oldHS.Lead
+		newHS.LeadEpoch = oldHS.LeadEpoch
 	}
-	err := sl.SetHardState(ctx, readWriter, newHS)
+	err := sl.SetHardState(ctx, writer, newHS)
 	return errors.Wrapf(err, "writing HardState %+v", &newHS)
 }
 

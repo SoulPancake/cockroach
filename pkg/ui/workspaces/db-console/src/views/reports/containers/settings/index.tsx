@@ -1,18 +1,8 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import isNil from "lodash/isNil";
-import React from "react";
-import { Helmet } from "react-helmet";
-import { connect } from "react-redux";
-import { RouteComponentProps, withRouter } from "react-router-dom";
 import {
   Loading,
   ColumnDescriptor,
@@ -21,11 +11,16 @@ import {
   util,
   Timestamp,
 } from "@cockroachlabs/cluster-ui";
+import isNil from "lodash/isNil";
+import React from "react";
+import { Helmet } from "react-helmet";
+import { connect } from "react-redux";
+import { RouteComponentProps, withRouter } from "react-router-dom";
 
 import * as protos from "src/js/protos";
 import { refreshSettings } from "src/redux/apiReducers";
-import { AdminUIState } from "src/redux/state";
 import { CachedDataReducerState } from "src/redux/cachedDataReducer";
+import { AdminUIState } from "src/redux/state";
 
 import { BackToAdvanceDebug } from "../util";
 

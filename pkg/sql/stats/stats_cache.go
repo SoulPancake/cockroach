@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package stats
 
@@ -16,6 +11,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -76,6 +72,10 @@ type TableStatisticsCache struct {
 
 	// Used when decoding KV from the range feed.
 	datumAlloc tree.DatumAlloc
+
+	// generation is incremented any time the statistics cache is
+	// modified.
+	generation atomic.Int64
 }
 
 // The cache stores *cacheEntry objects. The fields are protected by the
@@ -133,6 +133,20 @@ func NewTableStatisticsCache(
 		ShouldEvict: func(s int, key, value interface{}) bool { return s > cacheSize },
 	})
 	return tableStatsCache
+}
+
+// Clear removes all entries from the stats cache.
+func (sc *TableStatisticsCache) Clear() {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.mu.cache.Clear()
+	defer sc.generation.Add(1)
+}
+
+// GetGeneration returns the current generation, which will change if any
+// modifications happen to the cache.
+func (sc *TableStatisticsCache) GetGeneration() int64 {
+	return sc.generation.Load()
 }
 
 // Start begins watching for updates in the stats table.
@@ -212,33 +226,24 @@ func decodeTableStatisticsKV(
 // and if the stats are not present in the cache, it looks them up in
 // system.table_statistics.
 //
+// typeResolver argument is optional and will be used to hydrate all
+// user-defined types. If the resolver is not provided, then the latest
+// committed type metadata will be used.
+//
 // The function returns an error if we could not query the system table. It
 // silently ignores any statistics that can't be decoded (e.g. because
 // user-defined types don't exit).
 //
 // The statistics are ordered by their CreatedAt time (newest-to-oldest).
 func (sc *TableStatisticsCache) GetTableStats(
-	ctx context.Context, table catalog.TableDescriptor,
+	ctx context.Context, table catalog.TableDescriptor, typeResolver *descs.DistSQLTypeResolver,
 ) (stats []*TableStatistic, err error) {
 	if !statsUsageAllowed(table, sc.settings) {
 		return nil, nil
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			// In the event of a "safe" panic, we only want to log the error and
-			// continue executing the query without stats for this table.
-			if ok, e := errorutil.ShouldCatch(r); ok {
-				err = e
-			} else {
-				// Other panic objects can't be considered "safe" and thus are
-				// propagated as crashes that terminate the session.
-				panic(r)
-			}
-		}
-	}()
 	forecast := forecastAllowed(table, sc.settings)
 	return sc.getTableStatsFromCache(
-		ctx, table.GetID(), &forecast, table.UserDefinedTypeColumns(),
+		ctx, table.GetID(), &forecast, table.UserDefinedTypeColumns(), typeResolver,
 	)
 }
 
@@ -260,7 +265,10 @@ func DisallowedOnSystemTable(tableID descpb.ID) bool {
 	// benefit is not worth the potential performance hit.
 	// TODO(yuzefovich): re-evaluate this assumption. Perhaps we could at
 	// least enable manual collection on this table.
-	case keys.TableStatisticsTableID, keys.LeaseTableID, keys.ScheduledJobsTableID:
+	// Disable stats on system.span_configurations since we've seen excessively
+	// many collections on it in some cases, and the stats are unlikely to
+	// provide any benefit on this table.
+	case keys.TableStatisticsTableID, keys.LeaseTableID, keys.ScheduledJobsTableID, keys.SpanConfigurationsTableID:
 		return true
 	}
 	return false
@@ -324,7 +332,11 @@ func forecastAllowed(table catalog.TableDescriptor, clusterSettings *cluster.Set
 // getTableStatsFromCache is like GetTableStats but assumes that the table ID
 // is safe to fetch statistics for: non-system, non-virtual, non-view, etc.
 func (sc *TableStatisticsCache) getTableStatsFromCache(
-	ctx context.Context, tableID descpb.ID, forecast *bool, udtCols []catalog.Column,
+	ctx context.Context,
+	tableID descpb.ID,
+	forecast *bool,
+	udtCols []catalog.Column,
+	typeResolver *descs.DistSQLTypeResolver,
 ) ([]*TableStatistic, error) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
@@ -338,7 +350,7 @@ func (sc *TableStatisticsCache) getTableStatsFromCache(
 		}
 	}
 
-	return sc.addCacheEntryLocked(ctx, tableID, forecast != nil && *forecast)
+	return sc.addCacheEntryLocked(ctx, tableID, forecast != nil && *forecast, typeResolver)
 }
 
 // isStale checks whether we need to evict and re-load the cache entry.
@@ -414,8 +426,9 @@ func (sc *TableStatisticsCache) lookupStatsLocked(
 //   - stats are retrieved from database:
 //   - mutex is locked again and the entry is updated.
 func (sc *TableStatisticsCache) addCacheEntryLocked(
-	ctx context.Context, tableID descpb.ID, forecast bool,
+	ctx context.Context, tableID descpb.ID, forecast bool, typeResolver *descs.DistSQLTypeResolver,
 ) (stats []*TableStatistic, err error) {
+	defer sc.generation.Add(1)
 	// Add a cache entry that other queries can find and wait on until we have the
 	// stats.
 	e := &cacheEntry{
@@ -429,9 +442,8 @@ func (sc *TableStatisticsCache) addCacheEntryLocked(
 	func() {
 		sc.mu.Unlock()
 		defer sc.mu.Lock()
-
 		log.VEventf(ctx, 1, "reading statistics for table %d", tableID)
-		stats, udts, err = sc.getTableStatsFromDB(ctx, tableID, forecast, sc.settings)
+		stats, udts, err = sc.getTableStatsFromDB(ctx, tableID, forecast, sc.settings, typeResolver)
 		log.VEventf(ctx, 1, "finished reading statistics for table %d", tableID)
 	}()
 
@@ -462,6 +474,7 @@ func (sc *TableStatisticsCache) refreshCacheEntry(
 ) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
+	defer sc.generation.Add(1)
 
 	// If the stats don't already exist in the cache, don't bother performing
 	// the refresh. If e.err is not nil, the stats are in the process of being
@@ -497,7 +510,7 @@ func (sc *TableStatisticsCache) refreshCacheEntry(
 
 			log.VEventf(ctx, 1, "refreshing statistics for table %d", tableID)
 			// TODO(radu): pass the timestamp and use AS OF SYSTEM TIME.
-			stats, udts, err = sc.getTableStatsFromDB(ctx, tableID, forecast, sc.settings)
+			stats, udts, err = sc.getTableStatsFromDB(ctx, tableID, forecast, sc.settings, nil /* typeResolver */)
 			log.VEventf(ctx, 1, "done refreshing statistics for table %d", tableID)
 		}()
 		if e.lastRefreshTimestamp.Equal(ts) {
@@ -535,6 +548,7 @@ func (sc *TableStatisticsCache) InvalidateTableStats(ctx context.Context, tableI
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 	sc.mu.cache.Del(tableID)
+	defer sc.generation.Add(1)
 }
 
 const (
@@ -636,10 +650,25 @@ func NewTableStatisticProto(datums tree.Datums) (*TableStatisticProto, error) {
 // parseStats converts the given datums to a TableStatistic object. It might
 // need to run a query to get user defined type metadata.
 func (sc *TableStatisticsCache) parseStats(
-	ctx context.Context, datums tree.Datums,
-) (*TableStatistic, *types.T, error) {
+	ctx context.Context, datums tree.Datums, typeResolver *descs.DistSQLTypeResolver,
+) (_ *TableStatistic, _ *types.T, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			// In the event of a "safe" panic, we only want to log the error and
+			// continue executing the query without stats for this table. This is only
+			// possible because the code does not update shared state and does not
+			// manipulate locks.
+			if ok, e := errorutil.ShouldCatch(r); ok {
+				err = e
+			} else {
+				// Other panic objects can't be considered "safe" and thus are
+				// propagated as crashes that terminate the session.
+				panic(r)
+			}
+		}
+	}()
+
 	var tsp *TableStatisticProto
-	var err error
 	tsp, err = NewTableStatisticProto(datums)
 	if err != nil {
 		return nil, nil, err
@@ -647,33 +676,33 @@ func (sc *TableStatisticsCache) parseStats(
 	res := &TableStatistic{TableStatisticProto: *tsp}
 	var udt *types.T
 	if res.HistogramData != nil && (len(res.HistogramData.Buckets) > 0 || res.RowCount == res.NullCount) {
-		// hydrate the type in case any user defined types are present.
+		// Hydrate the type in case any user defined types are present.
 		// There are cases where typ is nil, so don't do anything if so.
 		if typ := res.HistogramData.ColumnType; typ != nil && typ.UserDefined() {
-			// The metadata accessed here is never older than the metadata used when
-			// collecting the stats. Changes to types are backwards compatible across
-			// versions, so using a newer version of the type metadata here is safe.
-			// Given that we never delete members from enum types, a descriptor we
-			// get from the lease manager will be able to be used to decode these stats,
-			// even if it wasn't the descriptor that was used to collect the stats.
-			// If have types that are not backwards compatible in this way, then we
-			// will need to start writing a timestamp on the stats objects and request
-			// TypeDescriptor's with the timestamp that the stats were recorded with.
-			//
-			// TODO(ajwerner): We now do delete members from enum types. See #67050.
-			if err := sc.db.DescsTxn(ctx, func(
-				ctx context.Context, txn descs.Txn,
-			) error {
-				resolver := descs.NewDistSQLTypeResolver(txn.Descriptors(), txn.KV())
-				var err error
-				udt, err = resolver.ResolveTypeByOID(ctx, typ.Oid())
+			if typeResolver != nil {
+				udt, err = typeResolver.ResolveTypeByOID(ctx, typ.Oid())
+				if err != nil {
+					return nil, nil, err
+				}
 				res.HistogramData.ColumnType = udt
-				return err
-			}); err != nil {
-				return nil, nil, err
+			} else {
+				// The metadata accessed here is never older than the metadata
+				// used when collecting the stats. Changes to types are
+				// backwards compatible across versions, so using a newer
+				// version of the type metadata here is safe.
+				if err = sc.db.DescsTxn(ctx, func(
+					ctx context.Context, txn descs.Txn,
+				) error {
+					resolver := descs.NewDistSQLTypeResolver(txn.Descriptors(), txn.KV())
+					udt, err = resolver.ResolveTypeByOID(ctx, typ.Oid())
+					res.HistogramData.ColumnType = udt
+					return err
+				}); err != nil {
+					return nil, nil, err
+				}
 			}
 		}
-		if err := DecodeHistogramBuckets(res); err != nil {
+		if err = DecodeHistogramBuckets(res); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -684,7 +713,6 @@ func (sc *TableStatisticsCache) parseStats(
 // the resulting buckets into tabStat.Histogram.
 func DecodeHistogramBuckets(tabStat *TableStatistic) error {
 	h := tabStat.HistogramData
-	var offset int
 	if tabStat.NullCount > 0 {
 		// A bucket for NULL is not persisted, but we create a fake one to
 		// make histograms easier to work with. The length of res.Histogram
@@ -692,33 +720,35 @@ func DecodeHistogramBuckets(tabStat *TableStatistic) error {
 		// buckets.
 		// TODO(michae2): Combine this with setHistogramBuckets, especially if we
 		// need to change both after #6224 is fixed (NULLS LAST in index ordering).
-		tabStat.Histogram = make([]cat.HistogramBucket, len(h.Buckets)+1)
+		tabStat.Histogram = make([]cat.HistogramBucket, 1, len(h.Buckets)+1)
 		tabStat.Histogram[0] = cat.HistogramBucket{
 			NumEq:         float64(tabStat.NullCount),
 			NumRange:      0,
 			DistinctRange: 0,
 			UpperBound:    tree.DNull,
 		}
-		offset = 1
 	} else {
-		tabStat.Histogram = make([]cat.HistogramBucket, len(h.Buckets))
-		offset = 0
+		tabStat.Histogram = make([]cat.HistogramBucket, 0, len(h.Buckets))
 	}
 
 	// Decode the histogram data so that it's usable by the opt catalog.
 	var a tree.DatumAlloc
-	for i := offset; i < len(tabStat.Histogram); i++ {
-		bucket := &h.Buckets[i-offset]
+	for i := range h.Buckets {
+		bucket := &h.Buckets[i]
 		datum, err := DecodeUpperBound(h.Version, h.ColumnType, &a, bucket.UpperBound)
 		if err != nil {
+			if h.ColumnType.Family() == types.EnumFamily && errors.Is(err, types.EnumValueNotFound) {
+				// Skip over buckets for enum values that were dropped.
+				continue
+			}
 			return err
 		}
-		tabStat.Histogram[i] = cat.HistogramBucket{
+		tabStat.Histogram = append(tabStat.Histogram, cat.HistogramBucket{
 			NumEq:         float64(bucket.NumEq),
 			NumRange:      float64(bucket.NumRange),
 			DistinctRange: bucket.DistinctRange,
 			UpperBound:    datum,
-		}
+		})
 	}
 	return nil
 }
@@ -786,8 +816,12 @@ func (tsp *TableStatisticProto) IsAuto() bool {
 // It ignores any statistics that cannot be decoded (e.g. because a user-defined
 // type that doesn't exist) and returns the rest (with no error).
 func (sc *TableStatisticsCache) getTableStatsFromDB(
-	ctx context.Context, tableID descpb.ID, forecast bool, st *cluster.Settings,
-) ([]*TableStatistic, map[descpb.ColumnID]*types.T, error) {
+	ctx context.Context,
+	tableID descpb.ID,
+	forecast bool,
+	st *cluster.Settings,
+	typeResolver *descs.DistSQLTypeResolver,
+) (_ []*TableStatistic, _ map[descpb.ColumnID]*types.T, err error) {
 	getTableStatisticsStmt := `
 SELECT
 	"tableID",
@@ -816,11 +850,28 @@ ORDER BY "createdAt" DESC, "columnIDs" DESC, "statisticID" DESC
 		return nil, nil, err
 	}
 
+	// Guard against crashes in the code below.
+	defer func() {
+		if r := recover(); r != nil {
+			// In the event of a "safe" panic, we only want to log the error and
+			// continue executing the query without stats for this table. This is only
+			// possible because the code does not update shared state and does not
+			// manipulate locks.
+			if ok, e := errorutil.ShouldCatch(r); ok {
+				err = e
+			} else {
+				// Other panic objects can't be considered "safe" and thus are
+				// propagated as crashes that terminate the session.
+				panic(r)
+			}
+		}
+	}()
+
 	var statsList []*TableStatistic
 	var udts map[descpb.ColumnID]*types.T
 	var ok bool
 	for ok, err = it.Next(ctx); ok; ok, err = it.Next(ctx) {
-		stats, udt, err := sc.parseStats(ctx, it.Cur())
+		stats, udt, err := sc.parseStats(ctx, it.Cur(), typeResolver)
 		if err != nil {
 			log.Warningf(ctx, "could not decode statistic for table %d: %v", tableID, err)
 			continue
@@ -846,8 +897,6 @@ ORDER BY "createdAt" DESC, "columnIDs" DESC, "statisticID" DESC
 		return nil, nil, err
 	}
 
-	// TODO(faizaanmadhani): Wrap merging behind a boolean so
-	// that it can be turned off.
 	merged := MergedStatistics(ctx, statsList, st)
 	statsList = append(merged, statsList...)
 

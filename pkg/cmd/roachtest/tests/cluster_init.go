@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -20,8 +15,10 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
+	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/cockroach/pkg/server/authserver"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
@@ -91,11 +88,11 @@ func runClusterInit(ctx context.Context, t test.Test, c cluster.Cluster) {
 		t.L().Printf("checking that the SQL conns are not failing immediately")
 		errCh := make(chan error, len(dbs))
 		for _, db := range dbs {
-			db := db
-			go func() {
+			t.Go(func(taskCtx context.Context, _ *logger.Logger) error {
 				var val int
-				errCh <- db.QueryRow("SELECT 1").Scan(&val)
-			}()
+				errCh <- db.QueryRowContext(taskCtx, "SELECT 1").Scan(&val)
+				return nil
+			})
 		}
 
 		// Give them time to get a "connection refused" or similar error if
@@ -156,7 +153,7 @@ func runClusterInit(ctx context.Context, t test.Test, c cluster.Cluster) {
 		c.Run(ctx, option.WithNodes(c.Node(initNode)), `./cockroach init --url={pgurl:1}`)
 
 		// This will only succeed if 3 nodes joined the cluster.
-		err = WaitFor3XReplication(ctx, t, t.L(), dbs[0])
+		err = roachtestutil.WaitFor3XReplication(ctx, t.L(), dbs[0])
 		require.NoError(t, err)
 
 		execCLI := func(runNode int, extraArgs ...string) (string, error) {

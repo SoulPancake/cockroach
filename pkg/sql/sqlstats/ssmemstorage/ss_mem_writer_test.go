@@ -1,12 +1,7 @@
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ssmemstorage
 
@@ -38,7 +33,7 @@ func TestRecordStatement(t *testing.T) {
 		sqlstats.TxnStatsEnable.Override(ctx, &settings.SV, false)
 		// Initialize knobs & mem container.
 		numStmtInsights := 0
-		knobs := &sqlstats.TestingKnobs{
+		knobs := &insights.TestingKnobs{
 			InsightsWriterStmtInterceptor: func(sessionID clusterunique.ID, statement *insights.Statement) {
 				numStmtInsights++
 			},
@@ -47,14 +42,14 @@ func TestRecordStatement(t *testing.T) {
 			nil, /* uniqueServerCount */
 			testMonitor(ctx, "test-mon", settings),
 			"test-app",
-			knobs,
-			insights.New(settings, insights.NewMetrics()).LatencyInformation(),
+			nil,
+			insights.New(settings, insights.NewMetrics(), knobs).Anomalies(),
 		)
 		// Record a statement, ensure no insights are generated.
 		statsKey := appstatspb.StatementStatisticsKey{
 			Query: "SELECT _",
 		}
-		_, err := memContainer.RecordStatement(ctx, statsKey, sqlstats.RecordedStmtStats{})
+		err := memContainer.RecordStatement(ctx, statsKey, sqlstats.RecordedStmtStats{})
 		require.NoError(t, err)
 		require.Zero(t, numStmtInsights)
 	})
@@ -72,8 +67,8 @@ func TestRecordTransaction(t *testing.T) {
 		sqlstats.TxnStatsEnable.Override(ctx, &settings.SV, false)
 		// Initialize knobs & mem container.
 		numTxnInsights := 0
-		knobs := &sqlstats.TestingKnobs{
-			InsightsWriterTxnInterceptor: func(ctx context.Context, sessionID clusterunique.ID, transaction *insights.Transaction) {
+		knobs := &insights.TestingKnobs{
+			InsightsWriterTxnInterceptor: func(sessionID clusterunique.ID, transaction *insights.Transaction) {
 				numTxnInsights++
 			},
 		}
@@ -81,8 +76,8 @@ func TestRecordTransaction(t *testing.T) {
 			nil, /* uniqueServerCount */
 			testMonitor(ctx, "test-mon", settings),
 			"test-app",
-			knobs,
-			insights.New(settings, insights.NewMetrics()).LatencyInformation(),
+			nil,
+			insights.New(settings, insights.NewMetrics(), knobs).Anomalies(),
 		)
 		// Record a transaction, ensure no insights are generated.
 		require.NoError(t, memContainer.RecordTransaction(ctx, appstatspb.TransactionFingerprintID(123), sqlstats.RecordedTxnStats{}))
@@ -90,9 +85,11 @@ func TestRecordTransaction(t *testing.T) {
 	})
 }
 
-func testMonitor(ctx context.Context, name string, settings *cluster.Settings) *mon.BytesMonitor {
+func testMonitor(
+	ctx context.Context, name redact.SafeString, settings *cluster.Settings,
+) *mon.BytesMonitor {
 	return mon.NewUnlimitedMonitor(ctx, mon.Options{
-		Name:     redact.RedactableString(name),
+		Name:     mon.MakeMonitorName(name),
 		Settings: settings,
 	})
 }

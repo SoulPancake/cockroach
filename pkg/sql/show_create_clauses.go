@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -30,7 +25,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/plpgsqltree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/plpgsqltree/utils"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/semenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -272,7 +266,7 @@ func formatQuerySequencesForDisplay(
 		}
 		stmts = plstmt.AST
 
-		v := utils.SQLStmtVisitor{Fn: replaceFunc}
+		v := plpgsqltree.SQLStmtVisitor{Fn: replaceFunc}
 		newStmt := plpgsqltree.Walk(&v, stmts)
 		fmtCtx.FormatNode(newStmt)
 	}
@@ -453,12 +447,12 @@ func formatFunctionQueryTypesForDisplay(
 		}
 		stmts = plstmt.AST
 
-		v := utils.SQLStmtVisitor{Fn: replaceFunc}
+		v := plpgsqltree.SQLStmtVisitor{Fn: replaceFunc}
 		newStmt := plpgsqltree.Walk(&v, stmts)
 		// Some PLpgSQL statements (i.e., declarations), may contain type
 		// annotations containing the UDT. We need to walk the AST to replace them,
 		// too.
-		v2 := utils.TypeRefVisitor{Fn: replaceTypeFunc}
+		v2 := plpgsqltree.TypeRefVisitor{Fn: replaceTypeFunc}
 		newStmt = plpgsqltree.Walk(&v2, newStmt)
 		fmtCtx.FormatNode(newStmt)
 	}
@@ -624,6 +618,9 @@ func ShowCreateSequence(
 	}
 	if opts.CacheSize > 1 {
 		f.Printf(" CACHE %d", opts.CacheSize)
+	}
+	if opts.CacheSize == 1 && opts.NodeCacheSize > 0 {
+		f.Printf(" PER NODE CACHE %d", opts.NodeCacheSize)
 	}
 	return f.CloseAndGetString(), nil
 }

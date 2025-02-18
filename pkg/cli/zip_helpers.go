@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -271,6 +266,27 @@ func (fs *fileSelection) retrievalPatterns() []string {
 // isIncluded determine whether the given file name is included in the selection.
 func (fs *fileSelection) isIncluded(filename string, ctime, mtime time.Time) bool {
 	// To be included, a file must be included in at least one of the retrieval patterns.
+	included := fs.shouldIncludeFile(filename)
+	if !included {
+		return false
+	}
+	// Then its mtime must not be before the selected "from" time.
+	if mtime.Before(time.Time(fs.startTimestamp)) {
+		return false
+	}
+	// And the selected "until" time must not be before the ctime.
+	// Note: the inverted call is because `Before` uses strict
+	// inequality.
+	if (*time.Time)(&fs.endTimestamp).Before(ctime) {
+		return false
+	}
+	return true
+}
+
+// shouldIncludeFile determine whether the given file name is included in the selection based on
+// include & exclude patterns.
+func (fs *fileSelection) shouldIncludeFile(filename string) bool {
+	// To be included, a file must be included in at least one of the retrieval patterns.
 	included := false
 	for _, p := range fs.retrievalPatterns() {
 		if matched, _ := filepath.Match(p, filename); matched {
@@ -288,20 +304,7 @@ func (fs *fileSelection) isIncluded(filename string, ctime, mtime time.Time) boo
 			break
 		}
 	}
-	if !included {
-		return false
-	}
-	// Then its mtime must not be before the selected "from" time.
-	if mtime.Before(time.Time(fs.startTimestamp)) {
-		return false
-	}
-	// And the selected "until" time must not be before the ctime.
-	// Note: the inverted call is because `Before` uses strict
-	// inequality.
-	if (*time.Time)(&fs.endTimestamp).Before(ctime) {
-		return false
-	}
-	return true
+	return included
 }
 
 // to prevent interleaved output.

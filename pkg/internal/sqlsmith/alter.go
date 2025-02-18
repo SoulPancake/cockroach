@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlsmith
 
@@ -18,6 +13,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/cast"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/idxtype"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree/treebin"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -118,7 +114,7 @@ func makeCreateSchema(s *Smither) (tree.Statement, bool) {
 }
 
 func makeCreateTable(s *Smither) (tree.Statement, bool) {
-	table := randgen.RandCreateTable(context.Background(), s.rnd, "", 0, false /* isMultiRegion */)
+	table := randgen.RandCreateTable(context.Background(), s.rnd, "", 0, randgen.TableOptNone)
 	schemaOrd := s.rnd.Intn(len(s.schemas))
 	schema := s.schemas[schemaOrd]
 	table.Table = tree.MakeTableNameWithSchema(tree.Name(s.dbName), schema.SchemaName, s.name("tab"))
@@ -345,7 +341,7 @@ func makeCreateIndex(s *Smither) (tree.Statement, bool) {
 	}
 	var cols tree.IndexElemList
 	seen := map[tree.Name]bool{}
-	inverted := false
+	indexType := idxtype.FORWARD
 	unique := s.coin()
 	for len(cols) < 1 || s.coin() {
 		col := tableRef.Columns[s.rnd.Intn(len(tableRef.Columns))]
@@ -356,7 +352,7 @@ func makeCreateIndex(s *Smither) (tree.Statement, bool) {
 		// If this is the first column and it's invertible (i.e., JSONB), make an inverted index.
 		if len(cols) == 0 &&
 			colinfo.ColumnTypeIsOnlyInvertedIndexable(tree.MustBeStaticallyKnownType(col.Type)) {
-			inverted = true
+			indexType = idxtype.INVERTED
 			unique = false
 			cols = append(cols, tree.IndexElem{
 				Column: col.Name,
@@ -371,7 +367,7 @@ func makeCreateIndex(s *Smither) (tree.Statement, bool) {
 		}
 	}
 	var storing tree.NameList
-	for !inverted && s.coin() {
+	for indexType.SupportsStoring() && s.coin() {
 		col := tableRef.Columns[s.rnd.Intn(len(tableRef.Columns))]
 		if seen[col.Name] {
 			continue
@@ -395,7 +391,7 @@ func makeCreateIndex(s *Smither) (tree.Statement, bool) {
 		Unique:       unique,
 		Columns:      cols,
 		Storing:      storing,
-		Inverted:     inverted,
+		Type:         indexType,
 		Concurrently: s.coin(),
 		Invisibility: invisibility,
 	}, true
@@ -420,7 +416,12 @@ func makeRenameIndex(s *Smither) (tree.Statement, bool) {
 
 func makeCreateType(s *Smither) (tree.Statement, bool) {
 	name := s.name("typ")
-	return randgen.RandCreateType(s.rnd, string(name), letters), true
+
+	if s.coin() {
+		return randgen.RandCreateEnumType(s.rnd, string(name), letters), true
+	}
+
+	return randgen.RandCreateCompositeType(s.rnd, string(name), letters), true
 }
 
 func makeDropType(s *Smither) (tree.Statement, bool) {

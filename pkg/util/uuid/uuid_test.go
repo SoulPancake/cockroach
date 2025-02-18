@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Copyright (C) 2013-2018 by Maxim Bublis <b@codemonkey.ru>
 // Use of this source code is governed by a MIT-style
@@ -33,6 +28,7 @@ func TestUUID(t *testing.T) {
 	t.Run("Variant", testUUIDVariant)
 	t.Run("SetVersion", testUUIDSetVersion)
 	t.Run("SetVariant", testUUIDSetVariant)
+	t.Run("Short", testUUIDShort)
 }
 
 func testUUIDBytes(t *testing.T) {
@@ -48,6 +44,14 @@ func testUUIDString(t *testing.T) {
 	want := "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
 	if got != want {
 		t.Errorf("%v.String() = %q, want %q", NamespaceDNS, got, want)
+	}
+}
+
+func testUUIDShort(t *testing.T) {
+	got := NamespaceDNS.Short().String()
+	want := "6ba7b810"
+	if got != want {
+		t.Errorf("%v.Short() = %q, want %q", NamespaceDNS, got, want)
 	}
 }
 

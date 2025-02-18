@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord_test
 
@@ -16,7 +11,6 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -42,7 +36,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
@@ -488,14 +484,14 @@ func TestTxnCoordSenderCommitCanceled(t *testing.T) {
 	// blockCommits is used to block commit responses for a given txn. The key is
 	// a txn ID, and the value is a ready channel (chan struct) that will be
 	// closed when the commit has been received and blocked.
-	var blockCommits sync.Map
+	var blockCommits syncutil.Map[uuid.UUID, chan struct{}]
 	responseFilter := func(_ context.Context, ba *kvpb.BatchRequest, _ *kvpb.BatchResponse) *kvpb.Error {
 		if arg, ok := ba.GetArg(kvpb.EndTxn); ok && ba.Txn != nil {
 			et := arg.(*kvpb.EndTxnRequest)
 			readyC, ok := blockCommits.Load(ba.Txn.ID)
 			if ok && et.Commit && len(et.InFlightWrites) == 0 {
-				close(readyC.(chan struct{})) // notify test that commit is received and blocked
-				<-ctx.Done()                  // wait for test to complete (NB: not the passed context)
+				close(*readyC) // notify test that commit is received and blocked
+				<-ctx.Done()   // wait for test to complete (NB: not the passed context)
 			}
 		}
 		return nil
@@ -526,7 +522,7 @@ func TestTxnCoordSenderCommitCanceled(t *testing.T) {
 	// Commit the transaction, but ask the response filter to block the final
 	// async commit sent by txnCommitter to make the implicit commit explicit.
 	readyC := make(chan struct{})
-	blockCommits.Store(txn.ID(), readyC)
+	blockCommits.Store(txn.ID(), &readyC)
 	require.NoError(t, txn.Commit(ctx))
 	<-readyC
 

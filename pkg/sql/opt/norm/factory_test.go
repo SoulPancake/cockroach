@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package norm_test
 
@@ -24,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
 
@@ -84,6 +80,7 @@ func TestCopyAndReplace(t *testing.T) {
 	}
 
 	evalCtx := eval.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
+	evalCtx.SessionData().PlanCacheMode = sessiondatapb.PlanCacheModeAuto
 
 	var o xform.Optimizer
 	testutils.BuildQuery(t, &o, cat, &evalCtx, "SELECT * FROM ab WHERE a = $1")
@@ -105,7 +102,7 @@ func TestCopyAndReplace(t *testing.T) {
 		}
 		return o.Factory().CopyAndReplaceDefault(e, replaceFn)
 	}
-	o.Factory().CopyAndReplace(m.RootExpr().(memo.RelExpr), m.RootProps(), replaceFn)
+	o.Factory().CopyAndReplace(m, m.RootExpr().(memo.RelExpr), m.RootProps(), replaceFn)
 
 	if e, err := o.Optimize(); err != nil {
 		t.Fatal(err)
@@ -150,7 +147,7 @@ func TestCopyAndReplaceWithScan(t *testing.T) {
 			replaceFn = func(e opt.Expr) opt.Expr {
 				return o.Factory().CopyAndReplaceDefault(e, replaceFn)
 			}
-			o.Factory().CopyAndReplace(m.RootExpr().(memo.RelExpr), m.RootProps(), replaceFn)
+			o.Factory().CopyAndReplace(m, m.RootExpr().(memo.RelExpr), m.RootProps(), replaceFn)
 
 			if _, err := o.Optimize(); err != nil {
 				t.Fatal(err)

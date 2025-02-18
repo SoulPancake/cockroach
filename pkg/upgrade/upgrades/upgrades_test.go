@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package upgrades
 
@@ -47,13 +42,13 @@ func TestFirstUpgradesAfterPreExistingRelease(t *testing.T) {
 	// Compute the set of pre-existing releases supported by this binary.
 	// This excludes the latest release if the binary version is a release.
 	preExistingReleases := make(map[roachpb.Version]struct{})
-	minBinaryVersion := clusterversion.MinSupported.Version()
-	binaryVersion := clusterversion.Latest.Version()
-	for _, v := range clusterversion.ListBetween(minBinaryVersion, binaryVersion) {
+	minSupportedVersion := clusterversion.MinSupported.Version()
+	latestVersion := clusterversion.Latest.Version()
+	for _, v := range clusterversion.ListBetween(minSupportedVersion, latestVersion) {
 		preExistingReleases[roachpb.Version{Major: v.Major, Minor: v.Minor}] = struct{}{}
 	}
-	if binaryVersion.Internal == 0 {
-		delete(preExistingReleases, binaryVersion)
+	if latestVersion.Internal == 0 {
+		delete(preExistingReleases, latestVersion)
 	}
 
 	require.NotEmpty(t, preExistingReleases)
@@ -70,7 +65,7 @@ func TestFirstUpgradesAfterPreExistingRelease(t *testing.T) {
 	// internal version 2 is two internal versions ahead of a supported pre-existing
 	// release.
 	for v := range registry {
-		if v.Major == 0 || v.Internal != 2 {
+		if v.Major == 0 || v.Internal != 2 || v.Less(minSupportedVersion) {
 			continue
 		}
 		r := roachpb.Version{Major: v.Major, Minor: v.Minor}

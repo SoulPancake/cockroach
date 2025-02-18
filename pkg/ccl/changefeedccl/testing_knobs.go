@@ -1,10 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -87,6 +84,10 @@ type TestingKnobs struct {
 	// its PTS record from the deprecated style to the new style.
 	PreserveDeprecatedPts func() bool
 
+	// PreservePTSTargets is used to prevent a changefeed from upgrading
+	// its PTS record to include all required targets.
+	PreservePTSTargets func() bool
+
 	// PulsarClientSkipCreation skips creating the sink client when
 	// dialing.
 	PulsarClientSkipCreation bool
@@ -96,6 +97,12 @@ type TestingKnobs struct {
 
 	// OverrideExecCfg returns a modified ExecutorConfig to use under tests.
 	OverrideExecCfg func(actual *sql.ExecutorConfig) *sql.ExecutorConfig
+
+	// AsyncFlushSync is called in async flush goroutines as a way to provide synchronization between them.
+	AsyncFlushSync func()
+
+	// WrapTelemetryLogger is used to wrap the periodic telemetry logger in tests.
+	WrapTelemetryLogger func(logger telemetryLogger) telemetryLogger
 }
 
 // ModuleTestingKnobs is part of the base.ModuleTestingKnobs interface.

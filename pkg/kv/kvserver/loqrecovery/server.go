@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package loqrecovery
 
@@ -755,7 +750,7 @@ func visitNodeWithRetry(
 		// Note that we use ConnectNoBreaker here to avoid any race with probe
 		// running on current node and target node restarting. Errors from circuit
 		// breaker probes could confuse us and present node as unavailable.
-		conn, err = rpcCtx.GRPCDialNode(addr.String(), node.NodeID, rpc.DefaultClass).ConnectNoBreaker(ctx)
+		conn, _, err = rpcCtx.GRPCDialNode(addr.String(), node.NodeID, node.Locality, rpc.DefaultClass).ConnectNoBreaker(ctx)
 		// Nodes would contain dead nodes that we don't need to visit. We can skip
 		// them and let caller handle incomplete info.
 		if err != nil {
@@ -808,7 +803,7 @@ func makeVisitNode(g *gossip.Gossip, loc roachpb.Locality, rpcCtx *rpc.Context) 
 			// Note that we use ConnectNoBreaker here to avoid any race with probe
 			// running on current node and target node restarting. Errors from circuit
 			// breaker probes could confuse us and present node as unavailable.
-			conn, err = rpcCtx.GRPCDialNode(addr.String(), node.NodeID, rpc.DefaultClass).ConnectNoBreaker(ctx)
+			conn, _, err = rpcCtx.GRPCDialNode(addr.String(), node.NodeID, node.Locality, rpc.DefaultClass).ConnectNoBreaker(ctx)
 			if err != nil {
 				if grpcutil.IsClosedConnection(err) {
 					log.Infof(ctx, "can't dial node n%d because connection is permanently closed: %s",

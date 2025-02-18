@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Note that this file is not in pkg/sql/colexec because it instantiates a
 // server, and if it were moved into sql/colexec, that would create a cycle
@@ -62,6 +57,8 @@ func TestColBatchScanMeta(t *testing.T) {
 	defer evalCtx.Stop(ctx)
 	var monitorRegistry colexecargs.MonitorRegistry
 	defer monitorRegistry.Close(ctx)
+	var closerRegistry colexecargs.CloserRegistry
+	defer closerRegistry.Close(ctx)
 
 	rootTxn := kv.NewTxn(ctx, s.DB(), s.DistSQLPlanningNodeID())
 	leafInputState, err := rootTxn.GetLeafTxnInputState(ctx)
@@ -98,15 +95,14 @@ func TestColBatchScanMeta(t *testing.T) {
 	}
 
 	args := &colexecargs.NewColOperatorArgs{
-		Spec:                &spec,
-		StreamingMemAccount: testMemAcc,
-		MonitorRegistry:     &monitorRegistry,
+		Spec:            &spec,
+		MonitorRegistry: &monitorRegistry,
+		CloserRegistry:  &closerRegistry,
 	}
 	res, err := colbuilder.NewColOperator(ctx, &flowCtx, args)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.TestCleanupNoError(t)
 	tr := res.Root
 	tr.Init(ctx)
 	meta := res.MetadataSources[0].DrainMeta()
@@ -163,7 +159,11 @@ func BenchmarkColBatchScan(b *testing.B) {
 			evalCtx := eval.MakeTestingEvalContext(s.ClusterSettings())
 			defer evalCtx.Stop(ctx)
 			var monitorRegistry colexecargs.MonitorRegistry
-			defer monitorRegistry.Close(ctx)
+			var closerRegistry colexecargs.CloserRegistry
+			afterEachRun := func() {
+				closerRegistry.BenchmarkReset(ctx)
+				monitorRegistry.BenchmarkReset(ctx)
+			}
 
 			flowCtx := execinfra.FlowCtx{
 				EvalCtx: &evalCtx,
@@ -181,9 +181,9 @@ func BenchmarkColBatchScan(b *testing.B) {
 				// modifies it.
 				spec.Core.TableReader.Spans = []roachpb.Span{span}
 				args := &colexecargs.NewColOperatorArgs{
-					Spec:                &spec,
-					StreamingMemAccount: testMemAcc,
-					MonitorRegistry:     &monitorRegistry,
+					Spec:            &spec,
+					MonitorRegistry: &monitorRegistry,
+					CloserRegistry:  &closerRegistry,
 				}
 				res, err := colbuilder.NewColOperator(ctx, &flowCtx, args)
 				if err != nil {
@@ -199,7 +199,7 @@ func BenchmarkColBatchScan(b *testing.B) {
 					}
 				}
 				b.StopTimer()
-				res.TestCleanupNoError(b)
+				afterEachRun()
 			}
 		})
 	}

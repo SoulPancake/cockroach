@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cloud
 
@@ -81,8 +76,10 @@ var httpMetrics = settings.RegisterBoolSetting(
 
 // MakeHTTPClient makes an http client configured with the common settings used
 // for interacting with cloud storage (timeouts, retries, CA certs, etc).
-func MakeHTTPClient(settings *cluster.Settings) (*http.Client, error) {
-	t, err := MakeTransport(settings)
+func MakeHTTPClient(
+	settings *cluster.Settings, metrics *Metrics, cloud, bucket, client string,
+) (*http.Client, error) {
+	t, err := MakeTransport(settings, metrics, cloud, bucket, client)
 	if err != nil {
 		return nil, err
 	}
@@ -98,10 +95,12 @@ func MakeHTTPClientForTransport(t http.RoundTripper) (*http.Client, error) {
 	return &http.Client{Transport: t}, nil
 }
 
-// MakeHTTPClient makes an http transport configured with the common
-// settings used for interacting with cloud storage (timeouts,
-// retries, CA certs, etc). Prefer MakeHTTPClient where possible.
-func MakeTransport(settings *cluster.Settings) (*http.Transport, error) {
+// MakeTransport makes an http transport configured with the common settings
+// used for interacting with cloud storage (timeouts, retries, CA certs, etc).
+// Prefer MakeHTTPClient where possible.
+func MakeTransport(
+	settings *cluster.Settings, metrics *Metrics, cloud, bucket, client string,
+) (*http.Transport, error) {
 	var tlsConf *tls.Config
 	if pem := httpCustomCA.Get(&settings.SV); pem != "" {
 		roots, err := x509.SystemCertPool()
@@ -121,6 +120,9 @@ func MakeTransport(settings *cluster.Settings) (*http.Transport, error) {
 	// Bump up the default idle conn pool size as we have many parallel workers in
 	// most bulk jobs.
 	t.MaxIdleConnsPerHost = 64
+	if metrics != nil {
+		t.DialContext = metrics.NetMetrics.Wrap(t.DialContext, cloud, bucket, client)
+	}
 	return t, nil
 }
 

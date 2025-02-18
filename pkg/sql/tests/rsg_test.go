@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests_test
 
@@ -19,6 +14,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins/builtinsregistry"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
@@ -232,8 +229,9 @@ func (db *verifyFormatDB) execWithResettableTimeout(
 						strings.Contains(es, "driver: bad connection") ||
 						strings.Contains(es, "unexpected error inside CockroachDB") {
 						return &crasher{
-							sql: sql,
-							err: err,
+							sql:    sql,
+							err:    err,
+							detail: pgerror.FullError(err),
 						}
 					}
 					return &nonCrasher{sql: sql, err: err}
@@ -511,16 +509,30 @@ func TestRandomSyntaxSchemaChangeDatabase(t *testing.T) {
 		"drop_user_stmt",
 		"alter_user_stmt",
 	}
-
+	// Create multiple databases, so that in concurrent scenarios two connections
+	// will always share the same database.
+	numDatabases := max(*flagRSGGoRoutines/2, 1)
+	databases := make([]string, 0, numDatabases)
+	for dbIdx := 0; dbIdx < numDatabases; dbIdx++ {
+		databases = append(databases, fmt.Sprintf("ident_%d", dbIdx))
+	}
+	var nextDatabaseName atomic.Int64
 	testRandomSyntax(t, true, "ident", func(ctx context.Context, db *verifyFormatDB, r *rsg.RSG) error {
 		if err := db.exec(t, ctx, "SET CLUSTER SETTING sql.catalog.descriptor_lease_duration = '30s'"); err != nil {
 			return err
 		}
-		return db.exec(t, ctx, `CREATE DATABASE ident;`)
+		for _, dbName := range databases {
+			if err := db.exec(t, ctx, fmt.Sprintf(`CREATE DATABASE %s;`, dbName)); err != nil {
+				return err
+			}
+		}
+		return nil
 	}, func(ctx context.Context, db *verifyFormatDB, r *rsg.RSG) error {
 		n := r.Intn(len(roots))
 		s := r.Generate(roots[n], 30)
-		return db.exec(t, ctx, s)
+		// Select a database and use it in the generated statement.
+		dbName := databases[nextDatabaseName.Add(1)%int64(len(databases))]
+		return db.exec(t, ctx, strings.Replace(s, "ident", dbName, -1))
 	})
 }
 
@@ -949,7 +961,7 @@ func testRandomSyntax(
 					// NOTE: Changes to this output format must be kept in-sync
 					// with logic in CondensedMessage.RSGCrash in order for
 					// crashes to be correctly reported to Github.
-					t.Errorf("Crash detected: %s\n%s;\n\nStack trace:\n%s", c.Error(), c.sql, c.detail)
+					t.Errorf("Crash detected: %s\n%s;\n\nMore details:\n%s", c.Error(), c.sql, c.detail)
 				}
 			}
 			countsMu.Unlock()

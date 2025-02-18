@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -23,7 +18,6 @@ import (
 	"time"
 
 	apd "github.com/cockroachdb/apd/v3"
-	"github.com/cockroachdb/cockroach/pkg/ccl/crosscluster/replicationutils"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/clusterstats"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
@@ -31,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
+	"github.com/cockroachdb/cockroach/pkg/crosscluster/replicationutils"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -98,9 +93,6 @@ var c2cPromMetrics = map[string]clusterstats.ClusterStat{
 	"LogicalMegabytes": {
 		LabelName: "node",
 		Query:     "physical_replication_logical_bytes / 1e6"},
-	"PhysicalMegabytes": {
-		LabelName: "node",
-		Query:     "physical_replication_sst_bytes / 1e6"},
 	"PhysicalReplicatedMegabytes": {
 		LabelName: "node",
 		Query:     "capacity_used / 1e6"},
@@ -221,18 +213,31 @@ func defaultWorkloadDriver(
 }
 
 type replicateTPCC struct {
-	warehouses int
+	warehouses     int
+	duration       time.Duration
+	repairOrderIDs bool
+	tolerateErrors bool
+	readOnly       bool
 }
 
 func (tpcc replicateTPCC) sourceInitCmd(tenantName string, nodes option.NodeListOption) string {
-	return fmt.Sprintf(`./workload init tpcc --data-loader import --warehouses %d {pgurl%s:%s}`,
-		tpcc.warehouses, nodes, tenantName)
+	cmd := roachtestutil.NewCommand(`./cockroach workload init tpcc`).
+		Flag("data-loader", "import").
+		Flag("warehouses", tpcc.warehouses).
+		Arg("{pgurl%s:%s}", nodes, tenantName)
+	return cmd.String()
 }
 
 func (tpcc replicateTPCC) sourceRunCmd(tenantName string, nodes option.NodeListOption) string {
-	// added --tolerate-errors flags to prevent test from flaking due to a transaction retry error
-	return fmt.Sprintf(`./workload run tpcc --warehouses %d --tolerate-errors {pgurl%s:%s}`,
-		tpcc.warehouses, nodes, tenantName)
+	cmd := roachtestutil.NewCommand(`./cockroach workload run tpcc`).
+		Flag("warehouses", tpcc.warehouses).
+		MaybeFlag(tpcc.duration > 0, "duration", tpcc.duration).
+		MaybeOption(tpcc.tolerateErrors, "tolerate-errors").
+		MaybeOption(tpcc.repairOrderIDs, "repair-order-ids").
+		MaybeFlag(tpcc.readOnly, "mix", "newOrder=0,payment=0,orderStatus=1,delivery=0,stockLevel=1").
+		Arg("{pgurl%s:%s}", nodes, tenantName).
+		WithEqualsSyntax()
+	return cmd.String()
 }
 
 func (tpcc replicateTPCC) runDriver(
@@ -267,6 +272,8 @@ func (ikv replicateImportKV) runDriver(
 
 type replicateKV struct {
 	readPercent int
+
+	tolerateErrors bool
 
 	// This field is merely used to debug the c2c framework for finite workloads.
 	debugRunDuration time.Duration
@@ -306,28 +313,36 @@ type replicateKV struct {
 	// antiRegion is the region we do not expect any kv data to reside in if
 	// partitionKVDatabaseInRegion is set.
 	antiRegion string
+
+	// readOnly sets the prepare-read-only flag in the kv workload, which elides
+	// preparing writing statements. This is necessary to get the workload running
+	// properly on a read only standby tenant.
+	readOnly bool
 }
 
 func (kv replicateKV) sourceInitCmd(tenantName string, nodes option.NodeListOption) string {
-	cmd := roachtestutil.NewCommand(`./workload init kv`).
+	cmd := roachtestutil.NewCommand(`./cockroach workload init kv`).
 		MaybeFlag(kv.initRows > 0, "insert-count", kv.initRows).
 		// Only set the max block byte values for the init command if we
 		// actually need to insert rows.
 		MaybeFlag(kv.initRows > 0, "max-block-bytes", kv.maxBlockBytes).
 		MaybeFlag(kv.initWithSplitAndScatter, "splits", 100).
 		MaybeOption(kv.initWithSplitAndScatter, "scatter").
-		Arg("{pgurl%s:%s}", nodes, tenantName)
+		Arg("{pgurl%s:%s}", nodes, tenantName).
+		WithEqualsSyntax()
 	return cmd.String()
 }
 
 func (kv replicateKV) sourceRunCmd(tenantName string, nodes option.NodeListOption) string {
-	cmd := roachtestutil.NewCommand(`./workload run kv`).
-		Option("tolerate-errors").
-		Flag("max-block-bytes", kv.maxBlockBytes).
+	cmd := roachtestutil.NewCommand(`./cockroach workload run kv`).
+		MaybeOption(kv.tolerateErrors, "tolerate-errors").
+		MaybeFlag(kv.maxBlockBytes > 0, "max-block-bytes", kv.maxBlockBytes).
 		Flag("read-percent", kv.readPercent).
 		MaybeFlag(kv.debugRunDuration > 0, "duration", kv.debugRunDuration).
 		MaybeFlag(kv.maxQPS > 0, "max-rate", kv.maxQPS).
-		Arg("{pgurl%s:%s}", nodes, tenantName)
+		MaybeFlag(kv.readOnly, "prepare-read-only", true).
+		Arg("{pgurl%s:%s}", nodes, tenantName).
+		WithEqualsSyntax()
 	return cmd.String()
 }
 
@@ -430,6 +445,9 @@ type replicationSpec struct {
 	// multiregion specifies multiregion cluster specs
 	multiregion multiRegionSpecs
 
+	// withReaderOnlyWorkload creates a reader tenant that runs the given workload.
+	withReaderWorkload streamingWorkload
+
 	// overrideTenantTTL specifies the TTL that will be applied by the system tenant on
 	// both the source and destination tenant range.
 	overrideTenantTTL time.Duration
@@ -485,7 +503,7 @@ type replicationDriver struct {
 	rs replicationSpec
 
 	// beforeWorkloadHook is called before the main workload begins.
-	beforeWorkloadHook func()
+	beforeWorkloadHook func(ctx context.Context) error
 
 	// cutoverStarted closes once the driver issues a cutover commmand.
 	cutoverStarted chan struct{}
@@ -525,12 +543,10 @@ func (rd *replicationDriver) setupC2C(
 
 	srcCluster := c.Range(1, rd.rs.srcNodes)
 	dstCluster := c.Range(rd.rs.srcNodes+1, rd.rs.srcNodes+rd.rs.dstNodes)
-	workloadNode := c.Node(rd.rs.srcNodes + rd.rs.dstNodes + 1)
-	c.Put(ctx, t.DeprecatedWorkload(), "./workload", workloadNode)
+	workloadNode := c.WorkloadNode()
 
 	// TODO(msbutler): allow for backups once this test stabilizes a bit more.
-	srcStartOps := option.NewStartOpts(option.NoBackupSchedule)
-	srcStartOps.RoachprodOpts.InitTarget = 1
+	srcStartOps := option.NewStartOpts(option.NoBackupSchedule, option.WithInitTarget(1))
 
 	roachtestutil.SetDefaultAdminUIPort(c, &srcStartOps.RoachprodOpts)
 	srcClusterSetting := install.MakeClusterSettings()
@@ -562,14 +578,12 @@ func (rd *replicationDriver) setupC2C(
 
 	overrideSrcAndDestTenantTTL(t, srcSQL, destSQL, rd.rs.overrideTenantTTL)
 
-	deprecatedCreateTenantAdminRole(t, "src-system", srcSQL)
-	deprecatedCreateTenantAdminRole(t, "dst-system", destSQL)
-
 	srcTenantID, destTenantID := 3, 3
 	srcTenantName := "src-tenant"
 	destTenantName := "destination-tenant"
 
-	deprecatedCreateInMemoryTenant(ctx, t, c, srcTenantName, srcCluster, true)
+	startOpts := option.StartSharedVirtualClusterOpts(srcTenantName, option.StorageCluster(srcCluster), option.NoBackupSchedule)
+	c.StartServiceForVirtualCluster(ctx, t.L(), startOpts, srcClusterSetting)
 
 	pgURL, err := copyPGCertsAndMakeURL(ctx, t, c, srcNode, srcClusterSetting.PGUrlCertsDir, addr[0])
 	require.NoError(t, err)
@@ -600,7 +614,7 @@ func (rd *replicationDriver) setupC2C(
 	rd.c = c
 	rd.metrics = &c2cMetrics{}
 	rd.replicationStartHook = func(ctx context.Context, sp *replicationDriver) {}
-	rd.beforeWorkloadHook = func() {}
+	rd.beforeWorkloadHook = func(_ context.Context) error { return nil }
 	rd.cutoverStarted = make(chan struct{})
 
 	if !c.IsLocal() {
@@ -697,13 +711,18 @@ func (rd *replicationDriver) preStreamingWorkload(ctx context.Context) {
 func (rd *replicationDriver) startReplicationStream(ctx context.Context) int {
 	streamReplStmt := fmt.Sprintf("CREATE TENANT %q FROM REPLICATION OF %q ON '%s'",
 		rd.setup.dst.name, rd.setup.src.name, rd.setup.src.pgURL.String())
+	if rd.rs.withReaderWorkload != nil {
+		streamReplStmt += " WITH READ VIRTUAL CLUSTER"
+	}
 	rd.setup.dst.sysSQL.Exec(rd.t, streamReplStmt)
 	rd.replicationStartHook(ctx, rd)
 	return getIngestionJobID(rd.t, rd.setup.dst.sysSQL, rd.setup.dst.name)
 }
 
 func (rd *replicationDriver) runWorkload(ctx context.Context) error {
-	rd.beforeWorkloadHook()
+	if err := rd.beforeWorkloadHook(ctx); err != nil {
+		return err
+	}
 	return rd.rs.workload.runDriver(ctx, rd.c, rd.t, rd.setup)
 }
 
@@ -759,14 +778,14 @@ func (rd *replicationDriver) stopReplicationStream(
 			return res.Err()
 		}
 		require.NoError(rd.t, res.Scan(&status, &payloadBytes))
-		if jobs.Status(status) == jobs.StatusFailed {
+		if jobs.State(status) == jobs.StateFailed {
 			payload := &jobspb.Payload{}
 			if err := protoutil.Unmarshal(payloadBytes, payload); err == nil {
 				rd.t.Fatalf("job failed: %s", payload.Error)
 			}
 			rd.t.Fatalf("job failed")
 		}
-		if e, a := jobs.StatusSucceeded, jobs.Status(status); e != a {
+		if e, a := jobs.StateSucceeded, jobs.State(status); e != a {
 			return errors.Errorf("expected job status %s, but got %s", e, a)
 		}
 		return nil
@@ -854,7 +873,7 @@ func (rd *replicationDriver) backupAfterFingerprintMismatch(
 		rd.t.L().Printf("skip taking backups of tenants on azure, bucket not configured yet")
 		return nil
 	}
-	cloudPrefixes := map[string]string{
+	cloudPrefixes := map[spec.Cloud]string{
 		spec.GCE:   "gs",
 		spec.AWS:   "s3",
 		spec.Azure: "azure",
@@ -877,6 +896,26 @@ func (rd *replicationDriver) backupAfterFingerprintMismatch(
 		return errors.Wrapf(err, "inc backup for %s failed", tenantName)
 	}
 	return nil
+}
+
+func (rd *replicationDriver) maybeRunReaderTenantWorkload(
+	ctx context.Context, workloadMonitor cluster.Monitor,
+) {
+	if rd.rs.withReaderWorkload != nil {
+		rd.t.Status("running reader tenant workload")
+		readerTenantName := fmt.Sprintf("%s-readonly", rd.setup.dst.name)
+		workloadMonitor.Go(func(ctx context.Context) error {
+			err := rd.c.RunE(ctx, option.WithNodes(rd.setup.workloadNode), rd.rs.withReaderWorkload.sourceRunCmd(readerTenantName, rd.setup.dst.gatewayNodes))
+			// The workload should only return an error if the roachtest driver cancels the
+			// ctx after the rd.additionalDuration has elapsed after the initial scan completes.
+			if err != nil && ctx.Err() == nil {
+				// Implies the workload context was not cancelled and the workload cmd returned a
+				// different error.
+				return errors.Wrapf(err, `Workload context was not cancelled. Error returned by workload cmd`)
+			}
+			return nil
+		})
+	}
 }
 
 // checkParticipatingNodes asserts that multiple nodes in the source and dest cluster are
@@ -920,7 +959,7 @@ func (rd *replicationDriver) main(ctx context.Context) {
 	// the probability that the producer returns a topology with more than one node in it,
 	// else the node shutdown tests can flake.
 	if rd.rs.srcNodes >= 3 {
-		require.NoError(rd.t, WaitFor3XReplication(ctx, rd.t, rd.t.L(), rd.setup.src.db))
+		require.NoError(rd.t, roachtestutil.WaitFor3XReplication(ctx, rd.t.L(), rd.setup.src.db))
 	}
 
 	rd.t.L().Printf("begin workload on src cluster")
@@ -935,6 +974,7 @@ func (rd *replicationDriver) main(ctx context.Context) {
 	}()
 
 	workloadDoneCh := make(chan struct{})
+	workloadErrCh := make(chan error, 1)
 	workloadMonitor.Go(func(ctx context.Context) error {
 		defer close(workloadDoneCh)
 		err := rd.runWorkload(ctx)
@@ -943,8 +983,11 @@ func (rd *replicationDriver) main(ctx context.Context) {
 		if err != nil && ctx.Err() == nil {
 			// Implies the workload context was not cancelled and the workload cmd returned a
 			// different error.
+			rd.t.L().Printf("Workload context was not cancelled. Error returned by workload cmd: %s", err)
+			workloadErrCh <- err
 			return errors.Wrapf(err, `Workload context was not cancelled. Error returned by workload cmd`)
 		}
+		workloadErrCh <- nil
 		rd.t.L().Printf("workload successfully finished")
 		return nil
 	})
@@ -952,7 +995,11 @@ func (rd *replicationDriver) main(ctx context.Context) {
 	rd.t.Status("starting replication stream")
 	rd.metrics.initalScanStart = newMetricSnapshot(metricSnapper, timeutil.Now())
 	ingestionJobID := rd.startReplicationStream(ctx)
-	removeTenantRateLimiters(rd.t, rd.setup.dst.sysSQL, rd.setup.dst.name)
+	rd.setup.dst.sysSQL.Exec(
+		rd.t,
+		`ALTER TENANT $1 GRANT CAPABILITY exempt_from_rate_limiting=true`,
+		rd.setup.dst.name,
+	)
 
 	// latency verifier queries may error during a node shutdown event; therefore
 	// tolerate errors if we anticipate node deaths.
@@ -988,9 +1035,14 @@ func (rd *replicationDriver) main(ctx context.Context) {
 	rd.t.Status(fmt.Sprintf(`initial scan complete. run workload and repl. stream for another %s minutes`,
 		rd.rs.additionalDuration))
 
+	rd.maybeRunReaderTenantWorkload(ctx, workloadMonitor)
+
 	select {
 	case <-workloadDoneCh:
 		rd.t.L().Printf("workload finished on its own")
+		if err := <-workloadErrCh; err != nil {
+			rd.t.Fatal(err)
+		}
 	case <-time.After(rd.getWorkloadTimeout()):
 		workloadCancel()
 		rd.t.L().Printf("workload was cancelled after %s", rd.rs.additionalDuration)
@@ -1023,8 +1075,12 @@ func (rd *replicationDriver) main(ctx context.Context) {
 	rd.metrics.cutoverEnd = newMetricSnapshot(metricSnapper, timeutil.Now())
 
 	rd.t.L().Printf("starting the destination tenant")
-	conn := deprecatedStartInMemoryTenant(ctx, rd.t, rd.c, rd.setup.dst.name, rd.setup.dst.gatewayNodes)
-	conn.Close()
+	startOpts := option.StartSharedVirtualClusterOpts(
+		rd.setup.dst.name,
+		option.StorageCluster(rd.setup.dst.gatewayNodes),
+		option.WithInitTarget(rd.setup.dst.gatewayNodes[0]),
+	)
+	rd.c.StartServiceForVirtualCluster(ctx, rd.t.L(), startOpts, install.MakeClusterSettings())
 
 	rd.metrics.export(rd.t, len(rd.setup.src.nodes))
 
@@ -1054,6 +1110,7 @@ func c2cRegisterWrapper(
 	if sp.pdSize != 0 {
 		clusterOps = append(clusterOps, spec.VolumeSize(sp.pdSize))
 	}
+	clusterOps = append(clusterOps, spec.WorkloadNode(), spec.WorkloadNodeCPU(sp.cpus))
 
 	if len(sp.multiregion.srcLocalities) > 0 {
 		allZones := make([]string, 0, sp.srcNodes+sp.dstNodes+1)
@@ -1065,17 +1122,17 @@ func c2cRegisterWrapper(
 	}
 
 	r.Add(registry.TestSpec{
-		Name:             sp.name,
-		Owner:            registry.OwnerDisasterRecovery,
-		Benchmark:        sp.benchmark,
-		Cluster:          r.MakeClusterSpec(sp.dstNodes+sp.srcNodes+1, clusterOps...),
-		Leases:           registry.MetamorphicLeases,
-		Timeout:          sp.timeout,
-		Skip:             sp.skip,
-		CompatibleClouds: sp.clouds,
-		Suites:           sp.suites,
-		RequiresLicense:  true,
-		Run:              run,
+		Name:                      sp.name,
+		Owner:                     registry.OwnerDisasterRecovery,
+		Benchmark:                 sp.benchmark,
+		Cluster:                   r.MakeClusterSpec(sp.dstNodes+sp.srcNodes+1, clusterOps...),
+		Leases:                    registry.MetamorphicLeases,
+		Timeout:                   sp.timeout,
+		Skip:                      sp.skip,
+		CompatibleClouds:          sp.clouds,
+		Suites:                    sp.suites,
+		TestSelectionOptOutSuites: sp.suites,
+		Run:                       run,
 	})
 }
 
@@ -1085,11 +1142,10 @@ func runAcceptanceClusterReplication(ctx context.Context, t test.Test, c cluster
 		dstNodes: 1,
 		// The timeout field ensures the c2c roachtest driver behaves properly.
 		timeout:                   10 * time.Minute,
-		workload:                  replicateKV{readPercent: 0, debugRunDuration: 1 * time.Minute, maxBlockBytes: 1, initWithSplitAndScatter: true},
+		workload:                  replicateKV{readPercent: 0, debugRunDuration: 1 * time.Minute, maxBlockBytes: 1, initWithSplitAndScatter: true, tolerateErrors: true},
 		additionalDuration:        0 * time.Minute,
 		cutover:                   30 * time.Second,
 		skipNodeDistributionCheck: true,
-		clouds:                    registry.OnlyGCE,
 		suites:                    registry.Suites(registry.Nightly),
 	}
 	rd := makeReplicationDriver(t, c, sp)
@@ -1114,15 +1170,13 @@ func registerClusterToCluster(r registry.Registry) {
 			dstNodes:  4,
 			cpus:      8,
 			pdSize:    1000,
-			// 500 warehouses adds 30 GB to source
-			//
-			// TODO(msbutler): increase default test to 1000 warehouses once fingerprinting
-			// job speeds up.
-			workload:           replicateTPCC{warehouses: 1000},
+
+			workload:           replicateTPCC{warehouses: 1000, tolerateErrors: true},
+			withReaderWorkload: replicateTPCC{warehouses: 500, readOnly: true, tolerateErrors: true},
 			timeout:            3 * time.Hour,
 			additionalDuration: 60 * time.Minute,
 			cutover:            30 * time.Minute,
-			clouds:             registry.AllExceptAzure,
+			clouds:             registry.OnlyGCE,
 			suites:             registry.Suites(registry.Nightly),
 		},
 		{
@@ -1140,6 +1194,7 @@ func registerClusterToCluster(r registry.Registry) {
 			timeout:                              1 * time.Hour,
 			additionalDuration:                   10 * time.Minute,
 			cutover:                              5 * time.Minute,
+			withReaderWorkload:                   replicateKV{readPercent: 100, readOnly: true, tolerateErrors: true},
 			sometimesTestFingerprintMismatchCode: true,
 			clouds:                               registry.OnlyGCE,
 			suites:                               registry.Suites(registry.Nightly),
@@ -1155,11 +1210,11 @@ func registerClusterToCluster(r registry.Registry) {
 			// gives us max write BW of 800MB/s.
 			pdSize: 1667,
 			// Write ~50GB total (~12.5GB per node).
-			workload:           replicateKV{readPercent: 0, initRows: 50000000, maxBlockBytes: 2048},
+			workload:           replicateKV{readPercent: 0, initRows: 50000000, maxBlockBytes: 2048, tolerateErrors: true},
 			timeout:            1 * time.Hour,
 			additionalDuration: 5 * time.Minute,
 			cutover:            0,
-			clouds:             registry.AllExceptAzure,
+			clouds:             registry.OnlyGCE,
 			suites:             registry.Suites(registry.Nightly),
 		},
 		{
@@ -1173,7 +1228,7 @@ func registerClusterToCluster(r registry.Registry) {
 			// Write ~7TB data to disk via Import -- takes a little over 1 hour.
 			workload: replicateImportKV{
 				replicateSplits: true,
-				replicateKV:     replicateKV{readPercent: 0, initRows: 5000000000, maxBlockBytes: 1024}},
+				replicateKV:     replicateKV{readPercent: 0, initRows: 5000000000, maxBlockBytes: 1024, tolerateErrors: true}},
 			timeout: 3 * time.Hour,
 			// While replicating a bulk op, expect the max latency to be the runtime
 			// of the bulk op.
@@ -1232,10 +1287,11 @@ func registerClusterToCluster(r registry.Registry) {
 
 			workload: replicateKV{
 				// Write a ~2TB initial scan.
-				initRows:      350000000,
-				readPercent:   50,
-				maxBlockBytes: 4096,
-				maxQPS:        2000,
+				initRows:       350000000,
+				readPercent:    50,
+				maxBlockBytes:  4096,
+				maxQPS:         2000,
+				tolerateErrors: true,
 			},
 			maxAcceptedLatency: time.Minute * 5,
 			timeout:            12 * time.Hour,
@@ -1261,6 +1317,7 @@ func registerClusterToCluster(r registry.Registry) {
 				initWithSplitAndScatter:     true,
 				partitionKVDatabaseInRegion: "us-west1",
 				antiRegion:                  "us-central1",
+				tolerateErrors:              true,
 			},
 			timeout:            1 * time.Hour,
 			additionalDuration: 10 * time.Minute,
@@ -1281,16 +1338,16 @@ func registerClusterToCluster(r registry.Registry) {
 			cpus:     4,
 			pdSize:   10,
 			workload: replicateKV{
-				readPercent:             0,
-				debugRunDuration:        1 * time.Minute,
+				readPercent:             50,
+				debugRunDuration:        10 * time.Minute,
 				initWithSplitAndScatter: true,
 				maxBlockBytes:           1024},
-			timeout:                   5 * time.Minute,
+			timeout:                   30 * time.Minute,
 			additionalDuration:        0 * time.Minute,
 			cutover:                   30 * time.Second,
 			skipNodeDistributionCheck: true,
 			skip:                      "for local ad hoc testing",
-			clouds:                    registry.AllClouds,
+			clouds:                    registry.OnlyGCE,
 			suites:                    registry.Suites(registry.Nightly),
 		},
 		{
@@ -1495,12 +1552,12 @@ func getPhase(rd *replicationDriver, dstJobID jobspb.JobID) c2cPhase {
 	var jobStatus string
 	rd.setup.dst.sysSQL.QueryRow(rd.t, `SELECT status FROM [SHOW JOB $1]`,
 		dstJobID).Scan(&jobStatus)
-	require.Equal(rd.t, jobs.StatusRunning, jobs.Status(jobStatus))
+	require.Equal(rd.t, jobs.StateRunning, jobs.State(jobStatus))
 
 	streamIngestProgress := getJobProgress(rd.t, rd.setup.dst.sysSQL, dstJobID).GetStreamIngest()
 
 	if streamIngestProgress.ReplicatedTime.IsEmpty() {
-		if len(streamIngestProgress.StreamAddresses) == 0 {
+		if len(streamIngestProgress.PartitionConnUris) == 0 {
 			return phaseNotReady
 		}
 		// Only return phaseInitialScan once all available stream addresses from the
@@ -1582,14 +1639,18 @@ func registerClusterReplicationResilience(r registry.Registry) {
 			srcNodes:                             4,
 			dstNodes:                             4,
 			cpus:                                 8,
-			workload:                             replicateKV{readPercent: 0, initRows: 5000000, maxBlockBytes: 1024, initWithSplitAndScatter: true},
+			workload:                             replicateKV{readPercent: 0, initRows: 5000000, maxBlockBytes: 1024, initWithSplitAndScatter: true, tolerateErrors: true},
 			timeout:                              20 * time.Minute,
 			additionalDuration:                   6 * time.Minute,
 			cutover:                              3 * time.Minute,
 			expectedNodeDeaths:                   1,
 			sometimesTestFingerprintMismatchCode: true,
-			clouds:                               registry.OnlyGCE,
-			suites:                               registry.Suites(registry.Nightly),
+			// The job system can take up to 2 minutes to reclaim a job if the
+			// coordinator dies, so increase the max expected latency to account for
+			// our lovely job system.
+			maxAcceptedLatency: 4 * time.Minute,
+			clouds:             registry.OnlyGCE,
+			suites:             registry.Suites(registry.Nightly),
 		}
 
 		c2cRegisterWrapper(r, rsp.replicationSpec,
@@ -1602,9 +1663,15 @@ func registerClusterReplicationResilience(r registry.Registry) {
 
 				shutdownSetupDone := make(chan struct{})
 
-				rrd.beforeWorkloadHook = func() {
-					// Ensure the workload begins after c2c jobs have been set up.
-					<-shutdownSetupDone
+				rrd.beforeWorkloadHook = func(ctx context.Context) error {
+					// Ensure the workload begins after c2c jobs have been set up, or
+					// return early if context was cancelled.
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-shutdownSetupDone:
+						return nil
+					}
 				}
 
 				rrd.replicationStartHook = func(ctx context.Context, rd *replicationDriver) {
@@ -1644,10 +1711,14 @@ func registerClusterReplicationResilience(r registry.Registry) {
 				defer mainMonitor.Wait()
 
 				// Don't begin shutdown process until c2c job is set up.
-				<-shutdownSetupDone
+				select {
+				case <-shutdownSetupDone:
+				case <-ctx.Done():
+					return
+				}
 
 				// Eagerly listen to cutover signal to exercise node shutdown during actual cutover.
-				rrd.setup.dst.sysSQL.Exec(t, `SET CLUSTER SETTING bulkio.stream_ingestion.cutover_signal_poll_interval='5s'`)
+				rrd.setup.dst.sysSQL.Exec(t, `SET CLUSTER SETTING bulkio.stream_ingestion.failover_signal_poll_interval='5s'`)
 
 				// While executing a node shutdown on either the src or destination
 				// cluster, ensure the destination cluster's stream ingestion job
@@ -1698,7 +1769,7 @@ func registerClusterReplicationDisconnect(r registry.Registry) {
 		srcNodes:           3,
 		dstNodes:           3,
 		cpus:               4,
-		workload:           replicateKV{readPercent: 0, initRows: 1000000, maxBlockBytes: 1024, initWithSplitAndScatter: true},
+		workload:           replicateKV{readPercent: 0, initRows: 1000000, maxBlockBytes: 1024, initWithSplitAndScatter: true, tolerateErrors: true},
 		timeout:            20 * time.Minute,
 		additionalDuration: 10 * time.Minute,
 		cutover:            2 * time.Minute,
@@ -1793,7 +1864,8 @@ func getStreamIngestionJobInfo(db *gosql.DB, jobID int) (jobInfo, error) {
 func srcClusterSettings(t test.Test, db *sqlutils.SQLRunner) {
 	db.ExecMultiple(t,
 		`SET CLUSTER SETTING kv.rangefeed.enabled = true;`,
-		`SET CLUSTER SETTING kv.lease.reject_on_leader_unknown.enabled = true;`)
+		`SET CLUSTER SETTING kv.lease.reject_on_leader_unknown.enabled = true;`,
+	)
 }
 
 func destClusterSettings(t test.Test, db *sqlutils.SQLRunner, additionalDuration time.Duration) {

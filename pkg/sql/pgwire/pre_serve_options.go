@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package pgwire
 
@@ -59,7 +54,9 @@ func parseClientProvidedSessionParameters(
 	hasTenantSelectOption := false
 	for {
 		// Read a key-value pair from the client.
-		key, err := buf.GetString()
+		// Note: GetSafeString is used since the key/value will live well past the
+		// life of the message.
+		key, err := buf.GetSafeString()
 		if err != nil {
 			return args, pgerror.Wrap(
 				err, pgcode.ProtocolViolation,
@@ -70,7 +67,7 @@ func parseClientProvidedSessionParameters(
 			// End of parameter list.
 			break
 		}
-		value, err := buf.GetString()
+		value, err := buf.GetSafeString()
 		if err != nil {
 			return args, pgerror.Wrapf(
 				err, pgcode.ProtocolViolation,
@@ -180,7 +177,7 @@ func parseClientProvidedSessionParameters(
 						return args, pgerror.Newf(pgcode.InvalidParameterValue,
 							"cannot specify system identity via options")
 					}
-					args.SystemIdentity, _ = username.MakeSQLUsernameFromUserInput(optvalue, username.PurposeValidation)
+					args.SystemIdentity = optvalue
 					continue
 
 				case "cluster":

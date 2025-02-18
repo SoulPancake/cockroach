@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package screl
 
@@ -124,9 +119,21 @@ func VersionSupportsElementUse(el scpb.Element, version clusterversion.ClusterVe
 		// These elements need v23.1 so they can be used without checking any version gates.
 		return true
 	case *scpb.SequenceOption:
+		// These elements need v23.2 so they can be used without checking any version gates.
 		return true
 	case *scpb.TypeComment, *scpb.DatabaseZoneConfig:
-		return version.IsActive(clusterversion.V24_2)
+		// These elements need v24.2 so they can be used without checking any version gates.
+		return true
+	case *scpb.ColumnComputeExpression, *scpb.FunctionSecurity, *scpb.LDRJobIDs,
+		*scpb.PartitionZoneConfig, *scpb.Trigger, *scpb.TriggerName,
+		*scpb.TriggerEnabled, *scpb.TriggerTiming, *scpb.TriggerEvents, *scpb.TriggerTransition,
+		*scpb.TriggerWhen, *scpb.TriggerFunctionCall, *scpb.TriggerDeps:
+		// These elements need v24.3 so they can be used without checking any version gates.
+		return true
+	case *scpb.NamedRangeZoneConfig, *scpb.Policy, *scpb.PolicyName:
+		return version.IsActive(clusterversion.V25_1)
+	case *scpb.PolicyRole, *scpb.PolicyUsingExpr, *scpb.PolicyWithCheckExpr, *scpb.PolicyDeps, *scpb.RowLevelSecurityEnabled, *scpb.RowLevelSecurityForced:
+		return version.IsActive(clusterversion.V25_2)
 	default:
 		panic(errors.AssertionFailedf("unknown element %T", el))
 	}

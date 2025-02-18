@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package log
 
@@ -18,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/cockroachdb/cockroach/pkg/util/debugutil"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log/channel"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logconfig"
@@ -72,7 +68,7 @@ func init() {
 	// using TestLogScope.
 	cfg := getTestConfig(nil /* output to files disabled */, true /* mostly inline */)
 
-	if _, err := ApplyConfig(cfg, FileSinkMetrics{}, nil /* fatalOnLogStall */); err != nil {
+	if _, err := ApplyConfig(cfg, nil /* fileSinkMetricsForDir */, nil /* fatalOnLogStall */); err != nil {
 		panic(err)
 	}
 
@@ -87,7 +83,7 @@ func init() {
 //
 // This is used to assert that configuration is performed
 // before logging has been used for the first time.
-func IsActive() (active bool, firstUse string) {
+func IsActive() (active bool, firstUse debugutil.SafeStack) {
 	logging.mu.Lock()
 	defer logging.mu.Unlock()
 	return logging.mu.active, logging.mu.firstUseStack
@@ -97,7 +93,9 @@ func IsActive() (active bool, firstUse string) {
 //
 // The returned logShutdownFn can be used to gracefully shut down logging facilities.
 func ApplyConfig(
-	config logconfig.Config, metrics FileSinkMetrics, fatalOnLogStall func() bool,
+	config logconfig.Config,
+	fileSinkMetricsForDir map[string]FileSinkMetrics,
+	fatalOnLogStall func() bool,
 ) (logShutdownFn func(), err error) {
 	// Sanity check.
 	if active, firstUse := IsActive(); active {
@@ -198,6 +196,13 @@ func ApplyConfig(
 		if err := fakeConfig.Channels.Validate(fakeConfig.CommonSinkConfig.Filter); err != nil {
 			return nil, errors.NewAssertionErrorWithWrappedErrf(err, "programming error: incorrect filter config")
 		}
+
+		// Collect stats for disk writes incurred by logs.
+		var metrics FileSinkMetrics
+		if fileSinkMetricsForDir != nil {
+			metrics = fileSinkMetricsForDir[*fakeConfig.Dir]
+		}
+
 		fileSinkInfo, fileSink, err := newFileSinkInfo("stderr", fakeConfig, metrics)
 		if err != nil {
 			return nil, err
@@ -315,6 +320,13 @@ func ApplyConfig(
 		if fileGroupName == "default" {
 			fileGroupName = ""
 		}
+
+		// Collect stats for disk writes incurred by logs.
+		var metrics FileSinkMetrics
+		if fileSinkMetricsForDir != nil {
+			metrics = fileSinkMetricsForDir[*fc.Dir]
+		}
+
 		fileSinkInfo, fileSink, err := newFileSinkInfo(fileGroupName, *fc, metrics)
 		if err != nil {
 			return nil, err

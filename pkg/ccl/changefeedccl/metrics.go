@@ -1,28 +1,29 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/cdcutils"
+	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/checkpoint"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/kvevent"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/schemafeed"
+	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/timers"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/multitenant"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/util/cidr"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
@@ -80,14 +81,25 @@ type AggMetrics struct {
 	AggregatorProgress          *aggmetric.AggGauge
 	CheckpointProgress          *aggmetric.AggGauge
 	LaggingRanges               *aggmetric.AggGauge
+	TotalRanges                 *aggmetric.AggGauge
 	CloudstorageBufferedBytes   *aggmetric.AggGauge
 	KafkaThrottlingNanos        *aggmetric.AggHistogram
+	SinkErrors                  *aggmetric.AggCounter
+	MaxBehindNanos              *aggmetric.AggGauge
+
+	Timers *timers.Timers
 
 	// There is always at least 1 sliMetrics created for defaultSLI scope.
 	mu struct {
 		syncutil.Mutex
 		sliMetrics map[string]*sliMetrics
 	}
+
+	// TODO(#130358): This doesn't really belong here, but is easier than
+	// threading the NetMetrics through all the other places.
+	NetMetrics *cidr.NetMetrics
+
+	CheckpointMetrics *checkpoint.AggMetrics
 }
 
 const (
@@ -113,6 +125,8 @@ type metricsRecorder interface {
 	recordSinkIOInflightChange(int64)
 	makeCloudstorageFileAllocCallback() func(delta int64)
 	getKafkaThrottlingMetrics(*cluster.Settings) metrics.Histogram
+	netMetrics() *cidr.NetMetrics
+	timers() *timers.ScopedTimers
 }
 
 var _ metricsRecorder = (*sliMetrics)(nil)
@@ -152,8 +166,13 @@ type sliMetrics struct {
 	AggregatorProgress          *aggmetric.Gauge
 	CheckpointProgress          *aggmetric.Gauge
 	LaggingRanges               *aggmetric.Gauge
+	TotalRanges                 *aggmetric.Gauge
 	CloudstorageBufferedBytes   *aggmetric.Gauge
 	KafkaThrottlingNanos        *aggmetric.Histogram
+	SinkErrors                  *aggmetric.Counter
+	MaxBehindNanos              *aggmetric.Gauge
+
+	Timers *timers.ScopedTimers
 
 	mu struct {
 		syncutil.Mutex
@@ -161,6 +180,9 @@ type sliMetrics struct {
 		resolved   map[int64]hlc.Timestamp
 		checkpoint map[int64]hlc.Timestamp
 	}
+	NetMetrics *cidr.NetMetrics
+
+	CheckpointMetrics *checkpoint.Metrics
 }
 
 // closeId unregisters an id. The id can still be used after its closed, but
@@ -332,6 +354,22 @@ func (m *sliMetrics) recordSizeBasedFlush() {
 	}
 
 	m.SizeBasedFlushes.Inc(1)
+}
+
+func (m *sliMetrics) netMetrics() *cidr.NetMetrics {
+	if m == nil {
+		return nil
+	}
+
+	return m.NetMetrics
+}
+
+func (m *sliMetrics) timers() *timers.ScopedTimers {
+	if m == nil {
+		return timers.NoopScopedTimers
+	}
+
+	return m.Timers
 }
 
 // JobScopedUsageMetrics are aggregated metrics keeping track of
@@ -649,6 +687,14 @@ func (w *wrappingCostController) getKafkaThrottlingMetrics(
 	return w.inner.getKafkaThrottlingMetrics(settings)
 }
 
+func (w *wrappingCostController) netMetrics() *cidr.NetMetrics {
+	return w.inner.netMetrics()
+}
+
+func (w *wrappingCostController) timers() *timers.ScopedTimers {
+	return w.inner.timers()
+}
+
 var (
 	metaChangefeedForwardedResolvedMessages = metric.Metadata{
 		Name:        "changefeed.forwarded_resolved_messages",
@@ -680,17 +726,6 @@ var (
 		Name:        "changefeed.checkpoint_hist_nanos",
 		Help:        "Time spent checkpointing changefeed progress",
 		Measurement: "Changefeeds",
-		Unit:        metric.Unit_NANOSECONDS,
-	}
-
-	// TODO(dan): This was intended to be a measure of the minimum distance of
-	// any changefeed ahead of its gc ttl threshold, but keeping that correct in
-	// the face of changing zone configs is much harder, so this will have to do
-	// for now.
-	metaChangefeedMaxBehindNanos = metric.Metadata{
-		Name:        "changefeed.max_behind_nanos",
-		Help:        "(Deprecated in favor of checkpoint_progress) The most any changefeed's persisted checkpoint is behind the present",
-		Measurement: "Nanoseconds",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
 
@@ -736,9 +771,21 @@ var (
 		Measurement: "Nanoseconds",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
+	metaNetworkBytesIn = metric.Metadata{
+		Name:        "changefeed.network.bytes_in",
+		Help:        "The number of bytes received from the network by changefeeds",
+		Measurement: "Bytes",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaNetworkBytesOut = metric.Metadata{
+		Name:        "changefeed.network.bytes_out",
+		Help:        "The number of bytes sent over the network by changefeeds",
+		Measurement: "Bytes",
+		Unit:        metric.Unit_COUNT,
+	}
 )
 
-func newAggregateMetrics(histogramWindow time.Duration) *AggMetrics {
+func newAggregateMetrics(histogramWindow time.Duration, lookup *cidr.Lookup) *AggMetrics {
 	metaChangefeedEmittedMessages := metric.Metadata{
 		Name:        "changefeed.emitted_messages",
 		Help:        "Messages emitted by all feeds",
@@ -906,9 +953,15 @@ func newAggregateMetrics(histogramWindow time.Duration) *AggMetrics {
 		Measurement: "Unix Timestamp Nanoseconds",
 		Unit:        metric.Unit_TIMESTAMP_NS,
 	}
-	metaLaggingRangePercentage := metric.Metadata{
+	metaLaggingRanges := metric.Metadata{
 		Name:        "changefeed.lagging_ranges",
 		Help:        "The number of ranges considered to be lagging behind",
+		Measurement: "Ranges",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaTotalRanges := metric.Metadata{
+		Name:        "changefeed.total_ranges",
+		Help:        "The total number of ranges being watched by changefeed aggregators",
 		Measurement: "Ranges",
 		Unit:        metric.Unit_COUNT,
 	}
@@ -924,6 +977,22 @@ func newAggregateMetrics(histogramWindow time.Duration) *AggMetrics {
 		Measurement: "Nanoseconds",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
+	metaSinkErrors := metric.Metadata{
+		Name:        "changefeed.sink_errors",
+		Help:        "Number of changefeed errors caused by the sink",
+		Measurement: "Count",
+		Unit:        metric.Unit_COUNT,
+	}
+	// TODO(dan): This was intended to be a measure of the minimum distance of
+	// any changefeed ahead of its gc ttl threshold, but keeping that correct in
+	// the face of changing zone configs is much harder, so this will have to do
+	// for now.
+	metaChangefeedMaxBehindNanos := metric.Metadata{
+		Name:        "changefeed.max_behind_nanos",
+		Help:        "The most any changefeed's persisted checkpoint is behind the present",
+		Measurement: "Nanoseconds",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
 
 	functionalGaugeMinFn := func(childValues []int64) int64 {
 		var min int64
@@ -933,6 +1002,13 @@ func newAggregateMetrics(histogramWindow time.Duration) *AggMetrics {
 			}
 		}
 		return min
+	}
+
+	functionalGaugeMaxFn := func(childValues []int64) int64 {
+		if len(childValues) == 0 {
+			return 0
+		}
+		return slices.Max(childValues)
 	}
 
 	// NB: When adding new histograms, use sigFigs = 1.  Older histograms
@@ -966,7 +1042,7 @@ func newAggregateMetrics(histogramWindow time.Duration) *AggMetrics {
 			Duration:     histogramWindow,
 			MaxVal:       changefeedIOQueueMaxLatency.Nanoseconds(),
 			SigFigs:      2,
-			BucketConfig: metric.BatchProcessLatencyBuckets,
+			BucketConfig: metric.ChangefeedBatchLatencyBuckets,
 		}),
 		ParallelIOPendingRows: b.Gauge(metaChangefeedParallelIOPendingRows),
 		ParallelIOResultQueueNanos: b.Histogram(metric.HistogramOptions{
@@ -974,7 +1050,7 @@ func newAggregateMetrics(histogramWindow time.Duration) *AggMetrics {
 			Duration:     histogramWindow,
 			MaxVal:       changefeedIOQueueMaxLatency.Nanoseconds(),
 			SigFigs:      2,
-			BucketConfig: metric.BatchProcessLatencyBuckets,
+			BucketConfig: metric.ChangefeedBatchLatencyBuckets,
 		}),
 		ParallelIOInFlightKeys: b.Gauge(metaChangefeedParallelIOInFlightKeys),
 		SinkIOInflight:         b.Gauge(metaChangefeedSinkIOInflight),
@@ -983,28 +1059,28 @@ func newAggregateMetrics(histogramWindow time.Duration) *AggMetrics {
 			Duration:     histogramWindow,
 			MaxVal:       changefeedBatchHistMaxLatency.Nanoseconds(),
 			SigFigs:      1,
-			BucketConfig: metric.BatchProcessLatencyBuckets,
+			BucketConfig: metric.ChangefeedBatchLatencyBuckets,
 		}),
 		FlushHistNanos: b.Histogram(metric.HistogramOptions{
 			Metadata:     metaChangefeedFlushHistNanos,
 			Duration:     histogramWindow,
 			MaxVal:       changefeedFlushHistMaxLatency.Nanoseconds(),
 			SigFigs:      2,
-			BucketConfig: metric.BatchProcessLatencyBuckets,
+			BucketConfig: metric.ChangefeedBatchLatencyBuckets,
 		}),
 		CommitLatency: b.Histogram(metric.HistogramOptions{
 			Metadata:     metaCommitLatency,
 			Duration:     histogramWindow,
 			MaxVal:       commitLatencyMaxValue.Nanoseconds(),
 			SigFigs:      1,
-			BucketConfig: metric.BatchProcessLatencyBuckets,
+			BucketConfig: metric.ChangefeedPipelineLatencyBuckets,
 		}),
 		AdmitLatency: b.Histogram(metric.HistogramOptions{
 			Metadata:     metaAdmitLatency,
 			Duration:     histogramWindow,
 			MaxVal:       admitLatencyMaxValue.Nanoseconds(),
 			SigFigs:      1,
-			BucketConfig: metric.BatchProcessLatencyBuckets,
+			BucketConfig: metric.ChangefeedPipelineLatencyBuckets,
 		}),
 		BackfillCount:             b.Gauge(metaChangefeedBackfillCount),
 		BackfillPendingRanges:     b.Gauge(metaChangefeedBackfillPendingRanges),
@@ -1015,15 +1091,21 @@ func newAggregateMetrics(histogramWindow time.Duration) *AggMetrics {
 		SchemaRegistrations:       b.Counter(metaSchemaRegistryRegistrations),
 		AggregatorProgress:        b.FunctionalGauge(metaAggregatorProgress, functionalGaugeMinFn),
 		CheckpointProgress:        b.FunctionalGauge(metaCheckpointProgress, functionalGaugeMinFn),
-		LaggingRanges:             b.Gauge(metaLaggingRangePercentage),
+		LaggingRanges:             b.Gauge(metaLaggingRanges),
+		TotalRanges:               b.Gauge(metaTotalRanges),
 		CloudstorageBufferedBytes: b.Gauge(metaCloudstorageBufferedBytes),
 		KafkaThrottlingNanos: b.Histogram(metric.HistogramOptions{
 			Metadata:     metaChangefeedKafkaThrottlingNanos,
 			Duration:     histogramWindow,
 			MaxVal:       kafkaThrottlingTimeMaxValue.Nanoseconds(),
 			SigFigs:      2,
-			BucketConfig: metric.BatchProcessLatencyBuckets,
+			BucketConfig: metric.ChangefeedBatchLatencyBuckets,
 		}),
+		SinkErrors:        b.Counter(metaSinkErrors),
+		MaxBehindNanos:    b.FunctionalGauge(metaChangefeedMaxBehindNanos, functionalGaugeMaxFn),
+		Timers:            timers.New(histogramWindow),
+		NetMetrics:        lookup.MakeNetMetrics(metaNetworkBytesOut, metaNetworkBytesIn, "sink"),
+		CheckpointMetrics: checkpoint.NewAggMetrics(b),
 	}
 	a.mu.sliMetrics = make(map[string]*sliMetrics)
 	_, err := a.getOrCreateScope(defaultSLIScope)
@@ -1089,8 +1171,18 @@ func (a *AggMetrics) getOrCreateScope(scope string) (*sliMetrics, error) {
 		SchemaRegistryRetries:       a.SchemaRegistryRetries.AddChild(scope),
 		SchemaRegistrations:         a.SchemaRegistrations.AddChild(scope),
 		LaggingRanges:               a.LaggingRanges.AddChild(scope),
+		TotalRanges:                 a.TotalRanges.AddChild(scope),
 		CloudstorageBufferedBytes:   a.CloudstorageBufferedBytes.AddChild(scope),
 		KafkaThrottlingNanos:        a.KafkaThrottlingNanos.AddChild(scope),
+		SinkErrors:                  a.SinkErrors.AddChild(scope),
+
+		Timers: a.Timers.GetOrCreateScopedTimers(scope),
+
+		// TODO(#130358): Again, this doesn't belong here, but it's the most
+		// convenient way to feed this metric to changefeeds.
+		NetMetrics: a.NetMetrics,
+
+		CheckpointMetrics: a.CheckpointMetrics.AddChild(scope),
 	}
 	sm.mu.resolved = make(map[int64]hlc.Timestamp)
 	sm.mu.checkpoint = make(map[int64]hlc.Timestamp)
@@ -1113,8 +1205,20 @@ func (a *AggMetrics) getOrCreateScope(scope string) (*sliMetrics, error) {
 			return minTs
 		}
 	}
+
+	maxBehindNanosGetter := func(m map[int64]hlc.Timestamp) func() int64 {
+		return func() int64 {
+			minTs := minTimestampGetter(m)()
+			if minTs == 0 {
+				return 0
+			}
+			return timeutil.Now().UnixNano() - minTs
+		}
+	}
+
 	sm.AggregatorProgress = a.AggregatorProgress.AddFunctionalChild(minTimestampGetter(sm.mu.resolved), scope)
 	sm.CheckpointProgress = a.CheckpointProgress.AddFunctionalChild(minTimestampGetter(sm.mu.checkpoint), scope)
+	sm.MaxBehindNanos = a.MaxBehindNanos.AddFunctionalChild(maxBehindNanosGetter(sm.mu.resolved), scope)
 
 	a.mu.sliMetrics[scope] = sm
 	return sm, nil
@@ -1123,7 +1227,7 @@ func (a *AggMetrics) getOrCreateScope(scope string) (*sliMetrics, error) {
 // getLaggingRangesCallback returns a function which can be called to update the
 // lagging ranges metric. It should be called with the current number of lagging
 // ranges.
-func (s *sliMetrics) getLaggingRangesCallback() func(int64) {
+func (s *sliMetrics) getLaggingRangesCallback() func(lagging int64, total int64) {
 	// Because this gauge is shared between changefeeds in the same metrics scope,
 	// we must instead modify it using `Inc` and `Dec` (as opposed to `Update`) to
 	// ensure values written by others are not overwritten. The code below is used
@@ -1140,13 +1244,18 @@ func (s *sliMetrics) getLaggingRangesCallback() func(int64) {
 	// If 1 lagging range is deleted, last=7,i=10: X.Dec(11-10) = X.Dec(1)
 	last := struct {
 		syncutil.Mutex
-		v int64
+		lagging int64
+		total   int64
 	}{}
-	return func(i int64) {
+	return func(lagging int64, total int64) {
 		last.Lock()
 		defer last.Unlock()
-		s.LaggingRanges.Dec(last.v - i)
-		last.v = i
+
+		s.LaggingRanges.Dec(last.lagging - lagging)
+		last.lagging = lagging
+
+		s.TotalRanges.Dec(last.total - total)
+		last.total = total
 	}
 }
 
@@ -1166,14 +1275,10 @@ type Metrics struct {
 	ParallelConsumerConsumeNanos   metric.IHistogram
 	ParallelConsumerInFlightEvents *metric.Gauge
 
-	// This map and the MaxBehindNanos metric are deprecated in favor of
-	// CheckpointProgress which is stored in the sliMetrics.
 	mu struct {
 		syncutil.Mutex
-		id       int
-		resolved map[int]hlc.Timestamp
+		id int
 	}
-	MaxBehindNanos *metric.Gauge
 }
 
 // MetricStruct implements the metric.Struct interface.
@@ -1185,9 +1290,9 @@ func (m *Metrics) getSLIMetrics(scope string) (*sliMetrics, error) {
 }
 
 // MakeMetrics makes the metrics for changefeed monitoring.
-func MakeMetrics(histogramWindow time.Duration) metric.Struct {
+func MakeMetrics(histogramWindow time.Duration, lookup *cidr.Lookup) metric.Struct {
 	m := &Metrics{
-		AggMetrics:        newAggregateMetrics(histogramWindow),
+		AggMetrics:        newAggregateMetrics(histogramWindow, lookup),
 		UsageMetrics:      newJobScopedUsageMetrics(histogramWindow),
 		KVFeedMetrics:     kvevent.MakeMetrics(histogramWindow),
 		SchemaFeedMetrics: schemafeed.MakeMetrics(histogramWindow),
@@ -1220,20 +1325,8 @@ func MakeMetrics(histogramWindow time.Duration) metric.Struct {
 		ParallelConsumerInFlightEvents: metric.NewGauge(metaChangefeedEventConsumerInFlightEvents),
 	}
 
-	m.mu.resolved = make(map[int]hlc.Timestamp)
 	m.mu.id = 1 // start the first id at 1 so we can detect initialization
-	m.MaxBehindNanos = metric.NewFunctionalGauge(metaChangefeedMaxBehindNanos, func() int64 {
-		now := timeutil.Now()
-		var maxBehind time.Duration
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		for _, resolved := range m.mu.resolved {
-			if behind := now.Sub(resolved.GoTime()); behind > maxBehind {
-				maxBehind = behind
-			}
-		}
-		return maxBehind.Nanoseconds()
-	})
+
 	return m
 }
 

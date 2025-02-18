@@ -1,30 +1,25 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React, { useContext, useState } from "react";
-import { Helmet } from "react-helmet";
 import { ArrowLeft } from "@cockroachlabs/icons";
 import { Col, Row } from "antd";
 import classNames from "classnames/bind";
+import React, { useContext, useState } from "react";
+import { Helmet } from "react-helmet";
 
 import { Button } from "../../button";
-import { SqlBox, SqlBoxSize } from "../../sql";
-import { SortSetting } from "../../sortedtable";
+import { CockroachCloudContext } from "../../contexts";
+import { InsightRecommendation, InsightType } from "../../insights";
 import {
   InsightsSortedTable,
   makeInsightsColumns,
 } from "../../insightsTable/insightsTable";
-import styles from "../statementDetails.module.scss";
-import { CockroachCloudContext } from "../../contexts";
-import { InsightRecommendation, InsightType } from "../../insights";
+import { SortSetting } from "../../sortedtable";
+import { SqlBox, SqlBoxSize } from "../../sql";
 import { SummaryCard, SummaryCardItem } from "../../summaryCard";
+import { Timestamp } from "../../timestamp";
 import {
   Count,
   DATE_FORMAT_24_TZ,
@@ -34,7 +29,7 @@ import {
   RenderCount,
   TimestampToMoment,
 } from "../../util";
-import { Timestamp } from "../../timestamp";
+import styles from "../statementDetails.module.scss";
 
 import {
   formatIndexes,

@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scop
 
@@ -227,10 +222,23 @@ type MakeAbsentColumnDeleteOnly struct {
 	Column scpb.Column
 }
 
-// SetAddedColumnType sets the type of a new column.
-type SetAddedColumnType struct {
+// UpsertColumnType sets the type of a new column.
+type UpsertColumnType struct {
 	immediateMutationOp
 	ColumnType scpb.ColumnType
+}
+
+// AddColumnComputeExpression will add a new compute expression to a column.
+type AddColumnComputeExpression struct {
+	immediateMutationOp
+	ComputeExpression scpb.ColumnComputeExpression
+}
+
+// RemoveColumnComputeExpression will remove the compute expression from a column.
+type RemoveColumnComputeExpression struct {
+	immediateMutationOp
+	TableID  descpb.ID
+	ColumnID descpb.ColumnID
 }
 
 // MakeWriteOnlyColumnPublic moves a new column from its mutation to public.
@@ -516,6 +524,127 @@ type RemoveColumnOnUpdateExpression struct {
 	ColumnID descpb.ColumnID
 }
 
+// AddTrigger adds a trigger to a table.
+type AddTrigger struct {
+	immediateMutationOp
+	Trigger scpb.Trigger
+}
+
+// SetTriggerName sets the name of a trigger.
+type SetTriggerName struct {
+	immediateMutationOp
+	Name scpb.TriggerName
+}
+
+// SetTriggerEnabled sets the "enabled" status of a trigger, which indicates
+// whether it will be executed in response to a triggering event.
+type SetTriggerEnabled struct {
+	immediateMutationOp
+	Enabled scpb.TriggerEnabled
+}
+
+// SetTriggerTiming sets the timing of a trigger, which indicates when it
+// executes in relation to the triggering event.
+type SetTriggerTiming struct {
+	immediateMutationOp
+	Timing scpb.TriggerTiming
+}
+
+// SetTriggerEvents sets the events for a trigger, which indicate the operations
+// that fire the trigger.
+type SetTriggerEvents struct {
+	immediateMutationOp
+	Events scpb.TriggerEvents
+}
+
+// SetTriggerTransition sets the transition alias(es) of a trigger.
+type SetTriggerTransition struct {
+	immediateMutationOp
+	Transition scpb.TriggerTransition
+}
+
+// SetTriggerWhen sets the WHEN condition of a trigger.
+type SetTriggerWhen struct {
+	immediateMutationOp
+	When scpb.TriggerWhen
+}
+
+// SetTriggerFunctionCall sets the trigger-function call for a trigger.
+type SetTriggerFunctionCall struct {
+	immediateMutationOp
+	FunctionCall scpb.TriggerFunctionCall
+}
+
+// SetTriggerForwardReferences sets the forward references to relations, types,
+// and routines for a trigger.
+type SetTriggerForwardReferences struct {
+	immediateMutationOp
+	Deps scpb.TriggerDeps
+}
+
+// RemoveTrigger is used to delete a trigger associated with a table.
+type RemoveTrigger struct {
+	immediateMutationOp
+	Trigger scpb.Trigger
+}
+
+// AddPolicy adds a policy to a table.
+type AddPolicy struct {
+	immediateMutationOp
+	Policy scpb.Policy
+}
+
+// RemovePolicy removes a policy from a table.
+type RemovePolicy struct {
+	immediateMutationOp
+	Policy scpb.Policy
+}
+
+// SetPolicyName sets the name of a policy.
+type SetPolicyName struct {
+	immediateMutationOp
+	TableID  descpb.ID
+	PolicyID descpb.PolicyID
+	Name     string
+}
+
+// AddPolicyRole adds a new role to a policy.
+type AddPolicyRole struct {
+	immediateMutationOp
+	Role scpb.PolicyRole
+}
+
+// RemovePolicyRole removes an existing role from a policy.
+type RemovePolicyRole struct {
+	immediateMutationOp
+	Role scpb.PolicyRole
+}
+
+// SetPolicyUsingExpression will set a new USING expression for a policy.
+type SetPolicyUsingExpression struct {
+	immediateMutationOp
+	TableID   descpb.ID
+	PolicyID  descpb.PolicyID
+	Expr      string
+	ColumnIDs descpb.ColumnIDs
+}
+
+// SetPolicyWithCheckExpression will set a new WITH CHECK expression for a policy.
+type SetPolicyWithCheckExpression struct {
+	immediateMutationOp
+	TableID   descpb.ID
+	PolicyID  descpb.PolicyID
+	Expr      string
+	ColumnIDs descpb.ColumnIDs
+}
+
+// SetPolicyForwardReferences sets new forward references to relations, types,
+// and routines for the expressions in a policy.
+type SetPolicyForwardReferences struct {
+	immediateMutationOp
+	Deps scpb.PolicyDeps
+}
+
 // UpdateTableBackReferencesInTypes updates back references to a table
 // in the specified types.
 type UpdateTableBackReferencesInTypes struct {
@@ -599,6 +728,42 @@ type RemoveTableColumnBackReferencesInFunctions struct {
 	immediateMutationOp
 	BackReferencedTableID  descpb.ID
 	BackReferencedColumnID descpb.ColumnID
+	FunctionIDs            []descpb.ID
+}
+
+// AddTriggerBackReferencesInRoutines adds back references to a trigger from
+// referenced functions.
+type AddTriggerBackReferencesInRoutines struct {
+	immediateMutationOp
+	BackReferencedTableID   descpb.ID
+	BackReferencedTriggerID descpb.TriggerID
+	RoutineIDs              []descpb.ID
+}
+
+// RemoveTriggerBackReferencesInRoutines removes back-references to a trigger
+// from referenced functions.
+type RemoveTriggerBackReferencesInRoutines struct {
+	immediateMutationOp
+	BackReferencedTableID   descpb.ID
+	BackReferencedTriggerID descpb.TriggerID
+	RoutineIDs              []descpb.ID
+}
+
+// AddPolicyBackReferenceInFunctions adds back references to a policy from
+// referenced functions.
+type AddPolicyBackReferenceInFunctions struct {
+	immediateMutationOp
+	BackReferencedTableID  descpb.ID
+	BackReferencedPolicyID descpb.PolicyID
+	FunctionIDs            []descpb.ID
+}
+
+// RemovePolicyBackReferenceInFunctions removes back-references to a policy
+// from referenced functions.
+type RemovePolicyBackReferenceInFunctions struct {
+	immediateMutationOp
+	BackReferencedTableID  descpb.ID
+	BackReferencedPolicyID descpb.PolicyID
 	FunctionIDs            []descpb.ID
 }
 
@@ -826,6 +991,12 @@ type SetFunctionBody struct {
 	Body scpb.FunctionBody
 }
 
+type SetFunctionSecurity struct {
+	immediateMutationOp
+	FunctionID descpb.ID
+	Security   catpb.Function_Security
+}
+
 type UpdateFunctionTypeReferences struct {
 	immediateMutationOp
 	FunctionID descpb.ID
@@ -839,6 +1010,12 @@ type UpdateFunctionRelationReferences struct {
 	ViewReferences     []scpb.FunctionBody_ViewReference
 	SequenceIDs        []descpb.ID
 	FunctionReferences []descpb.ID
+}
+
+type UpdateTableBackReferencesInRelations struct {
+	immediateMutationOp
+	TableID     descpb.ID
+	RelationIDs []descpb.ID
 }
 
 type SetObjectParentID struct {
@@ -886,16 +1063,88 @@ type CreateDatabaseDescriptor struct {
 	DatabaseID descpb.ID
 }
 
+// AddNamedRangeZoneConfig adds a zone config to a named range.
+type AddNamedRangeZoneConfig struct {
+	immediateMutationOp
+	RangeName  zonepb.NamedZone
+	ZoneConfig zonepb.ZoneConfig
+}
+
+// DiscardNamedRangeZoneConfig discards a zone config from a named range.
+type DiscardNamedRangeZoneConfig struct {
+	immediateMutationOp
+	RangeName zonepb.NamedZone
+}
+
 // AddDatabaseZoneConfig adds a zone config to a database.
 type AddDatabaseZoneConfig struct {
 	immediateMutationOp
 	DatabaseID descpb.ID
-	ZoneConfig *zonepb.ZoneConfig
+	ZoneConfig zonepb.ZoneConfig
+}
+
+// DiscardZoneConfig discards the zone config for the given ID. For table IDs,
+// we use DiscardTableZoneConfig as some extra work is needed for subzones.
+type DiscardZoneConfig struct {
+	immediateMutationOp
+	DescID descpb.ID
+}
+
+// DiscardTableZoneConfig discards the zone config for the given table ID. If
+// the table has subzones, we mark the table's zone config as a subzone
+// placeholder.
+type DiscardTableZoneConfig struct {
+	immediateMutationOp
+	TableID    descpb.ID
+	ZoneConfig zonepb.ZoneConfig
+}
+
+// DiscardSubzoneConfig discards the subzone config for the given descriptor ID.
+// If this is the only subzone for the table, we delete the entry from
+// system.zones.
+type DiscardSubzoneConfig struct {
+	immediateMutationOp
+	TableID              descpb.ID
+	Subzone              zonepb.Subzone
+	SubzoneSpans         []zonepb.SubzoneSpan
+	SubzoneIndexToDelete int32
 }
 
 // AddTableZoneConfig adds a zone config to a table.
 type AddTableZoneConfig struct {
 	immediateMutationOp
 	TableID    descpb.ID
-	ZoneConfig *zonepb.ZoneConfig
+	ZoneConfig zonepb.ZoneConfig
+}
+
+// AddIndexZoneConfig adds a zone config to an index.
+type AddIndexZoneConfig struct {
+	immediateMutationOp
+	TableID              descpb.ID
+	Subzone              zonepb.Subzone
+	SubzoneSpans         []zonepb.SubzoneSpan
+	SubzoneIndexToDelete int32
+}
+
+// AddPartitionZoneConfig adds a zone config to a partition.
+type AddPartitionZoneConfig struct {
+	immediateMutationOp
+	TableID              descpb.ID
+	Subzone              zonepb.Subzone
+	SubzoneSpans         []zonepb.SubzoneSpan
+	SubzoneIndexToDelete int32
+}
+
+// EnableRowLevelSecurityMode sets the row-level security mode on a table.
+type EnableRowLevelSecurityMode struct {
+	immediateMutationOp
+	TableID descpb.ID
+	Enabled bool
+}
+
+// ForcedRowLevelSecurityMode configures the force setting of row-level security on a table.
+type ForcedRowLevelSecurityMode struct {
+	immediateMutationOp
+	TableID descpb.ID
+	Forced  bool
 }

@@ -1,17 +1,13 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/sysutil"
 	"github.com/cockroachdb/errors"
@@ -88,7 +84,7 @@ func IsDiskFull(fs vfs.FS, spec base.StoreSpec) (bool, error) {
 // smaller.
 func BallastSizeBytes(spec base.StoreSpec, diskUsage vfs.DiskUsage) int64 {
 	if spec.BallastSize != nil {
-		v := spec.BallastSize.InBytes
+		v := spec.BallastSize.Capacity
 		if spec.BallastSize.Percent != 0 {
 			v = int64(float64(diskUsage.TotalBytes) * spec.BallastSize.Percent / 100)
 		}
@@ -108,8 +104,8 @@ func BallastSizeBytes(spec base.StoreSpec, diskUsage vfs.DiskUsage) int64 {
 // explicit ballast size (either in bytes or as a percentage of the disk's total
 // capacity), that size is used. A zero value for cacheSize results in no
 // secondary cache.
-func SecondaryCacheBytes(cacheSize base.SizeSpec, diskUsage vfs.DiskUsage) int64 {
-	v := cacheSize.InBytes
+func SecondaryCacheBytes(cacheSize storagepb.SizeSpec, diskUsage vfs.DiskUsage) int64 {
+	v := cacheSize.Capacity
 	if cacheSize.Percent != 0 {
 		v = int64(float64(diskUsage.TotalBytes) * cacheSize.Percent / 100)
 	}

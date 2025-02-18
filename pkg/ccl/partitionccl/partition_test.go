@@ -1,10 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package partitionccl
 
@@ -57,32 +54,19 @@ func TestRemovePartitioningExpiredLicense(t *testing.T) {
 	// Remove the enterprise license.
 	defer utilccl.TestingDisableEnterprise()()
 
-	const partitionErr = "use of partitions requires an enterprise license"
-	const zoneErr = "use of replication zones on indexes or partitions requires an enterprise license"
-	expectErr := func(q string, expErr string) {
-		t.Helper()
-		sqlDB.ExpectErr(t, expErr, q)
-	}
+	// Partitions and zone configs can now be modified without a valid license.
+	sqlDB.Exec(t, `ALTER TABLE t PARTITION BY LIST (a) (PARTITION p2 VALUES IN (2))`)
+	sqlDB.Exec(t, `ALTER INDEX t@i PARTITION BY RANGE (a) (PARTITION p45 VALUES FROM (4) TO (5))`)
+	sqlDB.Exec(t, `ALTER PARTITION p2 OF TABLE t CONFIGURE ZONE USING DEFAULT`)
+	sqlDB.Exec(t, `ALTER PARTITION p45 OF INDEX t@i CONFIGURE ZONE USING DEFAULT`)
+	sqlDB.Exec(t, `ALTER INDEX t@t_pkey CONFIGURE ZONE USING DEFAULT`)
+	sqlDB.Exec(t, `ALTER INDEX t@i CONFIGURE ZONE USING DEFAULT`)
 
-	// Partitions and zone configs cannot be modified without a valid license.
-	expectErr(`ALTER TABLE t PARTITION BY LIST (a) (PARTITION p2 VALUES IN (2))`, partitionErr)
-	expectErr(`ALTER INDEX t@i PARTITION BY RANGE (a) (PARTITION p45 VALUES FROM (4) TO (5))`, partitionErr)
-	expectErr(`ALTER PARTITION p1 OF TABLE t CONFIGURE ZONE USING DEFAULT`, zoneErr)
-	expectErr(`ALTER PARTITION p34 OF INDEX t@i CONFIGURE ZONE USING DEFAULT`, zoneErr)
-	expectErr(`ALTER INDEX t@t_pkey CONFIGURE ZONE USING DEFAULT`, zoneErr)
-	expectErr(`ALTER INDEX t@i CONFIGURE ZONE USING DEFAULT`, zoneErr)
-
-	// But they can be removed.
+	// And they can be removed.
 	sqlDB.Exec(t, `ALTER TABLE t PARTITION BY NOTHING`)
 	sqlDB.Exec(t, `ALTER INDEX t@i PARTITION BY NOTHING`)
 	sqlDB.Exec(t, `ALTER INDEX t@t_pkey CONFIGURE ZONE DISCARD`)
 	sqlDB.Exec(t, `ALTER INDEX t@i CONFIGURE ZONE DISCARD`)
-
-	// Once removed, they cannot be added back.
-	expectErr(`ALTER TABLE t PARTITION BY LIST (a) (PARTITION p2 VALUES IN (2))`, partitionErr)
-	expectErr(`ALTER INDEX t@i PARTITION BY RANGE (a) (PARTITION p45 VALUES FROM (4) TO (5))`, partitionErr)
-	expectErr(`ALTER INDEX t@t_pkey CONFIGURE ZONE USING DEFAULT`, zoneErr)
-	expectErr(`ALTER INDEX t@i CONFIGURE ZONE USING DEFAULT`, zoneErr)
 }
 
 // Test that dropping an enum value fails if there's a concurrent index drop
@@ -90,6 +74,7 @@ func TestRemovePartitioningExpiredLicense(t *testing.T) {
 // would be bad if we rolled back the dropping of the index.
 func TestDropEnumValueWithConcurrentPartitionedIndexDrop(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
 
 	var s serverutils.TestServerInterface
 	var sqlDB *gosql.DB
@@ -146,10 +131,14 @@ SELECT count(*) > 0
 	} {
 		tdb.Exec(t, stmt)
 	}
-	// Run a transaction to drop the index and the enum value.
+	// Run a transaction to drop the index and the enum value. The statements
+	// must not autocommit in order for the testing knobs to work.
 	errCh := make(chan error)
 	go func() {
 		errCh <- crdb.ExecuteTx(ctx, sqlDB, nil, func(tx *gosql.Tx) error {
+			if _, err := tx.Exec("SET LOCAL autocommit_before_ddl = false"); err != nil {
+				return err
+			}
 			if _, err := tx.Exec("drop index tbl@idx;"); err != nil {
 				return err
 			}
@@ -164,7 +153,7 @@ SELECT count(*) > 0
 		tdb.QueryRow(t, `
 SELECT bool_and(done)
   FROM (
-        SELECT status NOT IN `+jobs.NonTerminalStatusTupleString+` AS done
+        SELECT status NOT IN `+jobs.NonTerminalStateTupleString+` AS done
           FROM [SHOW JOBS]
          WHERE job_type = 'TYPEDESC SCHEMA CHANGE'
        );`).

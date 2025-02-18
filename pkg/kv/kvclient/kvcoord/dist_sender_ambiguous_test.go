@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord_test
 
@@ -379,7 +374,7 @@ func TestTransactionUnexpectedlyCommitted(t *testing.T) {
 	})
 	defer tc.Stopper().Stop(ctx)
 
-	requireRangeLease := func(t *testing.T, desc roachpb.RangeDescriptor, serverIdx int) {
+	requireLeaseUpgrade := func(t *testing.T, desc roachpb.RangeDescriptor, serverIdx int) {
 		t.Helper()
 		testutils.SucceedsSoon(t, func() error {
 			hint := tc.Target(serverIdx)
@@ -400,10 +395,7 @@ func TestTransactionUnexpectedlyCommitted(t *testing.T) {
 			if curLease.Speculative() {
 				return errors.Errorf("only had speculative lease for %s", desc)
 			}
-			if !kvserver.ExpirationLeasesOnly.Get(&tc.Server(0).ClusterSettings().SV) &&
-				curLease.Type() != roachpb.LeaseEpoch {
-				return errors.Errorf("awaiting upgrade to epoch-based lease for %s", desc)
-			}
+			tc.MaybeWaitForLeaseUpgrade(ctx, t, desc)
 			t.Logf("valid lease info for r%d: %v", desc.RangeID, curLease)
 			return nil
 		})
@@ -444,9 +436,9 @@ func TestTransactionUnexpectedlyCommitted(t *testing.T) {
 		firstRange := tc.LookupRangeOrFatal(t, keyA)
 		secondRange := tc.LookupRangeOrFatal(t, keyB)
 		tc.TransferRangeLeaseOrFatal(t, firstRange, tc.Target(0))
-		requireRangeLease(t, firstRange, 0)
+		requireLeaseUpgrade(t, firstRange, 0)
 		tc.TransferRangeLeaseOrFatal(t, secondRange, tc.Target(1))
-		requireRangeLease(t, secondRange, 1)
+		requireLeaseUpgrade(t, secondRange, 1)
 
 		return func() {
 			defer restoreAfterSubTest()
@@ -1374,7 +1366,7 @@ func TestTransactionUnexpectedlyCommitted(t *testing.T) {
 		// Place second range on n1 (same as first).
 		secondRange := tc.LookupRangeOrFatal(t, keyB)
 		tc.TransferRangeLeaseOrFatal(t, secondRange, tc.Target(0))
-		requireRangeLease(t, secondRange, 0)
+		requireLeaseUpgrade(t, secondRange, 0)
 
 		// Operation functions.
 		execTxn2 := func(t *testing.T, name string) error {
@@ -1492,7 +1484,7 @@ func TestTransactionUnexpectedlyCommitted(t *testing.T) {
 		// Place second range on n1 (same as first).
 		secondRange := tc.LookupRangeOrFatal(t, keyB)
 		tc.TransferRangeLeaseOrFatal(t, secondRange, tc.Target(0))
-		requireRangeLease(t, secondRange, 0)
+		requireLeaseUpgrade(t, secondRange, 0)
 
 		// Operation functions.
 		execTxn2 := func(t *testing.T, name string) error {
@@ -1623,7 +1615,7 @@ func TestTransactionUnexpectedlyCommitted(t *testing.T) {
 		// Place second range on n1 (same as first).
 		secondRange := tc.LookupRangeOrFatal(t, keyB)
 		tc.TransferRangeLeaseOrFatal(t, secondRange, tc.Target(0))
-		requireRangeLease(t, secondRange, 0)
+		requireLeaseUpgrade(t, secondRange, 0)
 
 		// Operation functions.
 		execTxn1 := func(t *testing.T, name string) error {

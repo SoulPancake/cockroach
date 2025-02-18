@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+# Copyright 2023 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 set -euxo pipefail
 
 dir="$(dirname $(dirname $(dirname $(dirname $(dirname $(dirname "${0}"))))))"
@@ -48,6 +54,7 @@ cat build/deploy-redhat/Dockerfile
 docker build --no-cache \
   --pull \
   --label release=$rhel_release \
+  --label version=$version \
   --tag="${rhel_repository}:${version}" \
   build/deploy-redhat
 tc_end_block "Rebuild docker image"

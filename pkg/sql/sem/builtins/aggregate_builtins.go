@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package builtins
 
@@ -352,7 +347,7 @@ var aggregates = map[string]builtinDefinition{
 	),
 
 	"count": makeBuiltin(tree.FunctionProperties{},
-		makeAggOverload([]*types.T{types.Any}, types.Int, newCountAggregate,
+		makeAggOverload([]*types.T{types.AnyElement}, types.Int, newCountAggregate,
 			"Calculates the number of selected elements.", volatility.Immutable, true /* calledOnNullInput */),
 	),
 
@@ -531,21 +526,21 @@ var aggregates = map[string]builtinDefinition{
 	),
 
 	"json_agg": makeBuiltin(tree.FunctionProperties{},
-		makeAggOverload([]*types.T{types.Any}, types.Jsonb, newJSONAggregate,
+		makeAggOverload([]*types.T{types.AnyElement}, types.Jsonb, newJSONAggregate,
 			"Aggregates values as a JSON or JSONB array.", volatility.Stable, true /* calledOnNullInput */),
 	),
 
 	"jsonb_agg": makeBuiltin(tree.FunctionProperties{},
-		makeAggOverload([]*types.T{types.Any}, types.Jsonb, newJSONAggregate,
+		makeAggOverload([]*types.T{types.AnyElement}, types.Jsonb, newJSONAggregate,
 			"Aggregates values as a JSON or JSONB array.", volatility.Stable, true /* calledOnNullInput */),
 	),
 
 	"json_object_agg": makeBuiltin(tree.FunctionProperties{},
-		makeAggOverload([]*types.T{types.String, types.Any}, types.Jsonb, newJSONObjectAggregate,
+		makeAggOverload([]*types.T{types.String, types.AnyElement}, types.Jsonb, newJSONObjectAggregate,
 			"Aggregates values as a JSON or JSONB object.", volatility.Stable, true /* calledOnNullInput */),
 	),
 	"jsonb_object_agg": makeBuiltin(tree.FunctionProperties{},
-		makeAggOverload([]*types.T{types.String, types.Any}, types.Jsonb, newJSONObjectAggregate,
+		makeAggOverload([]*types.T{types.String, types.AnyElement}, types.Jsonb, newJSONObjectAggregate,
 			"Aggregates values as a JSON or JSONB object.", volatility.Stable, true /* calledOnNullInput */),
 	),
 
@@ -596,7 +591,7 @@ var aggregates = map[string]builtinDefinition{
 
 	AnyNotNull: makePrivate(makeBuiltin(tree.FunctionProperties{},
 		makeImmutableAggOverloadWithReturnType(
-			[]*types.T{types.Any},
+			[]*types.T{types.AnyElement},
 			tree.IdentityReturnType(0),
 			newAnyNotNullAggregate,
 			"Returns an arbitrary not-NULL value, or NULL if none exists.",
@@ -5081,14 +5076,14 @@ func validateInputFractions(datum tree.Datum) ([]float64, bool, error) {
 		return nil
 	}
 
-	if datum.ResolvedType().Identical(types.Float) {
+	if t := datum.ResolvedType(); t.Family() == types.FloatFamily {
 		fraction := float64(tree.MustBeDFloat(datum))
 		singleInput = true
 		if err := validate(fraction); err != nil {
 			return nil, false, err
 		}
 		fractions = append(fractions, fraction)
-	} else if datum.ResolvedType().Equivalent(types.FloatArray) {
+	} else if t.Family() == types.ArrayFamily && t.ArrayContents().Family() == types.FloatFamily {
 		fractionsDatum := tree.MustBeDArray(datum)
 		for _, f := range fractionsDatum.Array {
 			fraction := float64(tree.MustBeDFloat(f))
@@ -5271,7 +5266,7 @@ func (a *percentileContAggregate) Result() (tree.Datum, error) {
 			ceilRowNumber := int(math.Ceil(rowNumber))
 			floorRowNumber := int(math.Floor(rowNumber))
 
-			if a.arr.ParamTyp.Identical(types.Float) {
+			if t := a.arr.ParamTyp; t.Family() == types.FloatFamily {
 				var target float64
 				if rowNumber == float64(ceilRowNumber) && rowNumber == float64(floorRowNumber) {
 					target = float64(tree.MustBeDFloat(a.arr.Array[int(rowNumber)-1]))
@@ -5284,7 +5279,7 @@ func (a *percentileContAggregate) Result() (tree.Datum, error) {
 				if err := res.Append(tree.NewDFloat(tree.DFloat(target))); err != nil {
 					return nil, err
 				}
-			} else if a.arr.ParamTyp.Family() == types.IntervalFamily {
+			} else if t.Family() == types.IntervalFamily {
 				var target *tree.DInterval
 				if rowNumber == float64(ceilRowNumber) && rowNumber == float64(floorRowNumber) {
 					target = tree.MustBeDInterval(a.arr.Array[int(rowNumber)-1])

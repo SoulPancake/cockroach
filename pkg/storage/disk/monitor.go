@@ -1,12 +1,7 @@
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package disk
 
@@ -61,11 +56,10 @@ func NewMonitorManager(fs vfs.FS) *MonitorManager {
 // goroutine to track its disk stats, otherwise it returns a Monitor handle
 // to access the stats.
 func (m *MonitorManager) Monitor(path string) (*Monitor, error) {
-	finfo, err := m.fs.Stat(path)
+	dev, err := getDeviceIDFromPath(m.fs, path)
 	if err != nil {
 		return nil, errors.Wrapf(err, "fstat(%s)", path)
 	}
-	dev := deviceIDFromFileInfo(finfo)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -235,9 +229,7 @@ type Monitor struct {
 
 // CumulativeStats returns the most-recent stats observed.
 func (m *Monitor) CumulativeStats() (Stats, error) {
-	if event, err := m.tracer.Latest(); err != nil {
-		return Stats{}, err
-	} else if event.err != nil {
+	if event := m.tracer.Latest(); event.err != nil {
 		return Stats{}, event.err
 	} else {
 		return event.stats, nil
@@ -292,4 +284,12 @@ func (m *Monitor) Close() {
 		m.manager.unrefDisk(m.monitoredDisk)
 		m.monitoredDisk = nil
 	}
+}
+
+func getDeviceIDFromPath(fs vfs.FS, path string) (DeviceID, error) {
+	finfo, err := fs.Stat(path)
+	if err != nil {
+		return DeviceID{}, errors.Wrapf(err, "fstat(%s)", path)
+	}
+	return deviceIDFromFileInfo(finfo), nil
 }

@@ -1,12 +1,7 @@
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -19,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
@@ -31,7 +27,6 @@ func registerMultiRegionSystemDatabase(r registry.Registry) {
 		Name:             "schemachange/multiregion/system-database",
 		Owner:            registry.OwnerSQLFoundations,
 		Timeout:          time.Hour * 1,
-		RequiresLicense:  true,
 		Cluster:          clusterSpec,
 		CompatibleClouds: registry.OnlyGCE,
 		Suites:           registry.Suites(registry.Weekly),
@@ -47,7 +42,7 @@ func registerMultiRegionSystemDatabase(r registry.Registry) {
 			conn := c.Conn(ctx, t.L(), 1)
 			defer conn.Close()
 
-			require.NoError(t, WaitFor3XReplication(ctx, t, t.L(), conn))
+			require.NoError(t, roachtestutil.WaitFor3XReplication(ctx, t.L(), conn))
 
 			_, err := conn.ExecContext(ctx, "SET CLUSTER SETTING sql.multiregion.system_database_multiregion.enabled = true")
 			require.NoError(t, err)
@@ -67,10 +62,7 @@ func registerMultiRegionSystemDatabase(r registry.Registry) {
 			// Perform rolling restart to propagate region information to non-primary nodes
 			for i := 2; i <= nodes; i++ {
 				t.WorkerStatus("stop")
-				err := c.StopCockroachGracefullyOnNode(ctx, t.L(), i)
-				if err != nil {
-					return
-				}
+				c.Stop(ctx, t.L(), option.NewStopOpts(option.Graceful(shutdownGracePeriod)), c.Node(i))
 				t.WorkerStatus("start")
 				startOpts := option.DefaultStartOpts()
 				c.Start(ctx, t.L(), startOpts, install.MakeClusterSettings(install.SecureOption(false)), c.Node(i))
@@ -114,7 +106,7 @@ func registerMultiRegionSystemDatabase(r registry.Registry) {
 			}
 
 			for i := 2; i <= nodes; i++ {
-				require.NoError(t, WaitFor3XReplication(ctx, t, t.L(), conn))
+				require.NoError(t, roachtestutil.WaitFor3XReplication(ctx, t.L(), conn))
 
 				t.WorkerStatus("stop")
 				c.Run(ctx, option.WithNodes(c.Node(i)), "killall -9 cockroach")

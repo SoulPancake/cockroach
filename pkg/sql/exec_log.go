@@ -1,19 +1,13 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
 import (
 	"context"
 	"strings"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/appstatspb"
@@ -28,7 +22,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
+	"github.com/cockroachdb/crlib/crtime"
 	"github.com/cockroachdb/redact"
 )
 
@@ -137,7 +132,7 @@ func (p *planner) maybeLogStatement(
 	numRetries, txnCounter, rows, stmtCount int,
 	bulkJobId uint64,
 	err error,
-	queryReceived time.Time,
+	queryReceived crtime.Mono,
 	hasAdminRoleCache *HasAdminRoleCache,
 	telemetryLoggingMetrics *telemetryLoggingMetrics,
 	implicitTxn bool,
@@ -157,7 +152,7 @@ func (p *planner) maybeLogStatementInternal(
 	numRetries, txnCounter, rows, stmtCount int,
 	bulkJobId uint64,
 	err error,
-	startTime time.Time,
+	startTime crtime.Mono,
 	hasAdminRoleCache *HasAdminRoleCache,
 	telemetryMetrics *telemetryLoggingMetrics,
 	implicitTxn bool,
@@ -200,7 +195,7 @@ func (p *planner) maybeLogStatementInternal(
 	// Compute the pieces of data that are going to be included in logged events.
 
 	// The duration of the query so far. Age is the duration expressed in milliseconds.
-	queryDuration := timeutil.Since(startTime)
+	queryDuration := startTime.Elapsed()
 	age := float32(queryDuration.Nanoseconds()) / 1e6
 	// The text of the error encountered, if the query did in fact end
 	// in error.
@@ -363,56 +358,58 @@ func (p *planner) maybeLogStatementInternal(
 		defer releaseSampledQuery(sampledQuery)
 
 		*sampledQuery = eventpb.SampledQuery{
-			CommonSQLExecDetails:                  execDetails,
-			SkippedQueries:                        skippedQueries,
-			CostEstimate:                          p.curPlan.instrumentation.costEstimate,
-			Distribution:                          p.curPlan.instrumentation.distribution.String(),
-			PlanGist:                              p.curPlan.instrumentation.planGist.String(),
-			SessionID:                             p.extendedEvalCtx.SessionID.String(),
-			Database:                              p.CurrentDatabase(),
-			StatementID:                           p.stmt.QueryID.String(),
-			TransactionID:                         txnID,
-			StatementFingerprintID:                stmtFingerprintID.String(),
-			MaxFullScanRowsEstimate:               p.curPlan.instrumentation.maxFullScanRows,
-			TotalScanRowsEstimate:                 p.curPlan.instrumentation.totalScanRows,
-			OutputRowsEstimate:                    p.curPlan.instrumentation.outputRows,
-			StatsAvailable:                        p.curPlan.instrumentation.statsAvailable,
-			NanosSinceStatsCollected:              int64(p.curPlan.instrumentation.nanosSinceStatsCollected),
-			BytesRead:                             p.curPlan.instrumentation.topLevelStats.bytesRead,
-			RowsRead:                              p.curPlan.instrumentation.topLevelStats.rowsRead,
-			RowsWritten:                           p.curPlan.instrumentation.topLevelStats.rowsWritten,
-			InnerJoinCount:                        int64(p.curPlan.instrumentation.joinTypeCounts[descpb.InnerJoin]),
-			LeftOuterJoinCount:                    int64(p.curPlan.instrumentation.joinTypeCounts[descpb.LeftOuterJoin]),
-			FullOuterJoinCount:                    int64(p.curPlan.instrumentation.joinTypeCounts[descpb.FullOuterJoin]),
-			SemiJoinCount:                         int64(p.curPlan.instrumentation.joinTypeCounts[descpb.LeftSemiJoin]),
-			AntiJoinCount:                         int64(p.curPlan.instrumentation.joinTypeCounts[descpb.LeftAntiJoin]),
-			IntersectAllJoinCount:                 int64(p.curPlan.instrumentation.joinTypeCounts[descpb.IntersectAllJoin]),
-			ExceptAllJoinCount:                    int64(p.curPlan.instrumentation.joinTypeCounts[descpb.ExceptAllJoin]),
-			HashJoinCount:                         int64(p.curPlan.instrumentation.joinAlgorithmCounts[exec.HashJoin]),
-			CrossJoinCount:                        int64(p.curPlan.instrumentation.joinAlgorithmCounts[exec.CrossJoin]),
-			IndexJoinCount:                        int64(p.curPlan.instrumentation.joinAlgorithmCounts[exec.IndexJoin]),
-			LookupJoinCount:                       int64(p.curPlan.instrumentation.joinAlgorithmCounts[exec.LookupJoin]),
-			MergeJoinCount:                        int64(p.curPlan.instrumentation.joinAlgorithmCounts[exec.MergeJoin]),
-			InvertedJoinCount:                     int64(p.curPlan.instrumentation.joinAlgorithmCounts[exec.InvertedJoin]),
-			ApplyJoinCount:                        int64(p.curPlan.instrumentation.joinAlgorithmCounts[exec.ApplyJoin]),
-			ZigZagJoinCount:                       int64(p.curPlan.instrumentation.joinAlgorithmCounts[exec.ZigZagJoin]),
-			ContentionNanos:                       queryLevelStats.ContentionTime.Nanoseconds(),
-			Regions:                               queryLevelStats.Regions,
-			SQLInstanceIDs:                        queryLevelStats.SQLInstanceIDs,
-			KVNodeIDs:                             queryLevelStats.KVNodeIDs,
-			UsedFollowerRead:                      queryLevelStats.UsedFollowerRead,
-			NetworkBytesSent:                      queryLevelStats.NetworkBytesSent,
-			MaxMemUsage:                           queryLevelStats.MaxMemUsage,
-			MaxDiskUsage:                          queryLevelStats.MaxDiskUsage,
-			KVBytesRead:                           queryLevelStats.KVBytesRead,
-			KVPairsRead:                           queryLevelStats.KVPairsRead,
-			KVRowsRead:                            queryLevelStats.KVRowsRead,
-			KvTimeNanos:                           queryLevelStats.KVTime.Nanoseconds(),
-			KvGrpcCalls:                           queryLevelStats.KVBatchRequestsIssued,
-			NetworkMessages:                       queryLevelStats.NetworkMessages,
-			CpuTimeNanos:                          queryLevelStats.CPUTime.Nanoseconds(),
-			IndexRecommendations:                  indexRecs,
-			Indexes:                               p.curPlan.instrumentation.indexesUsed,
+			CommonSQLExecDetails:     execDetails,
+			SkippedQueries:           skippedQueries,
+			CostEstimate:             p.curPlan.instrumentation.costEstimate,
+			Distribution:             p.curPlan.instrumentation.distribution.String(),
+			PlanGist:                 p.curPlan.instrumentation.planGist.String(),
+			SessionID:                p.extendedEvalCtx.SessionID.String(),
+			Database:                 p.CurrentDatabase(),
+			StatementID:              p.stmt.QueryID.String(),
+			TransactionID:            txnID,
+			StatementFingerprintID:   stmtFingerprintID.String(),
+			MaxFullScanRowsEstimate:  p.curPlan.instrumentation.maxFullScanRows,
+			TotalScanRowsEstimate:    p.curPlan.instrumentation.totalScanRows,
+			OutputRowsEstimate:       p.curPlan.instrumentation.outputRows,
+			StatsAvailable:           p.curPlan.instrumentation.statsAvailable,
+			NanosSinceStatsCollected: int64(p.curPlan.instrumentation.nanosSinceStatsCollected),
+			BytesRead:                p.curPlan.instrumentation.topLevelStats.bytesRead,
+			RowsRead:                 p.curPlan.instrumentation.topLevelStats.rowsRead,
+			RowsWritten:              p.curPlan.instrumentation.topLevelStats.rowsWritten,
+			InnerJoinCount:           int64(p.curPlan.instrumentation.joinTypeCounts[descpb.InnerJoin]),
+			LeftOuterJoinCount:       int64(p.curPlan.instrumentation.joinTypeCounts[descpb.LeftOuterJoin]),
+			FullOuterJoinCount:       int64(p.curPlan.instrumentation.joinTypeCounts[descpb.FullOuterJoin]),
+			SemiJoinCount:            int64(p.curPlan.instrumentation.joinTypeCounts[descpb.LeftSemiJoin]),
+			AntiJoinCount:            int64(p.curPlan.instrumentation.joinTypeCounts[descpb.LeftAntiJoin]),
+			IntersectAllJoinCount:    int64(p.curPlan.instrumentation.joinTypeCounts[descpb.IntersectAllJoin]),
+			ExceptAllJoinCount:       int64(p.curPlan.instrumentation.joinTypeCounts[descpb.ExceptAllJoin]),
+			HashJoinCount:            int64(p.curPlan.instrumentation.joinAlgorithmCounts[exec.HashJoin]),
+			CrossJoinCount:           int64(p.curPlan.instrumentation.joinAlgorithmCounts[exec.CrossJoin]),
+			IndexJoinCount:           int64(p.curPlan.instrumentation.joinAlgorithmCounts[exec.IndexJoin]),
+			LookupJoinCount:          int64(p.curPlan.instrumentation.joinAlgorithmCounts[exec.LookupJoin]),
+			MergeJoinCount:           int64(p.curPlan.instrumentation.joinAlgorithmCounts[exec.MergeJoin]),
+			InvertedJoinCount:        int64(p.curPlan.instrumentation.joinAlgorithmCounts[exec.InvertedJoin]),
+			ApplyJoinCount:           int64(p.curPlan.instrumentation.joinAlgorithmCounts[exec.ApplyJoin]),
+			ZigZagJoinCount:          int64(p.curPlan.instrumentation.joinAlgorithmCounts[exec.ZigZagJoin]),
+			ContentionNanos:          queryLevelStats.ContentionTime.Nanoseconds(),
+			Regions:                  queryLevelStats.Regions,
+			SQLInstanceIDs:           queryLevelStats.SQLInstanceIDs,
+			KVNodeIDs:                queryLevelStats.KVNodeIDs,
+			UsedFollowerRead:         queryLevelStats.UsedFollowerRead,
+			NetworkBytesSent:         queryLevelStats.NetworkBytesSent,
+			MaxMemUsage:              queryLevelStats.MaxMemUsage,
+			MaxDiskUsage:             queryLevelStats.MaxDiskUsage,
+			KVBytesRead:              queryLevelStats.KVBytesRead,
+			KVPairsRead:              queryLevelStats.KVPairsRead,
+			KVRowsRead:               queryLevelStats.KVRowsRead,
+			KvTimeNanos:              queryLevelStats.KVTime.Nanoseconds(),
+			KvGrpcCalls:              queryLevelStats.KVBatchRequestsIssued,
+			NetworkMessages:          queryLevelStats.NetworkMessages,
+			CpuTimeNanos:             queryLevelStats.CPUTime.Nanoseconds(),
+			IndexRecommendations:     indexRecs,
+			// TODO(mgartner): Use a slice of struct{uint64, uint64} instead of
+			// converting to strings.
+			Indexes:                               p.curPlan.instrumentation.indexesUsed.Strings(),
 			ScanCount:                             int64(p.curPlan.instrumentation.scanCounts[exec.ScanCount]),
 			ScanWithStatsCount:                    int64(p.curPlan.instrumentation.scanCounts[exec.ScanWithStatsCount]),
 			ScanWithStatsForecastCount:            int64(p.curPlan.instrumentation.scanCounts[exec.ScanWithStatsForecastCount]),
@@ -440,7 +437,7 @@ func (p *planner) maybeLogStatementInternal(
 			SchemaChangerMode:                     p.curPlan.instrumentation.schemaChangerMode.String(),
 		}
 
-		p.logOperationalEventsOnlyExternally(ctx, sampledQuery)
+		p.logEventsOnlyExternally(ctx, sampledQuery)
 	}
 }
 
@@ -525,7 +522,7 @@ func (p *planner) logTransaction(
 		}
 	}
 
-	log.StructuredEvent(ctx, sampledTxn)
+	log.StructuredEvent(ctx, severity.INFO, sampledTxn)
 }
 
 func (p *planner) logEventsOnlyExternally(ctx context.Context, entries ...logpb.EventPayload) {
@@ -534,19 +531,5 @@ func (p *planner) logEventsOnlyExternally(ctx context.Context, entries ...logpb.
 	_ = p.logEventsWithOptions(ctx,
 		2, /* depth: we want to use the caller location */
 		eventLogOptions{dst: LogExternally},
-		entries...)
-}
-
-// logOperationalEventsOnlyExternally is a helper that sets redaction
-// options to omit SQL Name redaction. This is used when logging to
-// the telemetry channel when we want additional metadata available.
-func (p *planner) logOperationalEventsOnlyExternally(
-	ctx context.Context, entries ...logpb.EventPayload,
-) {
-	// The API contract for logEventsWithOptions() is that it returns
-	// no error when system.eventlog is not written to.
-	_ = p.logEventsWithOptions(ctx,
-		2, /* depth: we want to use the caller location */
-		eventLogOptions{dst: LogExternally, rOpts: redactionOptions{omitSQLNameRedaction: true}},
 		entries...)
 }

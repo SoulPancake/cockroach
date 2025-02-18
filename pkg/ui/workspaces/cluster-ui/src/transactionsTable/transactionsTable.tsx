@@ -1,17 +1,13 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
 import * as protos from "@cockroachlabs/crdb-protobuf-client";
 import classNames from "classnames/bind";
+import React from "react";
 
+import statsTablePageStyles from "src/statementsTable/statementsTableContent.module.scss";
 import {
   FixFingerprintHexValue,
   Count,
@@ -21,8 +17,8 @@ import {
   appNamesAttr,
   propsToQueryString,
 } from "src/util";
-import statsTablePageStyles from "src/statementsTable/statementsTableContent.module.scss";
 
+import { BarChartOptions } from "../barCharts/barChartFactory";
 import {
   SortedTable,
   ISortedTablePagination,
@@ -37,20 +33,20 @@ import {
   statementFingerprintIdsToText,
   statementFingerprintIdsToSummarizedText,
 } from "../transactionsPage/utils";
-import { BarChartOptions } from "../barCharts/barChartFactory";
 
 import {
   transactionsCountBarChart,
   transactionsBytesReadBarChart,
-  transactionsLatencyBarChart,
+  transactionsServiceLatencyBarChart,
   transactionsContentionBarChart,
   transactionsCPUBarChart,
   transactionsMaxMemUsageBarChart,
   transactionsNetworkBytesBarChart,
   transactionsRetryBarChart,
+  transactionsCommitLatencyBarChart,
 } from "./transactionsBarCharts";
-import { tableClasses } from "./transactionsTableClasses";
 import { transactionLink } from "./transactionsCells";
+import { tableClasses } from "./transactionsTableClasses";
 
 export type Transaction =
   protos.cockroach.server.serverpb.StatementsResponse.IExtendedCollectedTransactionStatistics;
@@ -119,7 +115,11 @@ export function makeTransactionsColumns(
     transactions,
     defaultBarChartOptions,
   );
-  const latencyBar = transactionsLatencyBarChart(
+  const serviceLatencyBar = transactionsServiceLatencyBarChart(
+    transactions,
+    latencyClasses.barChart,
+  );
+  const commitLatencyBar = transactionsCommitLatencyBarChart(
     transactions,
     latencyClasses.barChart,
   );
@@ -212,9 +212,16 @@ export function makeTransactionsColumns(
     {
       name: "time",
       title: statisticsTableTitles.time(statType),
-      cell: latencyBar,
+      cell: serviceLatencyBar,
       className: latencyClasses.column,
       sort: (item: TransactionInfo) => item.stats_data.stats.service_lat.mean,
+    },
+    {
+      name: "commitLatency",
+      title: statisticsTableTitles.commitLatency(statType),
+      cell: commitLatencyBar,
+      className: latencyClasses.column,
+      sort: (item: TransactionInfo) => item.stats_data.stats.commit_lat.mean,
     },
     {
       name: "contention",
